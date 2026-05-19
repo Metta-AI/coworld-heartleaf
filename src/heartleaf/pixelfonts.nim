@@ -16,7 +16,7 @@ type
   PixelFontError* = object of ValueError
     ## Raised when a pixel font cannot be decoded.
 
-  PixelGlyph* = object
+  PixelGlyph* = ref object
     ch*: char
     width*, height*: int
     pixels*: seq[bool]
@@ -35,7 +35,7 @@ type
     found*: bool
     x*, y*: int
 
-  PixelFont* = object
+  PixelFont* = ref object
     height*: int
     spacing*: int
     background*: ColorRGBA
@@ -103,6 +103,7 @@ proc decodePixelFont*(
   spacing = DefaultGlyphSpacing
 ): PixelFont {.raises: [PixelFontError].} =
   ## Decodes a horizontal ASCII font with a yellow width marker row.
+  result = PixelFont()
   if image == nil:
     fail("Pixel font image cannot be nil.")
   if image.width <= 0 or image.height < 2:

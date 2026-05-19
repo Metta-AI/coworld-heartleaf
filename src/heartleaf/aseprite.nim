@@ -1,5 +1,5 @@
 import
-  std/[algorithm, os],
+  std/[algorithm, math, os],
   pixie, zippy,
   heartleaf/protocol
 
@@ -37,42 +37,42 @@ type
     pixelWidth*, pixelHeight*: int
     gridX*, gridY*, gridWidth*, gridHeight*: int
 
-  AsepriteLayer* = object
+  AsepriteLayer* = ref object
     flags*, childLevel*, blendMode*, opacity*: int
     kind*: AsepriteLayerKind
     name*: string
     tilesetIndex*: int
     uuid*: array[16, uint8]
 
-  AsepriteCel* = object
+  AsepriteCel* = ref object
     layerIndex*, x*, y*, opacity*, zIndex*: int
     kind*: AsepriteCelKind
     width*, height*: int
     linkedFrame*: int
     data*: seq[uint8]
 
-  AsepriteFrame* = object
+  AsepriteFrame* = ref object
     duration*: int
     cels*: seq[AsepriteCel]
 
-  AsepriteSprite* = object
+  AsepriteSprite* = ref object
     header*: AsepriteHeader
     layers*: seq[AsepriteLayer]
     frames*: seq[AsepriteFrame]
     palette*: seq[ColorRGBA]
     hasNewPalette: bool
 
-  RgbaSprite* = object
+  RgbaSprite* = ref object
     ## A simple 32-bit RGBA sprite used by the sprite protocol.
     width*, height*: int
     pixels*: seq[uint8]
 
-  Sprite* = object
+  Sprite* = ref object
     ## A palette-indexed sprite used by the legacy framebuffer protocol.
     width*, height*: int
     pixels*: seq[uint8]
 
-  Framebuffer* = object
+  Framebuffer* = ref object
     ## A packed 4-bit framebuffer for the legacy protocol.
     indices*: seq[uint8]
     packed*: seq[uint8]
@@ -91,6 +91,7 @@ const
 
 proc newRgbaSprite*(width, height: int): RgbaSprite =
   ## Allocates one transparent RGBA sprite.
+  result = RgbaSprite()
   result.width = width
   result.height = height
   result.pixels = newSeq[uint8](width * height * 4)
@@ -134,6 +135,132 @@ proc imageRgbaSprite*(image: Image): RgbaSprite =
   for y in 0 ..< image.height:
     for x in 0 ..< image.width:
       result.putPixel(x, y, image[x, y])
+
+proc clamp01(value: float): float =
+  ## Clamps one floating-point value into the unit interval.
+  if value < 0.0:
+    return 0.0
+  if value > 1.0:
+    return 1.0
+  value
+
+proc wrapHue(value: float): float =
+  ## Wraps one hue value into the unit interval.
+  result = value
+  while result < 0.0:
+    result += 1.0
+  while result >= 1.0:
+    result -= 1.0
+
+proc mixHue(source, target, amount: float): float =
+  ## Mixes between two hue values on the shortest color-wheel path.
+  var delta = target - source
+  if delta > 0.5:
+    delta -= 1.0
+  elif delta < -0.5:
+    delta += 1.0
+  wrapHue(source + delta * amount.clamp01())
+
+proc colorToHsv(color: ColorRGBA): tuple[h, s, v: float] =
+  ## Converts one RGB color to HSV values in the unit interval.
+  let
+    r = float(color.r) / 255.0
+    g = float(color.g) / 255.0
+    b = float(color.b) / 255.0
+    maxValue = max(r, max(g, b))
+    minValue = min(r, min(g, b))
+    delta = maxValue - minValue
+  result.v = maxValue
+  if maxValue <= 0.0:
+    return
+  result.s = delta / maxValue
+  if delta <= 0.0:
+    return
+  if maxValue == r:
+    result.h = ((g - b) / delta) / 6.0
+  elif maxValue == g:
+    result.h = (((b - r) / delta) + 2.0) / 6.0
+  else:
+    result.h = (((r - g) / delta) + 4.0) / 6.0
+  result.h = result.h.wrapHue()
+
+proc hsvToColor(h, s, v: float, alpha: uint8): ColorRGBA =
+  ## Converts HSV values in the unit interval to one RGBA color.
+  let
+    hue = h.wrapHue() * 6.0
+    sector = int(floor(hue))
+    fraction = hue - float(sector)
+    value = v.clamp01()
+    saturation = s.clamp01()
+    p = value * (1.0 - saturation)
+    q = value * (1.0 - saturation * fraction)
+    t = value * (1.0 - saturation * (1.0 - fraction))
+  var
+    r = value
+    g = t
+    b = p
+  case sector mod 6
+  of 0:
+    r = value
+    g = t
+    b = p
+  of 1:
+    r = q
+    g = value
+    b = p
+  of 2:
+    r = p
+    g = value
+    b = t
+  of 3:
+    r = p
+    g = q
+    b = value
+  of 4:
+    r = t
+    g = p
+    b = value
+  else:
+    r = value
+    g = p
+    b = q
+  rgba(
+    uint8(round(r * 255.0).clamp(0.0, 255.0)),
+    uint8(round(g * 255.0).clamp(0.0, 255.0)),
+    uint8(round(b * 255.0).clamp(0.0, 255.0)),
+    alpha
+  )
+
+proc hsvTinted*(
+  sprite: RgbaSprite,
+  targetHue,
+  hueMix,
+  saturationScale,
+  valueScale: float
+): RgbaSprite =
+  ## Builds one HSV-tinted copy of an RGBA sprite.
+  result = newRgbaSprite(sprite.width, sprite.height)
+  for y in 0 ..< sprite.height:
+    for x in 0 ..< sprite.width:
+      let offset = sprite.pixelOffset(x, y)
+      if sprite.pixels[offset + 3] == 0:
+        continue
+      let hsv = rgba(
+        sprite.pixels[offset],
+        sprite.pixels[offset + 1],
+        sprite.pixels[offset + 2],
+        sprite.pixels[offset + 3]
+      ).colorToHsv()
+      result.putPixel(
+        x,
+        y,
+        hsvToColor(
+          hsv.h.mixHue(targetHue, hueMix),
+          hsv.s * saturationScale,
+          hsv.v * valueScale,
+          sprite.pixels[offset + 3]
+        )
+      )
 
 proc cellRgbaSprite*(image: Image, cellX, cellY, size: int): RgbaSprite =
   ## Slices one square cell from a Pixie image.
@@ -238,6 +365,7 @@ proc nearestPaletteIndex*(pixel: ColorRGBA): uint8 =
 
 proc spriteFromImage*(image: Image): Sprite =
   ## Converts one Pixie image to a palette-indexed sprite.
+  result = Sprite()
   result.width = image.width
   result.height = image.height
   result.pixels = newSeq[uint8](result.width * result.height)
@@ -272,6 +400,7 @@ proc readRequiredSprite*(path: string): Sprite
 
 proc initFramebuffer*(): Framebuffer =
   ## Allocates one legacy framebuffer.
+  result = Framebuffer()
   result.indices = newSeq[uint8](ScreenWidth * ScreenHeight)
   result.packed = newSeq[uint8](ProtocolBytes)
 
@@ -491,6 +620,7 @@ proc parseLayer(
   header: AsepriteHeader
 ): AsepriteLayer {.raises: [AsepriteError].} =
   ## Reads a layer chunk.
+  result = AsepriteLayer()
   result.flags = data.readU16(pos)
   let kind = data.readU16(pos)
   case kind
@@ -523,6 +653,7 @@ proc parseCel(
   header: AsepriteHeader
 ): AsepriteCel {.raises: [AsepriteError].} =
   ## Reads a cel chunk and stores its raw decoded bytes.
+  result = AsepriteCel()
   result.layerIndex = data.readU16(pos)
   result.x = data.readI16(pos)
   result.y = data.readI16(pos)
@@ -582,7 +713,7 @@ proc parseCel(
   pos.skipTo(chunkEnd)
 
 proc parseOldPalette(
-  aseprite: var AsepriteSprite,
+  aseprite: AsepriteSprite,
   data: string,
   pos: var int,
   chunkEnd: int,
@@ -614,7 +745,7 @@ proc parseOldPalette(
   pos.skipTo(chunkEnd)
 
 proc parsePalette(
-  aseprite: var AsepriteSprite,
+  aseprite: AsepriteSprite,
   data: string,
   pos: var int,
   chunkEnd: int
@@ -642,11 +773,12 @@ proc parsePalette(
   pos.skipTo(chunkEnd)
 
 proc parseFrame(
-  aseprite: var AsepriteSprite,
+  aseprite: AsepriteSprite,
   data: string,
   pos: var int
 ): AsepriteFrame {.raises: [AsepriteError].} =
   ## Reads one frame and all of its chunks.
+  result = AsepriteFrame()
   let
     frameStart = pos
     frameBytes = data.readU32(pos)
@@ -693,6 +825,7 @@ proc parseFrame(
 
 proc decodeAseprite*(data: string): AsepriteSprite {.raises: [AsepriteError].} =
   ## Decodes an aseprite file from memory.
+  result = AsepriteSprite()
   var pos = 0
   result.header = parseHeader(data, pos)
   result.palette = defaultPalette()
@@ -791,12 +924,18 @@ proc sourceCel(
     return cel
   for source in aseprite.frames[cel.linkedFrame].cels:
     if source.layerIndex == cel.layerIndex and source.kind != CelLinked:
-      result = source
-      result.x = cel.x
-      result.y = cel.y
-      result.opacity = cel.opacity
-      result.zIndex = cel.zIndex
-      return
+      return AsepriteCel(
+        layerIndex: source.layerIndex,
+        x: cel.x,
+        y: cel.y,
+        opacity: cel.opacity,
+        zIndex: cel.zIndex,
+        kind: source.kind,
+        width: source.width,
+        height: source.height,
+        linkedFrame: source.linkedFrame,
+        data: source.data
+      )
   cel
 
 proc drawCel(

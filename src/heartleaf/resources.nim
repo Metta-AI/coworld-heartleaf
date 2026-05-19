@@ -6,13 +6,13 @@ type
   ResourceError* = object of ValueError
     ## Raised when a resource file cannot be parsed.
 
-  ResourceRect* = object
+  ResourceRect* = ref object
     ## A named resource rectangle with integer bounds and color.
     name*: string
     x*, y*, w*, h*: int
     color*: ColorRGBA
 
-  ResourceRectDraft = object
+  ResourceRectDraft = ref object
     name: string
     x, y, w, h: int
     hasX, hasY, hasW, hasH: bool
@@ -97,6 +97,8 @@ proc addResourceRect(
   draft: ResourceRectDraft
 ) =
   ## Appends one complete rectangle draft.
+  if draft == nil:
+    return
   if draft.name.len == 0 or
       not draft.hasX or
       not draft.hasY or
@@ -120,7 +122,7 @@ proc loadResourceRects*(path: string): seq[ResourceRect] =
   if not fileExists(path):
     return @[]
   var
-    draft: ResourceRectDraft
+    draft = ResourceRectDraft()
     lineNumber = 0
   for line in lines(path):
     inc lineNumber

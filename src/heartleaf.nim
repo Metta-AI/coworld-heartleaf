@@ -9,6 +9,7 @@ const
   DefaultSeed = 0x484541
   DefaultMaxTicks = 0
   DefaultMaxGames = 0
+  DebugOutlines = false
   MainMapIndex = 0
   HomeMapIndexBase = 1
   UnassignedPlayerIndex = 0x7fffffff
@@ -40,6 +41,17 @@ const
   MinSpawnSpacing = 20
   SpawnScanStep = 4
   HouseSpawnMaxDistance = 96
+  TicksPerSecond = 24
+  DayRealMinutes = 5
+  DayTicks = DayRealMinutes * 60 * TicksPerSecond
+  ScoreScreenTicks = 3 * TicksPerSecond
+  DayStartMinutes = 8 * 60
+  DayEndMinutes = 22 * 60
+  DayStepMinutes = 5
+  DayTotalMinutes = DayEndMinutes - DayStartMinutes
+  DayStepCount = DayTotalMinutes div DayStepMinutes
+  DuskStartMinutes = 17 * 60
+  DayTintCount = 5
   TargetFps = 24.0
   HealthzPath = "/healthz"
   WebSocketPath = "/player"
@@ -59,8 +71,10 @@ const
   SnappyClientJs = "snappyjs.min.js"
   MapLayerId = 0
   UiLayerId = 1
+  ClockLayerId = 2
   MapLayerKind = 0
   UiLayerKind = 3
+  ClockLayerKind = 2
   MapLayerFlags = 1
   UiLayerFlags = 2
   InventoryColumns = 8
@@ -68,33 +82,43 @@ const
   InventoryIconStep = 34
   InventoryUiWidth = InventoryColumns * InventoryIconStep
   InventoryUiHeight = InventoryRows * InventoryIconStep
+  ClockUiWidth = 50
+  ClockUiHeight = 12
+  ClockPadX = 2
+  ClockPadY = 1
+  ClockGlyphGap = 1
   BottomSpriteId = 1
   OverhangSpriteId = 2
-  DebugSpriteId = 3
   HomeBottomSpriteId = 4
   HomeOverhangSpriteId = 5
-  HomeDebugSpriteId = 6
+  MainBottomTintSpriteBase = 10
+  MainOverhangTintSpriteBase = MainBottomTintSpriteBase + DayTintCount
+  HomeBottomTintSpriteBase = MainOverhangTintSpriteBase + DayTintCount
+  HomeOverhangTintSpriteBase = HomeBottomTintSpriteBase + DayTintCount
   FoodSpriteBase = 400
   FoodMarkerSpriteId = FoodSpriteBase + FoodVeggieSlots
   PlayerSpriteBase = 100
   NameSpriteBase = 2000
   ChatSpriteBase = 3000
   InventoryCountSpriteBase = 4000
+  ClockGlyphSpriteBase = 7000
+  ScoreSpriteBase = 7100
   BottomObjectId = 1
   OverhangObjectId = 2
-  DebugObjectId = 3
   PlayerObjectBase = 1000
   NameObjectBase = 2000
   ChatObjectBase = 3000
   GardenObjectBase = 4000
   InventoryObjectBase = 5000
   InventoryCountObjectBase = 6000
+  ClockObjectBase = 7000
+  ScoreObjectBase = 7100
   BottomZ = int(low(int16))
   OverhangZ = 20_000
   GardenMarkerZ = OverhangZ - 1
-  DebugZ = 25_000
   NameZ = 30_000
   ChatZ = 30_001
+  ScoreZ = 30_002
   ChatMaxChars = 48
   NameMaxChars = 14
   ChatLifetimeTicks = 5 * 24
@@ -107,6 +131,11 @@ const
   TextBackR = 0x33'u8
   TextBackG = 0x31'u8
   TextBackB = 0x36'u8
+  ClockGlyphs = "0123456789:"
+  TintHueTargets = [0.80, 0.78, 0.75, 0.70, 0.64]
+  TintHueMixes = [0.18, 0.30, 0.43, 0.57, 0.72]
+  TintSaturationScales = [1.05, 1.12, 1.20, 1.30, 1.38]
+  TintValueScales = [0.86, 0.70, 0.54, 0.39, 0.25]
   FoodNames = [
     "Lettuce",
     "Carrot",
@@ -134,6 +163,13 @@ const
     "Onion"
   ]
 
+when DebugOutlines:
+  const
+    DebugSpriteId = 3
+    HomeDebugSpriteId = 6
+    DebugObjectId = 3
+    DebugZ = 25_000
+
 type
   Direction = enum
     DirDown
@@ -146,17 +182,19 @@ type
   Rect = object
     x, y, w, h: int
 
-  WorldMap = object
+  WorldMap = ref object
     width, height: int
     bottomSprite: RgbaSprite
     overhangSprite: RgbaSprite
+    bottomTints: array[DayTintCount, RgbaSprite]
+    overhangTints: array[DayTintCount, RgbaSprite]
     debugSprite: RgbaSprite
     walkMask: seq[bool]
 
-  GnomeSprites = object
+  GnomeSprites = ref object
     frames: array[Direction, RgbaSprite]
 
-  FoodSprites = object
+  FoodSprites = ref object
     icons: array[FoodVeggieSlots, RgbaSprite]
     marker: RgbaSprite
 
@@ -168,14 +206,14 @@ type
     rect: Rect
     valid: bool
 
-  HomeResources = object
+  HomeResources = ref object
     exit: Rect
     hasExit: bool
     washes: seq[Rect]
     cooks: seq[Rect]
     diners: seq[Rect]
 
-  Player = object
+  Player = ref object
     name: string
     x, y: int
     velX, velY: int
@@ -189,13 +227,13 @@ type
     messageTicks: int
     attackDown: bool
 
-  SpriteCacheEntry = object
+  SpriteCacheEntry = ref object
     spriteId: int
     width: int
     height: int
     pixels: seq[uint8]
 
-  SimServer = object
+  SimServer = ref object
     mainMap: WorldMap
     homeMaps: array[HouseCount, WorldMap]
     debugRects: seq[ResourceRect]
@@ -209,12 +247,16 @@ type
     textFont: PixelFont
     rng: Rand
     tickCount: int
+    dayTick: int
+    scoreTicks: int
+    playerInitPacket: seq[uint8]
+    globalInitPacket: seq[uint8]
 
-  PlayerViewerState = object
+  PlayerViewerState = ref object
     initialized: bool
     spriteCache: seq[SpriteCacheEntry]
 
-  WebSocketAppState = object
+  WebSocketAppState = ref object
     lock: Lock
     inputMasks: Table[WebSocket, uint8]
     lastAppliedMasks: Table[WebSocket, uint8]
@@ -226,12 +268,12 @@ type
     closedSockets: seq[WebSocket]
     tokens: seq[string]
 
-  ServerThreadArgs = object
+  ServerThreadArgs = ref object
     server: ptr Server
     address: string
     port: int
 
-  RunConfig = object
+  RunConfig = ref object
     address: string
     port: int
     seed: int
@@ -240,6 +282,13 @@ type
     tokens: seq[string]
 
 var appState: WebSocketAppState
+
+proc addSpriteProtocolInit(
+  packet: var seq[uint8],
+  sim: SimServer,
+  viewportWidth,
+  viewportHeight: int
+)
 
 proc dataDir(): string =
   ## Returns the Heartleaf data directory.
@@ -332,6 +381,7 @@ proc loadHouses(rects: openArray[ResourceRect]): array[HouseCount, House] =
 
 proc loadHomeResources(rects: openArray[ResourceRect]): HomeResources =
   ## Loads named interaction rectangles from home resource data.
+  result = HomeResources()
   for rect in rects:
     case rect.rectName()
     of "exit":
@@ -371,6 +421,7 @@ proc loadWorldMap(
   debugRects: seq[ResourceRect]
 ): WorldMap =
   ## Loads one layered map with bottom, walkable, and overhang data.
+  result = WorldMap()
   let aseprite = readAseprite(path)
   if aseprite.layers.len < 2:
     raise newException(
@@ -395,6 +446,19 @@ proc loadWorldMap(
       aseprite.layerImage(overhangLayer).imageRgbaSprite()
     else:
       transparentRgbaSprite(result.width, result.height)
+  for i in 0 ..< DayTintCount:
+    result.bottomTints[i] = result.bottomSprite.hsvTinted(
+      TintHueTargets[i],
+      TintHueMixes[i],
+      TintSaturationScales[i],
+      TintValueScales[i]
+    )
+    result.overhangTints[i] = result.overhangSprite.hsvTinted(
+      TintHueTargets[i],
+      TintHueMixes[i],
+      TintSaturationScales[i],
+      TintValueScales[i]
+    )
   result.debugSprite = resourceDebugSprite(
     result.width,
     result.height,
@@ -423,6 +487,8 @@ proc loadGnomeSprites(path: string): seq[GnomeSprites] =
     )
 
   result = newSeq[GnomeSprites](spriteCount div DirectionCount)
+  for i in 0 ..< result.len:
+    result[i] = GnomeSprites()
   for i in 0 ..< spriteCount:
     let
       cellX = i mod cols
@@ -442,6 +508,7 @@ proc loadGnomeSprites(path: string): seq[GnomeSprites] =
 
 proc loadFoodSprites(path: string): FoodSprites =
   ## Loads veggie icons and the garden marker from the food sheet.
+  result = FoodSprites()
   let image = readAsepriteImage(path)
   if image.width < FoodGridCols * FoodSpriteSize or
       image.height < FoodGridRows * FoodSpriteSize:
@@ -463,6 +530,7 @@ proc loadFoodSprites(path: string): FoodSprites =
 
 proc initSimServer(seed = DefaultSeed): SimServer =
   ## Initializes the Heartleaf simulation.
+  result = SimServer()
   let dataRoot = dataDir()
   # Keep asset paths explicit here so startup shows what the game needs.
   let
@@ -489,6 +557,16 @@ proc initSimServer(seed = DefaultSeed): SimServer =
     raise newException(HeartleafError, "Gnome sheet has no gnomes.")
   result.textFont = readPixelFont(tiny5Path)
   result.players = @[]
+  result.playerInitPacket.addSpriteProtocolInit(
+    result,
+    ViewportWidth,
+    ViewportHeight
+  )
+  result.globalInitPacket.addSpriteProtocolInit(
+    result,
+    result.mainMap.width,
+    result.mainMap.height
+  )
 
 proc addU8(packet: var seq[uint8], value: uint8) =
   ## Appends one unsigned byte.
@@ -682,6 +760,30 @@ proc inventoryCountSprite(sim: SimServer, count: int): RgbaSprite =
   result.fillRect(0, 0, width, height, fill)
   sim.blitChatText(result, text, NamePadX, NamePadY)
 
+proc clockGlyphWidth(sim: SimServer, ch: char): int =
+  ## Returns the rendered sprite width for one clock glyph.
+  max(1, sim.textFont.textWidth($ch) + ClockPadX * 2)
+
+proc clockGlyphSprite(sim: SimServer, ch: char): RgbaSprite =
+  ## Builds one individual clock glyph sprite.
+  let
+    width = sim.clockGlyphWidth(ch)
+    height = sim.textFont.height + ClockPadY * 2
+    fill = rgba(TextBackR, TextBackG, TextBackB, 220)
+  result = newRgbaSprite(width, height)
+  result.fillRect(0, 0, width, height, fill)
+  sim.blitChatText(result, $ch, ClockPadX, ClockPadY)
+
+proc scorePanelSprite(sim: SimServer, count: int): RgbaSprite =
+  ## Builds one black score panel showing a collected item count.
+  let
+    text = $count
+    width = max(10, sim.textFont.textWidth(text) + ChatPad * 2)
+    height = sim.textFont.height + ChatPad * 2
+  result = newRgbaSprite(width, height)
+  result.fillRect(0, 0, width, height, rgba(0, 0, 0, 235))
+  sim.blitChatText(result, text, ChatPad, ChatPad)
+
 proc addNameTag(
   packet: var seq[uint8],
   sim: SimServer,
@@ -757,6 +859,40 @@ proc foodSpriteId(foodIndex: int): int =
   ## Returns the sprite id for one veggie inventory icon.
   FoodSpriteBase + foodIndex
 
+proc mainBottomSpriteId(tintIndex: int): int =
+  ## Returns the main map bottom sprite id for one day tint.
+  if tintIndex < 0:
+    return BottomSpriteId
+  MainBottomTintSpriteBase + tintIndex
+
+proc mainOverhangSpriteId(tintIndex: int): int =
+  ## Returns the main map overhang sprite id for one day tint.
+  if tintIndex < 0:
+    return OverhangSpriteId
+  MainOverhangTintSpriteBase + tintIndex
+
+proc homeBottomSpriteId(tintIndex: int): int =
+  ## Returns the home map bottom sprite id for one day tint.
+  if tintIndex < 0:
+    return HomeBottomSpriteId
+  HomeBottomTintSpriteBase + tintIndex
+
+proc homeOverhangSpriteId(tintIndex: int): int =
+  ## Returns the home map overhang sprite id for one day tint.
+  if tintIndex < 0:
+    return HomeOverhangSpriteId
+  HomeOverhangTintSpriteBase + tintIndex
+
+proc clockGlyphIndex(ch: char): int =
+  ## Returns the compact clock sprite slot for one glyph.
+  if ch >= '0' and ch <= '9':
+    return ord(ch) - ord('0')
+  10
+
+proc clockGlyphSpriteId(ch: char): int =
+  ## Returns the sprite id for one clock glyph.
+  ClockGlyphSpriteBase + ch.clockGlyphIndex()
+
 proc foodName(foodIndex: int): string =
   ## Returns the display name for one food slot.
   if foodIndex >= 0 and foodIndex < FoodNames.len:
@@ -772,10 +908,45 @@ proc homeMapIndex(houseIndex: int): int =
   HomeMapIndexBase + houseIndex
 
 proc mapFor(sim: SimServer, mapIndex: int): WorldMap =
-  ## Returns the world map data for one map id.
+  ## Returns the live world map data for one map id.
   if mapIndex.isHomeMap():
     return sim.homeMaps[mapIndex - HomeMapIndexBase]
   sim.mainMap
+
+proc currentDayMinutes(sim: SimServer): int =
+  ## Returns the current in-game minute of the day.
+  let step = min(DayStepCount, sim.dayTick * DayStepCount div DayTicks)
+  DayStartMinutes + step * DayStepMinutes
+
+proc twoDigits(value: int): string =
+  ## Formats one integer as two decimal digits.
+  if value < 10:
+    return "0" & $value
+  $value
+
+proc clockText(sim: SimServer): string =
+  ## Returns the current game clock as HH:MM text.
+  let
+    minutes = sim.currentDayMinutes()
+    hour = minutes div 60
+    minute = minutes mod 60
+  hour.twoDigits() & ":" & minute.twoDigits()
+
+proc dayTintIndex(sim: SimServer): int =
+  ## Returns the active dusk tint index, or -1 during full daylight.
+  let minutes = sim.currentDayMinutes()
+  if minutes < DuskStartMinutes:
+    return -1
+  min(
+    DayTintCount - 1,
+    (minutes - DuskStartMinutes) * DayTintCount div
+      (DayEndMinutes - DuskStartMinutes)
+  )
+
+proc totalItems(player: Player): int =
+  ## Returns the total number of food items in one player inventory.
+  for count in player.inventory:
+    result += count
 
 proc addSpriteProtocolInit(
   packet: var seq[uint8],
@@ -788,6 +959,8 @@ proc addSpriteProtocolInit(
   packet.addViewport(MapLayerId, viewportWidth, viewportHeight)
   packet.addLayer(UiLayerId, UiLayerKind, UiLayerFlags)
   packet.addViewport(UiLayerId, InventoryUiWidth, InventoryUiHeight)
+  packet.addLayer(ClockLayerId, ClockLayerKind, UiLayerFlags)
+  packet.addViewport(ClockLayerId, ClockUiWidth, ClockUiHeight)
   packet.addRgbaSprite(
     BottomSpriteId,
     sim.mainMap.bottomSprite,
@@ -798,11 +971,23 @@ proc addSpriteProtocolInit(
     sim.mainMap.overhangSprite,
     "heartleaf overhang"
   )
-  packet.addRgbaSprite(
-    DebugSpriteId,
-    sim.mainMap.debugSprite,
-    "heartleaf debug"
-  )
+  when DebugOutlines:
+    packet.addRgbaSprite(
+      DebugSpriteId,
+      sim.mainMap.debugSprite,
+      "heartleaf debug"
+    )
+  for i in 0 ..< DayTintCount:
+    packet.addRgbaSprite(
+      mainBottomSpriteId(i),
+      sim.mainMap.bottomTints[i],
+      "heartleaf bottom tint " & $i
+    )
+    packet.addRgbaSprite(
+      mainOverhangSpriteId(i),
+      sim.mainMap.overhangTints[i],
+      "heartleaf overhang tint " & $i
+    )
   packet.addRgbaSprite(
     HomeBottomSpriteId,
     sim.homeMaps[0].bottomSprite,
@@ -813,11 +998,29 @@ proc addSpriteProtocolInit(
     sim.homeMaps[0].overhangSprite,
     "heartleaf home overhang"
   )
-  packet.addRgbaSprite(
-    HomeDebugSpriteId,
-    sim.homeMaps[0].debugSprite,
-    "heartleaf home debug"
-  )
+  when DebugOutlines:
+    packet.addRgbaSprite(
+      HomeDebugSpriteId,
+      sim.homeMaps[0].debugSprite,
+      "heartleaf home debug"
+    )
+  for i in 0 ..< DayTintCount:
+    packet.addRgbaSprite(
+      homeBottomSpriteId(i),
+      sim.homeMaps[0].bottomTints[i],
+      "heartleaf home bottom tint " & $i
+    )
+    packet.addRgbaSprite(
+      homeOverhangSpriteId(i),
+      sim.homeMaps[0].overhangTints[i],
+      "heartleaf home overhang tint " & $i
+    )
+  for ch in ClockGlyphs:
+    packet.addRgbaSprite(
+      ch.clockGlyphSpriteId(),
+      sim.clockGlyphSprite(ch),
+      "clock " & $ch
+    )
   for foodIndex, icon in sim.foods.icons:
     packet.addRgbaSprite(foodSpriteId(foodIndex), icon, foodIndex.foodName())
   packet.addRgbaSprite(
@@ -934,7 +1137,7 @@ proc spawnClear(sim: SimServer, mapIndex, x, y: int): bool =
   true
 
 proc findHouseSpawn(
-  sim: var SimServer,
+  sim: SimServer,
   houseIndex: int,
   spawnX,
   spawnY: var int
@@ -970,7 +1173,7 @@ proc findHouseSpawn(
       y += SpawnScanStep
     radius += SpawnScanStep
 
-proc findMainSpawn(sim: var SimServer, houseIndex = -1): tuple[x, y: int] =
+proc findMainSpawn(sim: SimServer, houseIndex = -1): tuple[x, y: int] =
   ## Returns a walkable main map spawn position.
   var
     spawnX = 0
@@ -999,7 +1202,7 @@ proc findMainSpawn(sim: var SimServer, houseIndex = -1): tuple[x, y: int] =
 
   raise newException(HeartleafError, "Map has no walkable spawn.")
 
-proc findHomeSpawn(sim: var SimServer, mapIndex: int): tuple[x, y: int] =
+proc findHomeSpawn(sim: SimServer, mapIndex: int): tuple[x, y: int] =
   ## Returns a walkable spawn near the top center door of a home map.
   let
     world = sim.mapFor(mapIndex)
@@ -1051,7 +1254,7 @@ proc cleanPlayerName(name: string): string =
     if ch.isSpaceAscii:
       ch = '_'
 
-proc addPlayer(sim: var SimServer, name: string): int =
+proc addPlayer(sim: SimServer, name: string): int =
   ## Adds one player at a walkable spawn.
   var usedHomes: array[HouseCount, bool]
   for player in sim.players:
@@ -1067,7 +1270,8 @@ proc addPlayer(sim: var SimServer, name: string): int =
     return -1
 
   let
-    spawn = sim.findMainSpawn(houseIndex)
+    mapIndex = houseIndex.homeMapIndex()
+    spawn = sim.findHomeSpawn(mapIndex)
     requestedName = name.cleanPlayerName()
     cleanName =
       if requestedName.len > 0:
@@ -1081,8 +1285,8 @@ proc addPlayer(sim: var SimServer, name: string): int =
     y: spawn.y,
     direction: DirDown,
     gnomeIndex: gnomeIndex,
-    homeFlag: houseIndex.homeMapIndex(),
-    mapIndex: MainMapIndex
+    homeFlag: mapIndex,
+    mapIndex: mapIndex
   )
   sim.players.high
 
@@ -1103,7 +1307,7 @@ proc gardenInReach(sim: SimServer, player: Player): int =
       result = i
       bestDistance = distance
 
-proc collectGarden(sim: var SimServer, playerIndex, gardenIndex: int) =
+proc collectGarden(sim: SimServer, playerIndex, gardenIndex: int) =
   ## Moves all food at one garden into a player's inventory.
   for foodIndex in 0 ..< FoodVeggieSlots:
     let count = sim.gardens[gardenIndex].inventory[foodIndex]
@@ -1136,7 +1340,7 @@ proc playerAtHomeExit(sim: SimServer, player: Player): bool =
   )
 
 proc teleportPlayer(
-  sim: var SimServer,
+  sim: SimServer,
   playerIndex,
   mapIndex,
   x,
@@ -1153,7 +1357,7 @@ proc teleportPlayer(
   sim.players[playerIndex].carryX = 0
   sim.players[playerIndex].carryY = 0
 
-proc interact(sim: var SimServer, playerIndex: int) =
+proc interact(sim: SimServer, playerIndex: int) =
   ## Applies one A-button interaction for a player.
   if playerIndex < 0 or playerIndex >= sim.players.len:
     return
@@ -1206,6 +1410,33 @@ proc cameraYFor(sim: SimServer, player: Player): int =
     world.height - ViewportHeight
   )
 
+proc addScorePanel(
+  packet: var seq[uint8],
+  sim: SimServer,
+  cache: var seq[SpriteCacheEntry],
+  player: Player,
+  playerIndex,
+  screenX,
+  screenY: int
+) =
+  ## Appends the end-of-day score panel next to one player.
+  if sim.scoreTicks <= 0:
+    return
+  let
+    score = sim.scorePanelSprite(player.totalItems())
+    spriteId = ScoreSpriteBase + playerIndex
+    x = screenX + GnomeSpriteSize + 2
+    y = screenY + GnomeSpriteSize div 2 - score.height div 2
+  packet.addRgbaSpriteCached(cache, spriteId, score, "score " & $playerIndex)
+  packet.addObject(
+    ScoreObjectBase + playerIndex,
+    x,
+    y,
+    ScoreZ,
+    MapLayerId,
+    spriteId
+  )
+
 proc addPlayerObjects(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1246,6 +1477,14 @@ proc addPlayerObjects(
       screenX,
       nameY,
       ChatZ
+    )
+    packet.addScorePanel(
+      sim,
+      cache,
+      player,
+      i,
+      screenX,
+      screenY
     )
 
 proc addGardenObjects(
@@ -1315,6 +1554,26 @@ proc addInventoryObjects(
     )
     inc slot
 
+proc addClockObjects(packet: var seq[uint8], sim: SimServer) =
+  ## Appends the upper-right clock using individual glyph objects.
+  let text = sim.clockText()
+  var totalWidth = 0
+  for ch in text:
+    totalWidth += sim.clockGlyphWidth(ch)
+  totalWidth += max(0, text.len - 1) * ClockGlyphGap
+
+  var x = max(0, ClockUiWidth - totalWidth)
+  for i, ch in text:
+    packet.addObject(
+      ClockObjectBase + i,
+      x,
+      0,
+      0,
+      ClockLayerId,
+      ch.clockGlyphSpriteId()
+    )
+    x += sim.clockGlyphWidth(ch) + ClockGlyphGap
+
 proc buildPlayerPacket(
   sim: SimServer,
   playerIndex: int,
@@ -1322,9 +1581,13 @@ proc buildPlayerPacket(
   nextState: var PlayerViewerState
 ): seq[uint8] =
   ## Builds one sprite protocol packet for a player viewer.
-  nextState = state
+  nextState =
+    if state == nil:
+      PlayerViewerState()
+    else:
+      state
   if not nextState.initialized:
-    result.addSpriteProtocolInit(sim, ViewportWidth, ViewportHeight)
+    result.add(sim.playerInitPacket)
     nextState.initialized = true
 
   result.addClearObjects()
@@ -1334,23 +1597,19 @@ proc buildPlayerPacket(
   let
     player = sim.players[playerIndex]
     onMainMap = player.mapIndex == MainMapIndex
+    tintIndex = sim.dayTintIndex()
     cameraX = sim.cameraXFor(player)
     cameraY = sim.cameraYFor(player)
     bottomSpriteId =
       if onMainMap:
-        BottomSpriteId
+        mainBottomSpriteId(tintIndex)
       else:
-        HomeBottomSpriteId
+        homeBottomSpriteId(tintIndex)
     overhangSpriteId =
       if onMainMap:
-        OverhangSpriteId
+        mainOverhangSpriteId(tintIndex)
       else:
-        HomeOverhangSpriteId
-    debugSpriteId =
-      if onMainMap:
-        DebugSpriteId
-      else:
-        HomeDebugSpriteId
+        homeOverhangSpriteId(tintIndex)
   result.addObject(
     BottomObjectId,
     -cameraX,
@@ -1376,19 +1635,26 @@ proc buildPlayerPacket(
     MapLayerId,
     overhangSpriteId
   )
-  result.addObject(
-    DebugObjectId,
-    -cameraX,
-    -cameraY,
-    DebugZ,
-    MapLayerId,
-    debugSpriteId
-  )
+  when DebugOutlines:
+    let debugSpriteId =
+      if onMainMap:
+        DebugSpriteId
+      else:
+        HomeDebugSpriteId
+    result.addObject(
+      DebugObjectId,
+      -cameraX,
+      -cameraY,
+      DebugZ,
+      MapLayerId,
+      debugSpriteId
+    )
   result.addInventoryObjects(
     sim,
     nextState.spriteCache,
     player
   )
+  result.addClockObjects(sim)
 
 proc buildGlobalPacket(
   sim: SimServer,
@@ -1396,19 +1662,24 @@ proc buildGlobalPacket(
   nextState: var PlayerViewerState
 ): seq[uint8] =
   ## Builds one sprite protocol packet for a global viewer.
-  nextState = state
+  nextState =
+    if state == nil:
+      PlayerViewerState()
+    else:
+      state
   if not nextState.initialized:
-    result.addSpriteProtocolInit(sim, sim.mainMap.width, sim.mainMap.height)
+    result.add(sim.globalInitPacket)
     nextState.initialized = true
 
   result.addClearObjects()
+  let tintIndex = sim.dayTintIndex()
   result.addObject(
     BottomObjectId,
     0,
     0,
     BottomZ,
     MapLayerId,
-    BottomSpriteId
+    mainBottomSpriteId(tintIndex)
   )
   result.addGardenObjects(sim, 0, 0)
   result.addPlayerObjects(
@@ -1424,16 +1695,18 @@ proc buildGlobalPacket(
     0,
     OverhangZ,
     MapLayerId,
-    OverhangSpriteId
+    mainOverhangSpriteId(tintIndex)
   )
-  result.addObject(
-    DebugObjectId,
-    0,
-    0,
-    DebugZ,
-    MapLayerId,
-    DebugSpriteId
-  )
+  when DebugOutlines:
+    result.addObject(
+      DebugObjectId,
+      0,
+      0,
+      DebugZ,
+      MapLayerId,
+      DebugSpriteId
+    )
+  result.addClockObjects(sim)
 
 proc applyDrag(value: var int) =
   ## Applies one tick of friction to a velocity component.
@@ -1482,7 +1755,7 @@ proc updateDirection(player: var Player, input: InputState) =
       else:
         DirDown
 
-proc applyInput(sim: var SimServer, playerIndex: int, input: InputState) =
+proc applyInput(sim: SimServer, playerIndex: int, input: InputState) =
   ## Applies one player's held movement input.
   if playerIndex < 0 or playerIndex >= sim.players.len:
     return
@@ -1614,7 +1887,7 @@ proc moveWithNudge(
       ):
         return true
 
-proc moveAxis(sim: var SimServer, player: var Player, horizontal: bool) =
+proc moveAxis(sim: SimServer, player: Player, horizontal: bool) =
   ## Moves one player along one axis using pixel collision.
   let world = sim.mapFor(player.mapIndex)
   if horizontal:
@@ -1656,7 +1929,7 @@ proc moveAxis(sim: var SimServer, player: var Player, horizontal: bool) =
         player.velY = 0
         break
 
-proc updateMessages(sim: var SimServer) =
+proc updateMessages(sim: SimServer) =
   ## Clears player speech bubbles when their lifetime expires.
   for player in sim.players.mitems:
     if player.messageTicks <= 0:
@@ -1667,9 +1940,53 @@ proc updateMessages(sim: var SimServer) =
     if player.messageTicks <= 0:
       player.message = ""
 
-proc step(sim: var SimServer, inputs: openArray[InputState]) =
+proc teleportPlayerToOwnHome(sim: SimServer, playerIndex: int) =
+  ## Teleports one player to their assigned home map.
+  if playerIndex < 0 or playerIndex >= sim.players.len:
+    return
+  let
+    mapIndex = sim.players[playerIndex].homeFlag
+    spawn = sim.findHomeSpawn(mapIndex)
+  sim.teleportPlayer(
+    playerIndex,
+    mapIndex,
+    spawn.x,
+    spawn.y,
+    DirDown
+  )
+
+proc clearInventory(player: var Player) =
+  ## Clears one player inventory.
+  for i in 0 ..< FoodVeggieSlots:
+    player.inventory[i] = 0
+
+proc startDay(sim: SimServer) =
+  ## Starts a new morning with fresh gardens and players at home.
+  sim.dayTick = 0
+  sim.scoreTicks = 0
+  sim.gardens = loadGardens(sim.debugRects, sim.rng)
+  for player in sim.players.mitems:
+    player.clearInventory()
+  for i in 0 ..< sim.players.len:
+    sim.teleportPlayerToOwnHome(i)
+
+proc startScoreScreen(sim: SimServer) =
+  ## Starts the end-of-day scoring screen.
+  sim.dayTick = DayTicks
+  sim.scoreTicks = ScoreScreenTicks
+  for i in 0 ..< sim.players.len:
+    sim.teleportPlayerToOwnHome(i)
+
+proc step(sim: SimServer, inputs: openArray[InputState]) =
   ## Advances the Heartleaf simulation by one tick.
   inc sim.tickCount
+  if sim.scoreTicks > 0:
+    dec sim.scoreTicks
+    sim.updateMessages()
+    if sim.scoreTicks <= 0:
+      sim.startDay()
+    return
+
   for i in 0 ..< sim.players.len:
     let input =
       if i < inputs.len:
@@ -1685,9 +2002,13 @@ proc step(sim: var SimServer, inputs: openArray[InputState]) =
     sim.moveAxis(sim.players[i], true)
     sim.moveAxis(sim.players[i], false)
   sim.updateMessages()
+  inc sim.dayTick
+  if sim.dayTick >= DayTicks:
+    sim.startScoreScreen()
 
 proc initAppState() =
   ## Initializes shared websocket state.
+  appState = WebSocketAppState()
   initLock(appState.lock)
   appState.inputMasks = initTable[WebSocket, uint8]()
   appState.lastAppliedMasks = initTable[WebSocket, uint8]()
@@ -1749,7 +2070,7 @@ proc playerChatFromMessage(message: Message): string =
   of Ping, Pong:
     ""
 
-proc removePlayer(sim: var SimServer, websocket: WebSocket) =
+proc removePlayer(sim: SimServer, websocket: WebSocket) =
   ## Removes one websocket and keeps player indices compact.
   if websocket in appState.globalViewers:
     appState.globalViewers.del(websocket)
