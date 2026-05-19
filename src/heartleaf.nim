@@ -36,6 +36,7 @@ const
   FrictionDen = 256
   MaxSpeed = 672
   StopThreshold = 12
+  CollisionNudgePixels = 4
   MinSpawnSpacing = 20
   SpawnScanStep = 4
   HouseSpawnMaxDistance = 96
@@ -167,6 +168,13 @@ type
     rect: Rect
     valid: bool
 
+  HomeResources = object
+    exit: Rect
+    hasExit: bool
+    washes: seq[Rect]
+    cooks: seq[Rect]
+    diners: seq[Rect]
+
   Player = object
     name: string
     x, y: int
@@ -191,6 +199,8 @@ type
     mainMap: WorldMap
     homeMaps: array[HouseCount, WorldMap]
     debugRects: seq[ResourceRect]
+    homeDebugRects: seq[ResourceRect]
+    homeResources: HomeResources
     foods: FoodSprites
     gardens: seq[Garden]
     houses: array[HouseCount, House]
@@ -320,6 +330,22 @@ proc loadHouses(rects: openArray[ResourceRect]): array[HouseCount, House] =
     if index >= 0:
       result[index] = House(rect: rect.toRect(), valid: true)
 
+proc loadHomeResources(rects: openArray[ResourceRect]): HomeResources =
+  ## Loads named interaction rectangles from home resource data.
+  for rect in rects:
+    case rect.rectName()
+    of "exit":
+      result.exit = rect.toRect()
+      result.hasExit = true
+    of "wash":
+      result.washes.add(rect.toRect())
+    of "cook":
+      result.cooks.add(rect.toRect())
+    of "diner", "diners":
+      result.diners.add(rect.toRect())
+    else:
+      discard
+
 proc loadGardens(
   rects: openArray[ResourceRect],
   rng: var Rand
@@ -445,12 +471,14 @@ proc initSimServer(seed = DefaultSeed): SimServer =
     gnomesPath = dataRoot / "gnomes.aseprite"
     foodPath = dataRoot / "food.aseprite"
     resourcePath = dataRoot / "map.resource"
+    homeResourcePath = dataRoot / "home_map.resource"
     tiny5Path = dataRoot / "tiny5.aseprite"
-    emptyRects: seq[ResourceRect] = @[]
   result.rng = initRand(seed)
   result.debugRects = loadResourceRects(resourcePath)
+  result.homeDebugRects = loadResourceRects(homeResourcePath)
+  result.homeResources = loadHomeResources(result.homeDebugRects)
   result.mainMap = loadWorldMap(mapPath, "Map", result.debugRects)
-  let homeMap = loadWorldMap(homeMapPath, "Home map", emptyRects)
+  let homeMap = loadWorldMap(homeMapPath, "Home map", result.homeDebugRects)
   for i in 0 ..< HouseCount:
     result.homeMaps[i] = homeMap
   result.houses = loadHouses(result.debugRects)
@@ -1096,6 +1124,17 @@ proc houseContaining(sim: SimServer, player: Player): int =
     if house.valid and house.rect.contains(centerX, centerY):
       return i
 
+proc playerAtHomeExit(sim: SimServer, player: Player): bool =
+  ## Returns true when a home player is standing in the exit area.
+  if not player.mapIndex.isHomeMap():
+    return false
+  if not sim.homeResources.hasExit:
+    return false
+  sim.homeResources.exit.contains(
+    player.playerCenterX(),
+    player.playerCenterY()
+  )
+
 proc teleportPlayer(
   sim: var SimServer,
   playerIndex,
@@ -1119,6 +1158,8 @@ proc interact(sim: var SimServer, playerIndex: int) =
   if playerIndex < 0 or playerIndex >= sim.players.len:
     return
   if sim.players[playerIndex].mapIndex.isHomeMap():
+    if not sim.playerAtHomeExit(sim.players[playerIndex]):
+      return
     let
       houseIndex = sim.players[playerIndex].mapIndex - HomeMapIndexBase
       spawn = sim.findMainSpawn(houseIndex)
@@ -1476,6 +1517,103 @@ proc applyInput(sim: var SimServer, playerIndex: int, input: InputState) =
   )
   clampVelocity(sim.players[playerIndex].velX, sim.players[playerIndex].velY)
 
+proc signum(value: int): int =
+  ## Returns the sign of one integer as -1, 0, or 1.
+  if value < 0:
+    return -1
+  if value > 0:
+    return 1
+  0
+
+proc nudgePathClear(
+  world: WorldMap,
+  player: Player,
+  step,
+  offset: int,
+  horizontal: bool
+): bool =
+  ## Returns true when a nudged move path stays inside walkable space.
+  let offsetSign = offset.signum()
+  for i in 1 .. abs(offset):
+    let nudge = offsetSign * i
+    if horizontal:
+      if not world.canOccupy(player.x, player.y + nudge):
+        return false
+      if not world.canOccupy(player.x + step, player.y + nudge):
+        return false
+    else:
+      if not world.canOccupy(player.x + nudge, player.y):
+        return false
+      if not world.canOccupy(player.x + nudge, player.y + step):
+        return false
+  true
+
+proc tryNudgeOffset(
+  world: WorldMap,
+  player: Player,
+  step,
+  offset: int,
+  horizontal: bool,
+  dx,
+  dy: var int
+): bool =
+  ## Finds one valid nudged move for a blocked one-pixel step.
+  if not world.nudgePathClear(player, step, offset, horizontal):
+    return false
+  if horizontal:
+    dx = step
+    dy = offset
+  else:
+    dx = offset
+    dy = step
+  true
+
+proc moveWithNudge(
+  world: WorldMap,
+  player: Player,
+  step: int,
+  horizontal: bool,
+  dx,
+  dy: var int
+): bool =
+  ## Finds a direct or gently nudged one-pixel movement step.
+  dx = 0
+  dy = 0
+  if horizontal:
+    dx = step
+  else:
+    dy = step
+  if world.canOccupy(player.x + dx, player.y + dy):
+    return true
+
+  let preferred =
+    if horizontal:
+      player.velY.signum()
+    else:
+      player.velX.signum()
+  for distance in 1 .. CollisionNudgePixels:
+    if preferred != 0 and world.tryNudgeOffset(
+      player,
+      step,
+      preferred * distance,
+      horizontal,
+      dx,
+      dy
+    ):
+      return true
+    for direction in [-1, 1]:
+      if direction == preferred:
+        continue
+      if world.tryNudgeOffset(
+        player,
+        step,
+        direction * distance,
+        horizontal,
+        dx,
+        dy
+      ):
+        return true
+
 proc moveAxis(sim: var SimServer, player: var Player, horizontal: bool) =
   ## Moves one player along one axis using pixel collision.
   let world = sim.mapFor(player.mapIndex)
@@ -1487,8 +1625,12 @@ proc moveAxis(sim: var SimServer, player: var Player, horizontal: bool) =
           -1
         else:
           1
-      if world.canOccupy(player.x + step, player.y):
-        player.x += step
+      var
+        dx = 0
+        dy = 0
+      if world.moveWithNudge(player, step, horizontal, dx, dy):
+        player.x += dx
+        player.y += dy
         player.carryX -= step * MotionScale
       else:
         player.carryX = 0
@@ -1502,8 +1644,12 @@ proc moveAxis(sim: var SimServer, player: var Player, horizontal: bool) =
           -1
         else:
           1
-      if world.canOccupy(player.x, player.y + step):
-        player.y += step
+      var
+        dx = 0
+        dy = 0
+      if world.moveWithNudge(player, step, horizontal, dx, dy):
+        player.x += dx
+        player.y += dy
         player.carryY -= step * MotionScale
       else:
         player.carryY = 0
