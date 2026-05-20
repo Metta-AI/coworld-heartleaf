@@ -207,7 +207,7 @@ function websocketAddress(){
     if(wsUrl.protocol==="http:")wsUrl.protocol="ws:";
     if(wsUrl.protocol==="https:")wsUrl.protocol="wss:";
     let changed=wsUrl.toString()!==address;
-    for(const key of ["name","slot","token"]){
+    for(const key of ["name","username","slot","token"]){
       const value=url.searchParams.get(key);
       if(value!==null){
         wsUrl.searchParams.set(key,value);

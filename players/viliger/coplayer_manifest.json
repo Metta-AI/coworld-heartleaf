@@ -1,0 +1,6 @@
+{
+  "author": "treeform@softmax.com",
+  "name": "viliger",
+  "image_uri": "ghcr.io/treeform/cogame-heartleaf-viliger:latest",
+  "games": ["heartleaf"]
+}

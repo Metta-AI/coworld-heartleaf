@@ -4,7 +4,7 @@ position: absolute;
 width: 31px;
 height: 24px;
 left: 110px;
-top: 53px;
+top: 50px;
 
 background: #000000;
 

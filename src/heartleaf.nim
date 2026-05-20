@@ -30,19 +30,21 @@ const
   PlayerBoxHeight = 8
   PlayerBoxOffsetX = 9
   PlayerBoxOffsetY = 22
-  InteractionRadius = 22
+  FootHalfWidth = PlayerBoxWidth div 2
+  FootHalfHeight = PlayerBoxHeight div 2
+  InteractionRadius = 100
   MotionScale = 256
   Accel = 84
   FrictionNum = 184
   FrictionDen = 256
   MaxSpeed = 672
   StopThreshold = 12
-  CollisionNudgePixels = 4
+  CollisionNudgePixels = 10
   MinSpawnSpacing = 20
   SpawnScanStep = 4
   HouseSpawnMaxDistance = 96
   TicksPerSecond = 24
-  DayRealMinutes = 2
+  DayRealMinutes = 3
   DayTicks = DayRealMinutes * 60 * TicksPerSecond
   ScoreScreenTicks = 10 * TicksPerSecond
   DinnerScreenTicks = 10 * TicksPerSecond
@@ -74,7 +76,9 @@ const
   MapLayerId = 0
   UiLayerId = 1
   ClockLayerId = 2
+  GlobalPanelLayerId = 3
   MapLayerKind = 0
+  GlobalPanelLayerKind = 1
   UiLayerKind = 3
   ClockLayerKind = 2
   MapLayerFlags = 1
@@ -84,8 +88,18 @@ const
   InventoryIconStep = 34
   InventoryUiWidth = InventoryColumns * InventoryIconStep
   InventoryUiHeight = InventoryRows * InventoryIconStep
-  ClockUiWidth = 72
+  ClockUiWidth = 120
   ClockUiHeight = 12
+  GlobalPanelWidth = 128
+  GlobalPanelHeight = 128
+  GlobalPanelPad = 2
+  GlobalPanelTitleHeight = 10
+  GlobalPanelRowHeight = 9
+  GlobalPanelSelectorX = 2
+  GlobalPanelScoreX = 10
+  GlobalPanelNameX = 34
+  GlobalPanelIconWidth = 5
+  GlobalPanelIconHeight = 7
   ClockPadX = 2
   ClockPadY = 1
   ClockGlyphGap = 1
@@ -113,6 +127,13 @@ const
   InventoryCountSpriteBase = 4000
   ClockGlyphSpriteBase = 7000
   ScoreSpriteBase = 7100
+  MainWalkSpriteId = 8000
+  HomeWalkSpriteId = 8001
+  GlobalPanelBackSpriteId = 8100
+  GlobalPanelTitleSpriteId = 8101
+  GlobalPanelSelectSpriteId = 8102
+  GlobalPanelScoreSpriteBase = 8200
+  GlobalPanelNameSpriteBase = 8300
   BottomObjectId = 1
   OverhangObjectId = 2
   PlayerObjectBase = 1000
@@ -123,6 +144,11 @@ const
   InventoryCountObjectBase = 6000
   ClockObjectBase = 7000
   ScoreObjectBase = 7100
+  GlobalPanelBackObjectId = 20_000
+  GlobalPanelTitleObjectId = 20_001
+  GlobalPanelSelectObjectId = 20_002
+  GlobalPanelScoreObjectBase = 20_100
+  GlobalPanelNameObjectBase = 20_200
   BottomZ = int(low(int16))
   OverhangZ = 20_000
   GardenMarkerZ = OverhangZ - 1
@@ -141,11 +167,26 @@ const
   TextBackR = 0x33'u8
   TextBackG = 0x31'u8
   TextBackB = 0x36'u8
-  ClockGlyphs = "0123456789: AMP"
+  ClockGlyphs =
+    "0123456789: " &
+    "abcdefghijklmnopqrstuvwxyz" &
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  WeekdayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
   TintHueTargets = [0.80, 0.78, 0.75, 0.70, 0.64]
   TintHueMixes = [0.18, 0.30, 0.43, 0.57, 0.72]
   TintSaturationScales = [1.05, 1.12, 1.20, 1.30, 1.38]
   TintValueScales = [0.86, 0.70, 0.54, 0.39, 0.25]
+  PlayerNames = [
+    "Ivan",
+    "Anton",
+    "Yura",
+    "Sasha",
+    "Maxim",
+    "Nikita",
+    "Vova",
+    "Dima",
+    "Egor"
+  ]
   FoodNames = [
     "Lettuce",
     "Carrot",
@@ -235,7 +276,8 @@ type
     score: int
 
   Player = ref object
-    name: string
+    username: string
+    playerName: string
     x, y: int
     velX, velY: int
     carryX, carryY: int
@@ -277,10 +319,10 @@ type
     scoreTicks: int
     dinnerDone: bool
     playerInitPacket: seq[uint8]
-    globalInitPacket: seq[uint8]
 
   PlayerViewerState = ref object
     initialized: bool
+    selectedPlayerIndex: int
     spriteCache: seq[SpriteCacheEntry]
 
   WebSocketAppState = ref object
@@ -288,9 +330,10 @@ type
     inputMasks: Table[WebSocket, uint8]
     lastAppliedMasks: Table[WebSocket, uint8]
     playerIndices: Table[WebSocket, int]
+    playerSlots: Table[WebSocket, int]
     playerViewers: Table[WebSocket, PlayerViewerState]
     globalViewers: Table[WebSocket, PlayerViewerState]
-    playerNames: Table[WebSocket, string]
+    playerUsernames: Table[WebSocket, string]
     chatMessages: Table[WebSocket, string]
     closedSockets: seq[WebSocket]
     tokens: seq[string]
@@ -315,7 +358,8 @@ proc addSpriteProtocolInit(
   packet: var seq[uint8],
   sim: SimServer,
   viewportWidth,
-  viewportHeight: int
+  viewportHeight: int,
+  globalPanel = false
 )
 
 proc dataDir(): string =
@@ -519,6 +563,14 @@ proc loadWorldMap(
   )
   result.walkMask = walkImage.loadWalkMask()
 
+proc walkabilitySprite(world: WorldMap): RgbaSprite =
+  ## Builds an invisible helper sprite containing the walkable pixels.
+  result = newRgbaSprite(world.width, world.height)
+  for y in 0 ..< world.height:
+    for x in 0 ..< world.width:
+      if world.walkMask[y * world.width + x]:
+        result.putPixel(x, y, rgba(255, 255, 255, 255))
+
 proc loadGnomeSprites(path: string): seq[GnomeSprites] =
   ## Loads all gnome direction sets from the sheet.
   let image = readAsepriteImage(path)
@@ -614,12 +666,8 @@ proc initSimServer(seed = DefaultSeed): SimServer =
   result.playerInitPacket.addSpriteProtocolInit(
     result,
     ViewportWidth,
-    ViewportHeight
-  )
-  result.globalInitPacket.addSpriteProtocolInit(
-    result,
-    result.mainMap.width,
-    result.mainMap.height
+    ViewportHeight,
+    true
   )
 
 proc addU8(packet: var seq[uint8], value: uint8) =
@@ -736,6 +784,10 @@ proc addObject(
 proc addClearObjects(packet: var seq[uint8]) =
   ## Appends one sprite protocol clear objects message.
   packet.addU8(0x04'u8)
+
+proc screenRectVisible(x, y, w, h: int): bool =
+  ## Returns true when one screen-space rectangle overlaps the viewport.
+  x < ViewportWidth and y < ViewportHeight and x + w > 0 and y + h > 0
 
 proc chatTextWidth(sim: SimServer, text: string): int =
   ## Returns the rendered width of one chat line.
@@ -907,6 +959,12 @@ proc dinnerOverlaySprite(sim: SimServer, record: DinnerRecord): RgbaSprite =
     sim.blitChatText(result, "Host: " & record.hostName, 8, 20)
     sim.drawFoodCounts(result, record.foods, 8, 40)
 
+proc scoreDisplayName(player: Player): string =
+  ## Returns the score-screen name with username and player name.
+  if player.username.len == 0:
+    return player.playerName
+  player.username & " (" & player.playerName & ")"
+
 proc scoreOverlaySprite(sim: SimServer): RgbaSprite =
   ## Builds the full-screen cumulative score overlay.
   result = overlaySprite()
@@ -924,8 +982,158 @@ proc scoreOverlaySprite(sim: SimServer): RgbaSprite =
       x,
       y
     )
-    sim.blitChatText(result, player.name, x, y + GnomeSpriteSize + 2)
+    sim.blitChatText(
+      result,
+      player.scoreDisplayName(),
+      x,
+      y + GnomeSpriteSize + 2
+    )
     sim.blitChatText(result, "Score: " & $player.score, x + 36, y + 12)
+
+proc globalPanelBackSprite(): RgbaSprite =
+  ## Builds the global viewer score panel background.
+  result = newRgbaSprite(GlobalPanelWidth, GlobalPanelHeight)
+  result.fillRect(
+    0,
+    0,
+    GlobalPanelWidth,
+    GlobalPanelHeight,
+    rgba(0, 0, 0, 210)
+  )
+  result.strokeRect(
+    0,
+    0,
+    GlobalPanelWidth,
+    GlobalPanelHeight,
+    rgba(255, 255, 255, 120)
+  )
+
+proc globalPanelSelectSprite(): RgbaSprite =
+  ## Builds the global viewer selected-player pointer icon.
+  result = newRgbaSprite(GlobalPanelIconWidth, GlobalPanelIconHeight)
+  let center = GlobalPanelIconHeight div 2
+  for y in 0 ..< GlobalPanelIconHeight:
+    let span = GlobalPanelIconHeight div 2 - abs(center - y)
+    for x in 0 .. span:
+      result.putPixel(x, y, rgba(255, 245, 140, 255))
+
+proc globalPanelTextSprite(
+  sim: SimServer,
+  text: string,
+  color: ColorRGBA
+): RgbaSprite =
+  ## Builds one Tiny5 text sprite for the global score panel.
+  result = newRgbaSprite(
+    max(1, sim.textFont.textWidth(text)),
+    sim.textFont.height
+  )
+  sim.blitTinyText(result, text, 0, 0, color)
+
+proc globalPanelScoreText(score: int): string =
+  ## Returns one global panel score label.
+  $max(0, score)
+
+proc selectedGlobalPlayerIndex(state: PlayerViewerState, sim: SimServer): int =
+  ## Returns the selected global player index clamped to connected players.
+  if sim.players.len == 0:
+    return -1
+  result = state.selectedPlayerIndex
+  if result < 0:
+    result = 0
+  if result >= sim.players.len:
+    result = sim.players.high
+
+proc addGlobalScorePanel(
+  packet: var seq[uint8],
+  sim: SimServer,
+  cache: var seq[SpriteCacheEntry],
+  selectedIndex: int
+) =
+  ## Appends the global top-left score and selection panel.
+  packet.addRgbaSpriteCached(
+    cache,
+    GlobalPanelBackSpriteId,
+    globalPanelBackSprite(),
+    "global score panel"
+  )
+  packet.addObject(
+    GlobalPanelBackObjectId,
+    0,
+    0,
+    int(low(int16)),
+    GlobalPanelLayerId,
+    GlobalPanelBackSpriteId
+  )
+  packet.addRgbaSpriteCached(
+    cache,
+    GlobalPanelTitleSpriteId,
+    sim.globalPanelTextSprite("scores", rgba(255, 255, 255, 255)),
+    "global scores title"
+  )
+  packet.addObject(
+    GlobalPanelTitleObjectId,
+    GlobalPanelPad,
+    GlobalPanelPad,
+    0,
+    GlobalPanelLayerId,
+    GlobalPanelTitleSpriteId
+  )
+  if sim.players.len == 0:
+    return
+  packet.addRgbaSpriteCached(
+    cache,
+    GlobalPanelSelectSpriteId,
+    globalPanelSelectSprite(),
+    "global selected player"
+  )
+  for i, player in sim.players:
+    let
+      rowY = GlobalPanelTitleHeight + i * GlobalPanelRowHeight
+      scoreText = player.score.globalPanelScoreText()
+      scoreSpriteId = GlobalPanelScoreSpriteBase + i
+      nameSpriteId = GlobalPanelNameSpriteBase + i
+    if rowY + GlobalPanelRowHeight > GlobalPanelHeight:
+      return
+    packet.addRgbaSpriteCached(
+      cache,
+      scoreSpriteId,
+      sim.globalPanelTextSprite(scoreText, rgba(255, 255, 255, 255)),
+      "global score " & $i & " " & scoreText
+    )
+    packet.addRgbaSpriteCached(
+      cache,
+      nameSpriteId,
+      sim.globalPanelTextSprite(
+        player.scoreDisplayName(),
+        rgba(255, 255, 255, 255)
+      ),
+      "global name " & player.scoreDisplayName()
+    )
+    if i == selectedIndex:
+      packet.addObject(
+        GlobalPanelSelectObjectId,
+        GlobalPanelSelectorX,
+        rowY + (GlobalPanelRowHeight - GlobalPanelIconHeight) div 2,
+        3,
+        GlobalPanelLayerId,
+        GlobalPanelSelectSpriteId
+      )
+    packet.addObject(
+      GlobalPanelScoreObjectBase + i,
+      GlobalPanelScoreX,
+      rowY,
+      1,
+      GlobalPanelLayerId,
+      scoreSpriteId
+    )
+    packet.addObject(
+      GlobalPanelNameObjectBase + i,
+      GlobalPanelNameX,
+      rowY,
+      2,
+      GlobalPanelLayerId,
+      nameSpriteId
+    )
 
 proc addNameTag(
   packet: var seq[uint8],
@@ -939,11 +1147,13 @@ proc addNameTag(
 ): int =
   ## Appends a player name tag and returns its top y coordinate.
   let
-    tag = sim.nameTagSprite(player.name)
+    tag = sim.nameTagSprite(player.playerName)
     x = screenX + GnomeSpriteSize div 2 - tag.width div 2
     y = screenY - tag.height - NameGapY
     spriteId = NameSpriteBase + playerIndex
-  packet.addRgbaSpriteCached(cache, spriteId, tag, "name " & player.name)
+  if not screenRectVisible(x, y, tag.width, tag.height):
+    return y
+  packet.addRgbaSpriteCached(cache, spriteId, tag, "name " & player.playerName)
   packet.addObject(
     NameObjectBase + playerIndex,
     x,
@@ -972,6 +1182,8 @@ proc addSpeechBubble(
     x = screenX + GnomeSpriteSize div 2 - bubble.width div 2
     y = anchorY - bubble.height - ChatGapY
     spriteId = ChatSpriteBase + playerIndex
+  if not screenRectVisible(x, y, bubble.width, bubble.height):
+    return
   packet.addRgbaSpriteCached(cache, spriteId, bubble, "chat " & player.message)
   packet.addObject(
     ChatObjectBase + playerIndex,
@@ -1028,19 +1240,13 @@ proc homeOverhangSpriteId(tintIndex: int): int =
 
 proc clockGlyphIndex(ch: char): int =
   ## Returns the compact clock sprite slot for one glyph.
-  if ch >= '0' and ch <= '9':
-    return ord(ch) - ord('0')
-  case ch
-  of ':':
-    10
-  of 'A':
-    11
-  of 'M':
-    12
-  of 'P':
-    13
-  else:
-    14
+  for i, glyph in ClockGlyphs:
+    if glyph == ch:
+      return i
+  for i, glyph in ClockGlyphs:
+    if glyph == ' ':
+      return i
+  0
 
 proc clockGlyphSpriteId(ch: char): int =
   ## Returns the sprite id for one clock glyph.
@@ -1052,17 +1258,29 @@ proc foodName(foodIndex: int): string =
     return FoodNames[foodIndex]
   "food " & $foodIndex
 
+proc playerNameForHouse(houseIndex: int): string =
+  ## Returns the fixed in-game player name for one house.
+  if houseIndex >= 0 and houseIndex < PlayerNames.len:
+    return PlayerNames[houseIndex]
+  "Player"
+
 proc dailyResultsJson*(sim: SimServer): string =
   ## Returns one daily player score result as JSON.
   var
     names = newJArray()
+    usernames = newJArray()
+    playerNames = newJArray()
     scores = newJArray()
     results = newJObject()
   for player in sim.players:
-    names.add(%player.name)
+    names.add(%player.scoreDisplayName())
+    usernames.add(%player.username)
+    playerNames.add(%player.playerName)
     scores.add(%player.score)
   results["day"] = %sim.dayNumber
   results["names"] = names
+  results["usernames"] = usernames
+  results["playerNames"] = playerNames
   results["scores"] = scores
   $results
 
@@ -1107,22 +1325,23 @@ proc twoDigits(value: int): string =
   $value
 
 proc clockText(sim: SimServer): string =
-  ## Returns the current game clock as 12-hour AM/PM text.
+  ## Returns the current weekday and game clock as 12-hour text.
   let
     minutes = sim.currentDayMinutes()
+    weekday = WeekdayNames[(sim.dayNumber - 1) mod WeekdayNames.len]
     hour24 = minutes div 60
     minute = minutes mod 60
     suffix =
       if hour24 < 12:
-        "AM"
+        "am"
       else:
-        "PM"
+        "pm"
     hour12 =
       if hour24 mod 12 == 0:
         12
       else:
         hour24 mod 12
-  $hour12 & ":" & minute.twoDigits() & " " & suffix
+  weekday & " " & $hour12 & ":" & minute.twoDigits() & suffix
 
 proc dayTintIndex(sim: SimServer): int =
   ## Returns the active dusk tint index, or -1 during full daylight.
@@ -1139,15 +1358,28 @@ proc addSpriteProtocolInit(
   packet: var seq[uint8],
   sim: SimServer,
   viewportWidth,
-  viewportHeight: int
+  viewportHeight: int,
+  globalPanel = false
 ) =
   ## Appends static sprite protocol setup for one viewer.
   packet.addViewport(MapLayerId, viewportWidth, viewportHeight)
   packet.addViewport(UiLayerId, InventoryUiWidth, InventoryUiHeight)
   packet.addViewport(ClockLayerId, ClockUiWidth, ClockUiHeight)
+  if globalPanel:
+    packet.addViewport(
+      GlobalPanelLayerId,
+      GlobalPanelWidth,
+      GlobalPanelHeight
+    )
   packet.addLayer(MapLayerId, MapLayerKind, MapLayerFlags)
   packet.addLayer(UiLayerId, UiLayerKind, UiLayerFlags)
   packet.addLayer(ClockLayerId, ClockLayerKind, UiLayerFlags)
+  if globalPanel:
+    packet.addLayer(
+      GlobalPanelLayerId,
+      GlobalPanelLayerKind,
+      UiLayerFlags
+    )
   packet.addRgbaSprite(
     BottomSpriteId,
     sim.mainMap.bottomSprite,
@@ -1215,6 +1447,16 @@ proc addSpriteProtocolInit(
     sim.foods.marker,
     "garden marker"
   )
+  packet.addRgbaSprite(
+    MainWalkSpriteId,
+    sim.mainMap.walkabilitySprite(),
+    "heartleaf main walkability"
+  )
+  packet.addRgbaSprite(
+    HomeWalkSpriteId,
+    sim.homeMaps[0].walkabilitySprite(),
+    "heartleaf home walkability"
+  )
   for gnomeIndex, gnome in sim.gnomes:
     for direction in Direction:
       packet.addRgbaSprite(
@@ -1236,13 +1478,30 @@ proc collisionRectAt(x, y: int): Rect =
     h: PlayerBoxHeight
   )
 
-proc playerCenterX(player: Player): int =
-  ## Returns the visible center x coordinate for one player.
-  player.x + GnomeSpriteSize div 2
+proc collisionRectFromFoot(x, y: int): Rect =
+  ## Returns the player foot collision rectangle at a foot-center position.
+  Rect(
+    x: x - FootHalfWidth,
+    y: y - FootHalfHeight,
+    w: PlayerBoxWidth,
+    h: PlayerBoxHeight
+  )
 
-proc playerCenterY(player: Player): int =
-  ## Returns the visible center y coordinate for one player.
-  player.y + GnomeSpriteSize div 2
+proc footXAt(spriteX: int): int =
+  ## Returns the foot-center x coordinate for one sprite x coordinate.
+  spriteX + PlayerBoxOffsetX + PlayerBoxWidth div 2
+
+proc footYAt(spriteY: int): int =
+  ## Returns the foot-center y coordinate for one sprite y coordinate.
+  spriteY + PlayerBoxOffsetY + PlayerBoxHeight div 2
+
+proc playerFootX(player: Player): int =
+  ## Returns the foot-center x coordinate for one player.
+  player.x.footXAt()
+
+proc playerFootY(player: Player): int =
+  ## Returns the foot-center y coordinate for one player.
+  player.y.footYAt()
 
 proc contains(rect: Rect, x, y: int): bool =
   ## Returns true when a point is inside one rectangle.
@@ -1309,16 +1568,16 @@ proc spawnClear(sim: SimServer, mapIndex, x, y: int): bool =
   if not world.canOccupy(x, y):
     return false
   let
-    cx = x + GnomeSpriteSize div 2
-    cy = y + GnomeSpriteSize div 2
+    cx = x.footXAt()
+    cy = y.footYAt()
   for player in sim.players:
     if player.mapIndex != mapIndex:
       continue
     if distanceSquared(
       cx,
       cy,
-      player.playerCenterX(),
-      player.playerCenterY()
+      player.playerFootX(),
+      player.playerFootY()
     ) < MinSpawnSpacing * MinSpawnSpacing:
       return false
   true
@@ -1395,6 +1654,8 @@ proc findHomeSpawn(sim: SimServer, mapIndex: int): tuple[x, y: int] =
     world = sim.mapFor(mapIndex)
     doorX = max(0, (world.width - GnomeSpriteSize) div 2)
     doorY = 0
+    doorFootX = doorX.footXAt()
+    doorFootY = doorY.footYAt()
     maxX = max(0, world.width - GnomeSpriteSize)
     maxY = max(0, world.height - GnomeSpriteSize)
     maxRadius = max(world.width, world.height)
@@ -1409,7 +1670,12 @@ proc findHomeSpawn(sim: SimServer, mapIndex: int): tuple[x, y: int] =
     while y <= maxScanY:
       var x = minX
       while x <= maxScanX:
-        if distanceSquared(x, y, doorX, doorY) <= radius * radius and
+        if distanceSquared(
+          x.footXAt(),
+          y.footYAt(),
+          doorFootX,
+          doorFootY
+        ) <= radius * radius and
             sim.spawnClear(mapIndex, x, y):
           return (x, y)
         x += SpawnScanStep
@@ -1434,14 +1700,14 @@ proc cleanChatMessage(message: string): string =
   ## Normalizes one submitted player chat message.
   message.cleanDisplayText(ChatMaxChars)
 
-proc cleanPlayerName(name: string): string =
-  ## Normalizes one display name for the sprite protocol.
-  result = name.cleanDisplayText(NameMaxChars)
+proc cleanUsername(username: string): string =
+  ## Normalizes one connection username for score display.
+  result = username.cleanDisplayText(NameMaxChars)
   for ch in result.mitems:
     if ch.isSpaceAscii:
       ch = '_'
 
-proc addPlayer(sim: SimServer, name: string): int =
+proc addPlayer(sim: SimServer, username: string, requestedSlot = -1): int =
   ## Adds one player at a walkable spawn.
   var usedHomes: array[HouseCount, bool]
   for player in sim.players:
@@ -1449,25 +1715,32 @@ proc addPlayer(sim: SimServer, name: string): int =
       usedHomes[player.homeFlag - HomeMapIndexBase] = true
 
   var houseIndex = -1
-  for i in 0 ..< HouseCount:
-    if not usedHomes[i]:
-      houseIndex = i
-      break
+  if requestedSlot >= 0 and
+      requestedSlot < HouseCount and
+      not usedHomes[requestedSlot]:
+    houseIndex = requestedSlot
+  else:
+    for i in 0 ..< HouseCount:
+      if not usedHomes[i]:
+        houseIndex = i
+        break
   if houseIndex < 0:
     return -1
 
   let
     mapIndex = houseIndex.homeMapIndex()
     spawn = sim.findHomeSpawn(mapIndex)
-    requestedName = name.cleanPlayerName()
-    cleanName =
-      if requestedName.len > 0:
-        requestedName
+    requestedUsername = username.cleanUsername()
+    safeUsername =
+      if requestedUsername.len > 0:
+        requestedUsername
       else:
-        "player_" & $(sim.players.len + 1)
+        "player_" & $(houseIndex + 1)
+    playerName = houseIndex.playerNameForHouse()
     gnomeIndex = houseIndex mod sim.gnomes.len
   sim.players.add Player(
-    name: cleanName,
+    username: safeUsername,
+    playerName: playerName,
     x: spawn.x,
     y: spawn.y,
     direction: DirDown,
@@ -1483,7 +1756,7 @@ proc gardenInReach(sim: SimServer, player: Player): int =
   if player.mapIndex != MainMapIndex:
     return
   let
-    feet = collisionRectAt(player.x, player.y)
+    feet = collisionRectFromFoot(player.playerFootX(), player.playerFootY())
     maxDistance = InteractionRadius * InteractionRadius
   var bestDistance = maxDistance + 1
   for i, garden in sim.gardens:
@@ -1504,15 +1777,15 @@ proc collectGarden(sim: SimServer, playerIndex, gardenIndex: int) =
     sim.gardens[gardenIndex].inventory[foodIndex] = 0
 
 proc houseContaining(sim: SimServer, player: Player): int =
-  ## Returns the house containing a player's center point.
+  ## Returns the house containing a player's foot-center point.
   result = -1
   if player.mapIndex != MainMapIndex:
     return
   let
-    centerX = player.playerCenterX()
-    centerY = player.playerCenterY()
+    footX = player.playerFootX()
+    footY = player.playerFootY()
   for i, house in sim.houses:
-    if house.valid and house.rect.contains(centerX, centerY):
+    if house.valid and house.rect.contains(footX, footY):
       return i
 
 proc playerAtHomeExit(sim: SimServer, player: Player): bool =
@@ -1522,8 +1795,8 @@ proc playerAtHomeExit(sim: SimServer, player: Player): bool =
   if not sim.homeResources.hasExit:
     return false
   sim.homeResources.exit.contains(
-    player.playerCenterX(),
-    player.playerCenterY()
+    player.playerFootX(),
+    player.playerFootY()
   )
 
 proc teleportPlayer(
@@ -1585,7 +1858,7 @@ proc cameraXFor(sim: SimServer, player: Player): int =
   ## Returns the player camera x coordinate.
   let world = sim.mapFor(player.mapIndex)
   worldClampPixel(
-    player.playerCenterX() - ViewportWidth div 2,
+    player.playerFootX() - ViewportWidth div 2,
     world.width - ViewportWidth
   )
 
@@ -1593,7 +1866,7 @@ proc cameraYFor(sim: SimServer, player: Player): int =
   ## Returns the player camera y coordinate.
   let world = sim.mapFor(player.mapIndex)
   worldClampPixel(
-    player.playerCenterY() - ViewportHeight div 2,
+    player.playerFootY() - ViewportHeight div 2,
     world.height - ViewportHeight
   )
 
@@ -1643,6 +1916,13 @@ proc addPlayerObjects(
     let
       screenX = player.x - cameraX
       screenY = player.y - cameraY
+    if not screenRectVisible(
+      screenX,
+      screenY,
+      GnomeSpriteSize,
+      GnomeSpriteSize
+    ):
+      continue
     packet.addObject(
       PlayerObjectBase + i,
       screenX,
@@ -1683,10 +1963,14 @@ proc addGardenObjects(
     let
       x = garden.rect.x + garden.rect.w div 2 - FoodSpriteSize div 2
       y = garden.rect.y + garden.rect.h div 2 - FoodSpriteSize div 2
+      screenX = x - cameraX
+      screenY = y - cameraY
+    if not screenRectVisible(screenX, screenY, FoodSpriteSize, FoodSpriteSize):
+      continue
     packet.addObject(
       GardenObjectBase + i,
-      x - cameraX,
-      y - cameraY,
+      screenX,
+      screenY,
       GardenMarkerZ,
       MapLayerId,
       FoodMarkerSpriteId
@@ -1757,26 +2041,15 @@ proc addClockObjects(packet: var seq[uint8], sim: SimServer) =
     )
     x += sim.clockGlyphWidth(ch) + ClockGlyphGap
 
-proc buildPlayerPacket(
+proc addPlayerView(
+  packet: var seq[uint8],
   sim: SimServer,
   playerIndex: int,
-  state: PlayerViewerState,
-  nextState: var PlayerViewerState
-): seq[uint8] =
-  ## Builds one sprite protocol packet for a player viewer.
-  nextState =
-    if state == nil:
-      PlayerViewerState()
-    else:
-      state
-  if not nextState.initialized:
-    result.add(sim.playerInitPacket)
-    nextState.initialized = true
-
-  result.addClearObjects()
+  cache: var seq[SpriteCacheEntry]
+): bool =
+  ## Appends one selected player's map and UI view.
   if playerIndex < 0 or playerIndex >= sim.players.len:
     return
-
   let
     player = sim.players[playerIndex]
     onMainMap = player.mapIndex == MainMapIndex
@@ -1794,14 +2067,14 @@ proc buildPlayerPacket(
       else:
         homeOverhangSpriteId(tintIndex)
   if player.dinnerTicks > 0 or sim.scoreTicks > 0:
-    result.addScreenOverlay(
+    packet.addScreenOverlay(
       sim,
-      nextState.spriteCache,
+      cache,
       player,
       playerIndex
     )
-    return
-  result.addObject(
+    return true
+  packet.addObject(
     BottomObjectId,
     -cameraX,
     -cameraY,
@@ -1810,15 +2083,15 @@ proc buildPlayerPacket(
     bottomSpriteId
   )
   if onMainMap:
-    result.addGardenObjects(sim, cameraX, cameraY)
-  result.addPlayerObjects(
+    packet.addGardenObjects(sim, cameraX, cameraY)
+  packet.addPlayerObjects(
     sim,
-    nextState.spriteCache,
+    cache,
     player.mapIndex,
     cameraX,
     cameraY
   )
-  result.addObject(
+  packet.addObject(
     OverhangObjectId,
     -cameraX,
     -cameraY,
@@ -1832,7 +2105,7 @@ proc buildPlayerPacket(
         DebugSpriteId
       else:
         HomeDebugSpriteId
-    result.addObject(
+    packet.addObject(
       DebugObjectId,
       -cameraX,
       -cameraY,
@@ -1840,12 +2113,32 @@ proc buildPlayerPacket(
       MapLayerId,
       debugSpriteId
     )
-  result.addInventoryObjects(
+  packet.addInventoryObjects(
     sim,
-    nextState.spriteCache,
+    cache,
     player
   )
-  result.addClockObjects(sim)
+  packet.addClockObjects(sim)
+  true
+
+proc buildPlayerPacket(
+  sim: SimServer,
+  playerIndex: int,
+  state: PlayerViewerState,
+  nextState: var PlayerViewerState
+): seq[uint8] =
+  ## Builds one sprite protocol packet for a player viewer.
+  nextState =
+    if state == nil:
+      PlayerViewerState()
+    else:
+      state
+  if not nextState.initialized:
+    result.add(sim.playerInitPacket)
+    nextState.initialized = true
+
+  result.addClearObjects()
+  discard result.addPlayerView(sim, playerIndex, nextState.spriteCache)
 
 proc buildGlobalPacket(
   sim: SimServer,
@@ -1859,63 +2152,17 @@ proc buildGlobalPacket(
     else:
       state
   if not nextState.initialized:
-    result.add(sim.globalInitPacket)
+    result.add(sim.playerInitPacket)
     nextState.initialized = true
 
   result.addClearObjects()
-  if sim.scoreTicks > 0:
-    let overlay = sim.scoreOverlaySprite()
-    result.addRgbaSpriteCached(
-      nextState.spriteCache,
-      ScoreSpriteBase,
-      overlay,
-      "score global"
-    )
-    result.addObject(
-      ScoreObjectBase,
-      0,
-      0,
-      ScoreZ,
-      MapLayerId,
-      ScoreSpriteBase
-    )
-    return
-
-  let tintIndex = sim.dayTintIndex()
-  result.addObject(
-    BottomObjectId,
-    0,
-    0,
-    BottomZ,
-    MapLayerId,
-    mainBottomSpriteId(tintIndex)
-  )
-  result.addGardenObjects(sim, 0, 0)
-  result.addPlayerObjects(
+  let selectedIndex = nextState.selectedGlobalPlayerIndex(sim)
+  discard result.addPlayerView(
     sim,
-    nextState.spriteCache,
-    MainMapIndex,
-    0,
-    0
+    selectedIndex,
+    nextState.spriteCache
   )
-  result.addObject(
-    OverhangObjectId,
-    0,
-    0,
-    OverhangZ,
-    MapLayerId,
-    mainOverhangSpriteId(tintIndex)
-  )
-  when DebugOutlines:
-    result.addObject(
-      DebugObjectId,
-      0,
-      0,
-      DebugZ,
-      MapLayerId,
-      DebugSpriteId
-    )
-  result.addClockObjects(sim)
+  result.addGlobalScorePanel(sim, nextState.spriteCache, selectedIndex)
 
 proc applyDrag(value: var int) =
   ## Applies one tick of friction to a velocity component.
@@ -2216,7 +2463,7 @@ proc startDinnerParties(sim: SimServer) =
       guestNames: seq[string]
       guestGnomeIndices: seq[int]
     for visitorIndex in visitors:
-      guestNames.add(sim.players[visitorIndex].name)
+      guestNames.add(sim.players[visitorIndex].playerName)
       guestGnomeIndices.add(sim.players[visitorIndex].gnomeIndex)
 
     let
@@ -2224,7 +2471,7 @@ proc startDinnerParties(sim: SimServer) =
       fedFoods = hostFoods.scaledFoods(visitors.len)
       score = hostFoods.totalItems() * visitors.len
       hostRecord = DinnerRecord(
-        hostName: host.name,
+        hostName: host.playerName,
         wasHost: true,
         foods: fedFoods,
         guestNames: guestNames,
@@ -2238,7 +2485,7 @@ proc startDinnerParties(sim: SimServer) =
 
     for visitorIndex in visitors:
       let visitorRecord = DinnerRecord(
-        hostName: host.name,
+        hostName: host.playerName,
         wasHost: false,
         foods: hostFoods,
         guestNames: guestNames,
@@ -2309,12 +2556,60 @@ proc initAppState() =
   appState.inputMasks = initTable[WebSocket, uint8]()
   appState.lastAppliedMasks = initTable[WebSocket, uint8]()
   appState.playerIndices = initTable[WebSocket, int]()
+  appState.playerSlots = initTable[WebSocket, int]()
   appState.playerViewers = initTable[WebSocket, PlayerViewerState]()
   appState.globalViewers = initTable[WebSocket, PlayerViewerState]()
-  appState.playerNames = initTable[WebSocket, string]()
+  appState.playerUsernames = initTable[WebSocket, string]()
   appState.chatMessages = initTable[WebSocket, string]()
   appState.closedSockets = @[]
   appState.tokens = @[]
+
+proc readI16(blob: string, offset: int): int =
+  ## Reads one little-endian signed 16-bit value from a string.
+  let value = uint16(blob[offset].uint8) or
+    (uint16(blob[offset + 1].uint8) shl 8)
+  int(cast[int16](value))
+
+proc globalPanelClickedPlayer(message: Message): int =
+  ## Returns the clicked global score-panel player index or -1.
+  result = -1
+  if message.kind != BinaryMessage:
+    return
+  var
+    offset = 0
+    x = 0
+    y = 0
+    layer = -1
+  let blob = message.data
+  while offset < blob.len:
+    let messageType = blob[offset].uint8
+    inc offset
+    case messageType
+    of 0x82:
+      if offset + 5 > blob.len:
+        return -1
+      x = blob.readI16(offset)
+      y = blob.readI16(offset + 2)
+      layer = int(blob[offset + 4].uint8)
+      offset += 5
+    of 0x83:
+      if offset + 2 > blob.len:
+        return -1
+      let
+        button = blob[offset].uint8
+        down = blob[offset + 1].uint8 != 0
+      offset += 2
+      if layer != GlobalPanelLayerId or button != 1'u8 or not down:
+        continue
+      if x < GlobalPanelNameX or x >= GlobalPanelWidth:
+        continue
+      if y < GlobalPanelTitleHeight:
+        continue
+      let row = (y - GlobalPanelTitleHeight) div GlobalPanelRowHeight
+      if row >= 0 and row < HouseCount:
+        return row
+    else:
+      return -1
 
 proc readSpriteInputText(message: string): string =
   ## Reads printable text from sprite player input messages.
@@ -2372,8 +2667,10 @@ proc removePlayer(sim: SimServer, websocket: WebSocket) =
     appState.globalViewers.del(websocket)
   if websocket in appState.playerViewers:
     appState.playerViewers.del(websocket)
-  if websocket in appState.playerNames:
-    appState.playerNames.del(websocket)
+  if websocket in appState.playerSlots:
+    appState.playerSlots.del(websocket)
+  if websocket in appState.playerUsernames:
+    appState.playerUsernames.del(websocket)
   if websocket in appState.chatMessages:
     appState.chatMessages.del(websocket)
   if websocket notin appState.playerIndices:
@@ -2468,9 +2765,12 @@ proc playerToken(request: Request): string =
   ## Returns the requested player token.
   request.queryParams.getOrDefault("token", "").strip()
 
-proc playerName(request: Request): string =
-  ## Returns the requested player display name.
-  request.queryParams.getOrDefault("name", "").cleanPlayerName()
+proc playerUsername(request: Request): string =
+  ## Returns the requested connection username.
+  let username = request.queryParams.getOrDefault("username", "")
+  if username.len > 0:
+    return username.cleanUsername()
+  request.queryParams.getOrDefault("name", "").cleanUsername()
 
 proc playerJoinAllowed(slot: int, token: string): bool =
   ## Returns true when the configured token list accepts a join.
@@ -2497,7 +2797,7 @@ proc httpHandler(request: Request) =
     let
       slot = request.playerSlot()
       token = request.playerToken()
-      name = request.playerName()
+      username = request.playerUsername()
     var allowed = false
     {.gcsafe.}:
       withLock appState.lock:
@@ -2510,7 +2810,8 @@ proc httpHandler(request: Request) =
       withLock appState.lock:
         appState.playerViewers[websocket] = PlayerViewerState()
         appState.playerIndices[websocket] = UnassignedPlayerIndex
-        appState.playerNames[websocket] = name
+        appState.playerSlots[websocket] = slot
+        appState.playerUsernames[websocket] = username
         appState.inputMasks[websocket] = 0
         appState.lastAppliedMasks[websocket] = 0
   elif request.path == GlobalWebSocketPath and request.httpMethod == "GET" and
@@ -2534,6 +2835,16 @@ proc websocketHandler(
   of OpenEvent:
     discard
   of MessageEvent:
+    let clickedPlayer = message.globalPanelClickedPlayer()
+    if clickedPlayer >= 0:
+      {.gcsafe.}:
+        withLock appState.lock:
+          if websocket in appState.globalViewers:
+            let state = appState.globalViewers[websocket]
+            if state.selectedPlayerIndex != clickedPlayer:
+              state.selectedPlayerIndex = clickedPlayer
+              state.initialized = false
+              state.spriteCache.setLen(0)
     if message.kind == BinaryMessage and message.data.len == 2 and
         (
           message.data[0].uint8 == PacketInput or
@@ -2642,7 +2953,8 @@ proc runServerLoop*(
         for websocket in appState.playerIndices.keys:
           if appState.playerIndices[websocket] == UnassignedPlayerIndex:
             let playerIndex = sim.addPlayer(
-              appState.playerNames.getOrDefault(websocket, "")
+              appState.playerUsernames.getOrDefault(websocket, ""),
+              appState.playerSlots.getOrDefault(websocket, -1)
             )
             if playerIndex >= 0:
               appState.playerIndices[websocket] = playerIndex
