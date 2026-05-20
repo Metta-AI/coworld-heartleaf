@@ -52,7 +52,32 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "additionalProperties": false,
-      "properties": {}
+      "required": [
+        "day",
+        "names",
+        "scores"
+      ],
+      "properties": {
+        "day": {
+          "description": "One-based Heartleaf day number for this score row.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "names": {
+          "description": "Player names in score order.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scores": {
+          "description": "Cumulative player scores at the end of this day.",
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        }
+      }
     },
     "protocols": {
       "global": {

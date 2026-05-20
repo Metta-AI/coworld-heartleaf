@@ -42,11 +42,13 @@ const
   SpawnScanStep = 4
   HouseSpawnMaxDistance = 96
   TicksPerSecond = 24
-  DayRealMinutes = 5
+  DayRealMinutes = 2
   DayTicks = DayRealMinutes * 60 * TicksPerSecond
-  ScoreScreenTicks = 3 * TicksPerSecond
+  ScoreScreenTicks = 10 * TicksPerSecond
+  DinnerScreenTicks = 10 * TicksPerSecond
   DayStartMinutes = 8 * 60
   DayEndMinutes = 22 * 60
+  DinnerMinutes = 18 * 60
   DayStepMinutes = 5
   DayTotalMinutes = DayEndMinutes - DayStartMinutes
   DayStepCount = DayTotalMinutes div DayStepMinutes
@@ -82,11 +84,19 @@ const
   InventoryIconStep = 34
   InventoryUiWidth = InventoryColumns * InventoryIconStep
   InventoryUiHeight = InventoryRows * InventoryIconStep
-  ClockUiWidth = 50
+  ClockUiWidth = 72
   ClockUiHeight = 12
   ClockPadX = 2
   ClockPadY = 1
   ClockGlyphGap = 1
+  OverlayFoodColumns = 8
+  OverlayFoodStep = 34
+  OverlayGuestColumns = 4
+  OverlayGuestCellWidth = 78
+  OverlayGuestCellHeight = 32
+  OverlayScoreColumns = 3
+  OverlayScoreCellWidth = 104
+  OverlayScoreCellHeight = 54
   BottomSpriteId = 1
   OverhangSpriteId = 2
   HomeBottomSpriteId = 4
@@ -131,7 +141,7 @@ const
   TextBackR = 0x33'u8
   TextBackG = 0x31'u8
   TextBackB = 0x36'u8
-  ClockGlyphs = "0123456789:"
+  ClockGlyphs = "0123456789: AMP"
   TintHueTargets = [0.80, 0.78, 0.75, 0.70, 0.64]
   TintHueMixes = [0.18, 0.30, 0.43, 0.57, 0.72]
   TintSaturationScales = [1.05, 1.12, 1.20, 1.30, 1.38]
@@ -182,6 +192,8 @@ type
   Rect = object
     x, y, w, h: int
 
+  FoodCounts = array[FoodVeggieSlots, int]
+
   WorldMap = ref object
     width, height: int
     bottomSprite: RgbaSprite
@@ -200,7 +212,7 @@ type
 
   Garden = object
     rect: Rect
-    inventory: array[FoodVeggieSlots, int]
+    inventory: FoodCounts
 
   House = object
     rect: Rect
@@ -213,6 +225,15 @@ type
     cooks: seq[Rect]
     diners: seq[Rect]
 
+  DinnerRecord = ref object
+    hostName: string
+    wasHost: bool
+    foods: FoodCounts
+    guestNames: seq[string]
+    guestGnomeIndices: seq[int]
+    guestCount: int
+    score: int
+
   Player = ref object
     name: string
     x, y: int
@@ -222,7 +243,11 @@ type
     gnomeIndex: int
     homeFlag: int
     mapIndex: int
-    inventory: array[FoodVeggieSlots, int]
+    inventory: FoodCounts
+    dinners: seq[DinnerRecord]
+    score: int
+    dinnerTicks: int
+    dinnerRecord: DinnerRecord
     message: string
     messageTicks: int
     attackDown: bool
@@ -248,7 +273,9 @@ type
     rng: Rand
     tickCount: int
     dayTick: int
+    dayNumber: int
     scoreTicks: int
+    dinnerDone: bool
     playerInitPacket: seq[uint8]
     globalInitPacket: seq[uint8]
 
@@ -279,6 +306,7 @@ type
     seed: int
     maxTicks: int
     maxGames: int
+    saveScoresPath: string
     tokens: seq[string]
 
 var appState: WebSocketAppState
@@ -315,6 +343,31 @@ proc clientsDir(): string =
   if fileExists(sourceClients / ClientHtml):
     return sourceClients
   currentSourcePath().parentDir() / "clients"
+
+proc cogamePath(value, source: string): string =
+  ## Converts one COGAME file URI or path into a local path.
+  if value.len == 0:
+    return ""
+  const FilePrefix = "file://"
+  if value.startsWith(FilePrefix):
+    result = value[FilePrefix.len .. ^1]
+    if result.len == 0:
+      raise newException(HeartleafError, "Empty file URI from " & source & ".")
+    return
+  if value.contains("://"):
+    raise newException(
+      HeartleafError,
+      "Unsupported URI from " & source & ": " & value
+    )
+  value
+
+proc resultsPathFromEnv(): string =
+  ## Reads one scores path from the current and legacy env vars.
+  result = getEnv("COGAME_SAVE_RESULTS_PATH")
+  if result.len == 0:
+    result = getEnv("COGAME_RESULTS_PATH")
+  if result.len == 0:
+    result = cogamePath(getEnv("COGAME_RESULTS_URI"), "COGAME_RESULTS_URI")
 
 proc layerIndexByName(
   aseprite: AsepriteSprite,
@@ -557,6 +610,7 @@ proc initSimServer(seed = DefaultSeed): SimServer =
     raise newException(HeartleafError, "Gnome sheet has no gnomes.")
   result.textFont = readPixelFont(tiny5Path)
   result.players = @[]
+  result.dayNumber = 1
   result.playerInitPacket.addSpriteProtocolInit(
     result,
     ViewportWidth,
@@ -774,15 +828,104 @@ proc clockGlyphSprite(sim: SimServer, ch: char): RgbaSprite =
   result.fillRect(0, 0, width, height, fill)
   sim.blitChatText(result, $ch, ClockPadX, ClockPadY)
 
-proc scorePanelSprite(sim: SimServer, count: int): RgbaSprite =
-  ## Builds one black score panel showing a collected item count.
-  let
-    text = $count
-    width = max(10, sim.textFont.textWidth(text) + ChatPad * 2)
-    height = sim.textFont.height + ChatPad * 2
-  result = newRgbaSprite(width, height)
-  result.fillRect(0, 0, width, height, rgba(0, 0, 0, 235))
-  sim.blitChatText(result, text, ChatPad, ChatPad)
+proc overlaySprite(): RgbaSprite =
+  ## Builds one fully black viewport-sized overlay sprite.
+  result = newRgbaSprite(ViewportWidth, ViewportHeight)
+  result.fillRect(
+    0,
+    0,
+    ViewportWidth,
+    ViewportHeight,
+    rgba(0, 0, 0, 255)
+  )
+
+proc drawFoodCounts(
+  sim: SimServer,
+  target: var RgbaSprite,
+  foods: FoodCounts,
+  x,
+  y: int
+) =
+  ## Draws food icons with their item counts.
+  var slot = 0
+  for foodIndex, count in foods:
+    if count <= 0:
+      continue
+    let
+      col = slot mod OverlayFoodColumns
+      row = slot div OverlayFoodColumns
+      iconX = x + col * OverlayFoodStep
+      iconY = y + row * OverlayFoodStep
+    if iconY + FoodSpriteSize > ViewportHeight:
+      return
+    target.blitRgbaSprite(sim.foods.icons[foodIndex], iconX, iconY)
+    let countSprite = sim.inventoryCountSprite(count)
+    target.blitRgbaSprite(
+      countSprite,
+      iconX + FoodSpriteSize - countSprite.width,
+      iconY + FoodSpriteSize - countSprite.height
+    )
+    inc slot
+
+proc drawDinnerGuests(
+  sim: SimServer,
+  target: var RgbaSprite,
+  record: DinnerRecord,
+  x,
+  y: int
+) =
+  ## Draws gnome icons with names for fed dinner guests.
+  for i, name in record.guestNames:
+    let
+      col = i mod OverlayGuestColumns
+      row = i div OverlayGuestColumns
+      iconX = x + col * OverlayGuestCellWidth
+      iconY = y + row * OverlayGuestCellHeight
+    if iconY + GnomeSpriteSize > ViewportHeight:
+      return
+    if i < record.guestGnomeIndices.len:
+      let gnomeIndex = record.guestGnomeIndices[i]
+      if gnomeIndex >= 0 and gnomeIndex < sim.gnomes.len:
+        target.blitRgbaSprite(
+          sim.gnomes[gnomeIndex].frames[DirDown],
+          iconX,
+          iconY
+        )
+    sim.blitChatText(target, name, iconX + GnomeSpriteSize + 2, iconY + 12)
+
+proc dinnerOverlaySprite(sim: SimServer, record: DinnerRecord): RgbaSprite =
+  ## Builds the full-screen dinner result overlay.
+  result = overlaySprite()
+  if record.wasHost:
+    sim.blitChatText(result, "During dinner party you fed:", 8, 4)
+    sim.blitChatText(result, "+" & $record.score & " score", 8, 16)
+    sim.blitChatText(result, "Guests: " & $record.guestCount, 8, 27)
+    sim.drawDinnerGuests(result, record, 8, 36)
+    sim.drawFoodCounts(result, record.foods, 8, 100)
+  else:
+    sim.blitChatText(result, "At dinner party you ate:", 8, 8)
+    sim.blitChatText(result, "Host: " & record.hostName, 8, 20)
+    sim.drawFoodCounts(result, record.foods, 8, 40)
+
+proc scoreOverlaySprite(sim: SimServer): RgbaSprite =
+  ## Builds the full-screen cumulative score overlay.
+  result = overlaySprite()
+  sim.blitChatText(result, "End of day scores", 8, 8)
+  for i, player in sim.players:
+    let
+      col = i mod OverlayScoreColumns
+      row = i div OverlayScoreColumns
+      x = 8 + col * OverlayScoreCellWidth
+      y = 28 + row * OverlayScoreCellHeight
+    if y + GnomeSpriteSize > ViewportHeight:
+      return
+    result.blitRgbaSprite(
+      sim.gnomes[player.gnomeIndex].frames[DirDown],
+      x,
+      y
+    )
+    sim.blitChatText(result, player.name, x, y + GnomeSpriteSize + 2)
+    sim.blitChatText(result, "Score: " & $player.score, x + 36, y + 12)
 
 proc addNameTag(
   packet: var seq[uint8],
@@ -887,7 +1030,17 @@ proc clockGlyphIndex(ch: char): int =
   ## Returns the compact clock sprite slot for one glyph.
   if ch >= '0' and ch <= '9':
     return ord(ch) - ord('0')
-  10
+  case ch
+  of ':':
+    10
+  of 'A':
+    11
+  of 'M':
+    12
+  of 'P':
+    13
+  else:
+    14
 
 proc clockGlyphSpriteId(ch: char): int =
   ## Returns the sprite id for one clock glyph.
@@ -898,6 +1051,35 @@ proc foodName(foodIndex: int): string =
   if foodIndex >= 0 and foodIndex < FoodNames.len:
     return FoodNames[foodIndex]
   "food " & $foodIndex
+
+proc dailyResultsJson*(sim: SimServer): string =
+  ## Returns one daily player score result as JSON.
+  var
+    names = newJArray()
+    scores = newJArray()
+    results = newJObject()
+  for player in sim.players:
+    names.add(%player.name)
+    scores.add(%player.score)
+  results["day"] = %sim.dayNumber
+  results["names"] = names
+  results["scores"] = scores
+  $results
+
+proc totalItems(foods: FoodCounts): int =
+  ## Returns the total number of items in one food count set.
+  for count in foods:
+    result += count
+
+proc clearFoods(foods: var FoodCounts) =
+  ## Clears one food count set.
+  for i in 0 ..< FoodVeggieSlots:
+    foods[i] = 0
+
+proc scaledFoods(foods: FoodCounts, multiplier: int): FoodCounts =
+  ## Returns food counts multiplied by one guest count.
+  for i in 0 ..< FoodVeggieSlots:
+    result[i] = foods[i] * multiplier
 
 proc isHomeMap(mapIndex: int): bool =
   ## Returns true when a map id points at one of the nine home maps.
@@ -925,12 +1107,22 @@ proc twoDigits(value: int): string =
   $value
 
 proc clockText(sim: SimServer): string =
-  ## Returns the current game clock as HH:MM text.
+  ## Returns the current game clock as 12-hour AM/PM text.
   let
     minutes = sim.currentDayMinutes()
-    hour = minutes div 60
+    hour24 = minutes div 60
     minute = minutes mod 60
-  hour.twoDigits() & ":" & minute.twoDigits()
+    suffix =
+      if hour24 < 12:
+        "AM"
+      else:
+        "PM"
+    hour12 =
+      if hour24 mod 12 == 0:
+        12
+      else:
+        hour24 mod 12
+  $hour12 & ":" & minute.twoDigits() & " " & suffix
 
 proc dayTintIndex(sim: SimServer): int =
   ## Returns the active dusk tint index, or -1 during full daylight.
@@ -943,11 +1135,6 @@ proc dayTintIndex(sim: SimServer): int =
       (DayEndMinutes - DuskStartMinutes)
   )
 
-proc totalItems(player: Player): int =
-  ## Returns the total number of food items in one player inventory.
-  for count in player.inventory:
-    result += count
-
 proc addSpriteProtocolInit(
   packet: var seq[uint8],
   sim: SimServer,
@@ -955,12 +1142,12 @@ proc addSpriteProtocolInit(
   viewportHeight: int
 ) =
   ## Appends static sprite protocol setup for one viewer.
-  packet.addLayer(MapLayerId, MapLayerKind, MapLayerFlags)
   packet.addViewport(MapLayerId, viewportWidth, viewportHeight)
-  packet.addLayer(UiLayerId, UiLayerKind, UiLayerFlags)
   packet.addViewport(UiLayerId, InventoryUiWidth, InventoryUiHeight)
-  packet.addLayer(ClockLayerId, ClockLayerKind, UiLayerFlags)
   packet.addViewport(ClockLayerId, ClockUiWidth, ClockUiHeight)
+  packet.addLayer(MapLayerId, MapLayerKind, MapLayerFlags)
+  packet.addLayer(UiLayerId, UiLayerKind, UiLayerFlags)
+  packet.addLayer(ClockLayerId, ClockLayerKind, UiLayerFlags)
   packet.addRgbaSprite(
     BottomSpriteId,
     sim.mainMap.bottomSprite,
@@ -1410,28 +1597,32 @@ proc cameraYFor(sim: SimServer, player: Player): int =
     world.height - ViewportHeight
   )
 
-proc addScorePanel(
+proc addScreenOverlay(
   packet: var seq[uint8],
   sim: SimServer,
   cache: var seq[SpriteCacheEntry],
   player: Player,
-  playerIndex,
-  screenX,
-  screenY: int
+  playerIndex: int
 ) =
-  ## Appends the end-of-day score panel next to one player.
-  if sim.scoreTicks <= 0:
+  ## Appends one full-screen dinner or score overlay.
+  var
+    overlay: RgbaSprite
+    label = ""
+  if player.dinnerTicks > 0 and player.dinnerRecord != nil:
+    overlay = sim.dinnerOverlaySprite(player.dinnerRecord)
+    label = "dinner " & $playerIndex
+  elif sim.scoreTicks > 0:
+    overlay = sim.scoreOverlaySprite()
+    label = "score " & $playerIndex
+  else:
     return
-  let
-    score = sim.scorePanelSprite(player.totalItems())
-    spriteId = ScoreSpriteBase + playerIndex
-    x = screenX + GnomeSpriteSize + 2
-    y = screenY + GnomeSpriteSize div 2 - score.height div 2
-  packet.addRgbaSpriteCached(cache, spriteId, score, "score " & $playerIndex)
+
+  let spriteId = ScoreSpriteBase + playerIndex
+  packet.addRgbaSpriteCached(cache, spriteId, overlay, label)
   packet.addObject(
     ScoreObjectBase + playerIndex,
-    x,
-    y,
+    0,
+    0,
     ScoreZ,
     MapLayerId,
     spriteId
@@ -1477,14 +1668,6 @@ proc addPlayerObjects(
       screenX,
       nameY,
       ChatZ
-    )
-    packet.addScorePanel(
-      sim,
-      cache,
-      player,
-      i,
-      screenX,
-      screenY
     )
 
 proc addGardenObjects(
@@ -1610,6 +1793,14 @@ proc buildPlayerPacket(
         mainOverhangSpriteId(tintIndex)
       else:
         homeOverhangSpriteId(tintIndex)
+  if player.dinnerTicks > 0 or sim.scoreTicks > 0:
+    result.addScreenOverlay(
+      sim,
+      nextState.spriteCache,
+      player,
+      playerIndex
+    )
+    return
   result.addObject(
     BottomObjectId,
     -cameraX,
@@ -1672,6 +1863,24 @@ proc buildGlobalPacket(
     nextState.initialized = true
 
   result.addClearObjects()
+  if sim.scoreTicks > 0:
+    let overlay = sim.scoreOverlaySprite()
+    result.addRgbaSpriteCached(
+      nextState.spriteCache,
+      ScoreSpriteBase,
+      overlay,
+      "score global"
+    )
+    result.addObject(
+      ScoreObjectBase,
+      0,
+      0,
+      ScoreZ,
+      MapLayerId,
+      ScoreSpriteBase
+    )
+    return
+
   let tintIndex = sim.dayTintIndex()
   result.addObject(
     BottomObjectId,
@@ -1930,8 +2139,12 @@ proc moveAxis(sim: SimServer, player: Player, horizontal: bool) =
         break
 
 proc updateMessages(sim: SimServer) =
-  ## Clears player speech bubbles when their lifetime expires.
+  ## Clears transient player panels when their lifetime expires.
   for player in sim.players.mitems:
+    if player.dinnerTicks > 0:
+      dec player.dinnerTicks
+      if player.dinnerTicks <= 0:
+        player.dinnerRecord = nil
     if player.messageTicks <= 0:
       if player.message.len > 0:
         player.message = ""
@@ -1955,18 +2168,96 @@ proc teleportPlayerToOwnHome(sim: SimServer, playerIndex: int) =
     DirDown
   )
 
-proc clearInventory(player: var Player) =
+proc clearInventory(player: Player) =
   ## Clears one player inventory.
-  for i in 0 ..< FoodVeggieSlots:
-    player.inventory[i] = 0
+  player.inventory.clearFoods()
+
+proc homeHostIndex(sim: SimServer, mapIndex: int): int =
+  ## Returns the player index for the host assigned to one home map.
+  result = -1
+  for i, player in sim.players:
+    if player.homeFlag == mapIndex:
+      return i
+
+proc homeVisitors(sim: SimServer, mapIndex, hostIndex: int): seq[int] =
+  ## Returns player indices visiting one occupied home map.
+  for i, player in sim.players:
+    if i == hostIndex:
+      continue
+    if player.mapIndex == mapIndex:
+      result.add(i)
+
+proc recordDinner(
+  player: Player,
+  record: DinnerRecord
+) =
+  ## Stores and shows one dinner result for a player.
+  player.dinners.add(record)
+  player.dinnerRecord = record
+  player.dinnerTicks = DinnerScreenTicks
+
+proc startDinnerParties(sim: SimServer) =
+  ## Resolves all valid 6pm dinner parties in occupied homes.
+  sim.dinnerDone = true
+  for homeIndex in 0 ..< HouseCount:
+    let
+      mapIndex = homeIndex.homeMapIndex()
+      hostIndex = sim.homeHostIndex(mapIndex)
+    if hostIndex < 0:
+      continue
+    let host = sim.players[hostIndex]
+    if host.mapIndex != mapIndex:
+      continue
+    let visitors = sim.homeVisitors(mapIndex, hostIndex)
+    if visitors.len == 0:
+      continue
+
+    var
+      guestNames: seq[string]
+      guestGnomeIndices: seq[int]
+    for visitorIndex in visitors:
+      guestNames.add(sim.players[visitorIndex].name)
+      guestGnomeIndices.add(sim.players[visitorIndex].gnomeIndex)
+
+    let
+      hostFoods = host.inventory
+      fedFoods = hostFoods.scaledFoods(visitors.len)
+      score = hostFoods.totalItems() * visitors.len
+      hostRecord = DinnerRecord(
+        hostName: host.name,
+        wasHost: true,
+        foods: fedFoods,
+        guestNames: guestNames,
+        guestGnomeIndices: guestGnomeIndices,
+        guestCount: visitors.len,
+        score: score
+      )
+    host.score += score
+    host.recordDinner(hostRecord)
+    host.clearInventory()
+
+    for visitorIndex in visitors:
+      let visitorRecord = DinnerRecord(
+        hostName: host.name,
+        wasHost: false,
+        foods: hostFoods,
+        guestNames: guestNames,
+        guestGnomeIndices: guestGnomeIndices,
+        guestCount: visitors.len,
+        score: 0
+      )
+      sim.players[visitorIndex].recordDinner(visitorRecord)
 
 proc startDay(sim: SimServer) =
-  ## Starts a new morning with fresh gardens and players at home.
+  ## Starts a new morning while keeping long-game player progress.
+  inc sim.dayNumber
   sim.dayTick = 0
   sim.scoreTicks = 0
+  sim.dinnerDone = false
   sim.gardens = loadGardens(sim.debugRects, sim.rng)
   for player in sim.players.mitems:
-    player.clearInventory()
+    player.dinnerTicks = 0
+    player.dinnerRecord = nil
   for i in 0 ..< sim.players.len:
     sim.teleportPlayerToOwnHome(i)
 
@@ -1974,6 +2265,9 @@ proc startScoreScreen(sim: SimServer) =
   ## Starts the end-of-day scoring screen.
   sim.dayTick = DayTicks
   sim.scoreTicks = ScoreScreenTicks
+  for player in sim.players.mitems:
+    player.dinnerTicks = 0
+    player.dinnerRecord = nil
   for i in 0 ..< sim.players.len:
     sim.teleportPlayerToOwnHome(i)
 
@@ -2003,6 +2297,8 @@ proc step(sim: SimServer, inputs: openArray[InputState]) =
     sim.moveAxis(sim.players[i], false)
   sim.updateMessages()
   inc sim.dayTick
+  if not sim.dinnerDone and sim.currentDayMinutes() >= DinnerMinutes:
+    sim.startDinnerParties()
   if sim.dayTick >= DayTicks:
     sim.startScoreScreen()
 
@@ -2272,12 +2568,36 @@ proc runFrameLimiter(previousTick: var MonoTime) =
     sleep(int((frameDuration - elapsed).inMilliseconds))
   previousTick = getMonoTime()
 
+proc appendDailyScores(path, jsonLine: string) =
+  ## Appends one daily score JSON line to a configured results file.
+  if path.len == 0:
+    return
+  if not fileExists(path):
+    writeFile(path, "")
+  var file: File
+  if not open(file, path, fmAppend):
+    raise newException(HeartleafError, "Could not open scores file: " & path)
+  try:
+    file.write(jsonLine)
+    file.write("\n")
+  finally:
+    file.close()
+
+proc writeDailyScores(sim: SimServer, path: string) =
+  ## Appends the current day scores when score saving is configured.
+  if path.len == 0:
+    return
+  appendDailyScores(path, sim.dailyResultsJson())
+  echo "Scores written: ", path, " (day ", sim.dayNumber, ", ",
+    getFileSize(path), " bytes)"
+
 proc runServerLoop*(
   host = DefaultHost,
   port = DefaultPort,
   seed = DefaultSeed,
   maxTicks = DefaultMaxTicks,
   maxGames = DefaultMaxGames,
+  saveScoresPath = "",
   tokens: seq[string] = @[]
 ) =
   ## Runs the Heartleaf websocket game server.
@@ -2352,7 +2672,10 @@ proc runServerLoop*(
           globalSockets.add(websocket)
           globalStates.add(state)
 
+    let wasScoring = sim.scoreTicks > 0
     sim.step(inputs)
+    if not wasScoring and sim.scoreTicks > 0:
+      sim.writeDailyScores(saveScoresPath)
     inc runTicks
 
     for i in 0 ..< sockets.len:
@@ -2456,6 +2779,8 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("max-ticks", config.maxTicks)
   node.readConfigInt("maxGames", config.maxGames)
   node.readConfigInt("max-games", config.maxGames)
+  node.readConfigString("saveScoresPath", config.saveScoresPath)
+  node.readConfigString("save-scores", config.saveScoresPath)
   node.readConfigStrings("tokens", config.tokens)
 
 when isMainModule:
@@ -2466,6 +2791,7 @@ when isMainModule:
       seed: DefaultSeed,
       maxTicks: DefaultMaxTicks,
       maxGames: DefaultMaxGames,
+      saveScoresPath: resultsPathFromEnv(),
       tokens: @[]
     )
     configJson = ""
@@ -2491,6 +2817,8 @@ when isMainModule:
         config.maxTicks = parseInt(val)
       of "maxGames", "max-games":
         config.maxGames = parseInt(val)
+      of "saveScores", "save-scores":
+        config.saveScoresPath = val
       of "token":
         config.tokens.add(val)
       of "config":
@@ -2505,11 +2833,14 @@ when isMainModule:
     config.update(readFile(configPath))
   if configJson.len > 0:
     config.update(configJson)
+  if config.saveScoresPath.len > 0:
+    echo "Using results save file: " & config.saveScoresPath
   runServerLoop(
     config.address,
     config.port,
     seed = config.seed,
     maxTicks = config.maxTicks,
     maxGames = config.maxGames,
+    saveScoresPath = config.saveScoresPath,
     tokens = config.tokens
   )

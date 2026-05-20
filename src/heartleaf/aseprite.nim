@@ -323,6 +323,46 @@ proc fillRect*(
     for px in left ..< right:
       sprite.putPixel(px, py, color)
 
+proc blitRgbaSprite*(
+  target: var RgbaSprite,
+  source: RgbaSprite,
+  x,
+  y: int
+) =
+  ## Blits one RGBA sprite onto another with alpha blending.
+  for sy in 0 ..< source.height:
+    let ty = y + sy
+    if ty < 0 or ty >= target.height:
+      continue
+    for sx in 0 ..< source.width:
+      let tx = x + sx
+      if tx < 0 or tx >= target.width:
+        continue
+      let
+        sourceOffset = source.pixelOffset(sx, sy)
+        sourceAlpha = int(source.pixels[sourceOffset + 3])
+      if sourceAlpha <= 0:
+        continue
+      let targetOffset = target.pixelOffset(tx, ty)
+      if sourceAlpha == 255 or target.pixels[targetOffset + 3] == 0:
+        for i in 0 .. 3:
+          target.pixels[targetOffset + i] = source.pixels[sourceOffset + i]
+        continue
+      let
+        targetAlpha = int(target.pixels[targetOffset + 3])
+        outAlpha = sourceAlpha + targetAlpha * (255 - sourceAlpha) div 255
+      if outAlpha <= 0:
+        continue
+      for i in 0 .. 2:
+        let value =
+          (
+            int(source.pixels[sourceOffset + i]) * sourceAlpha +
+            int(target.pixels[targetOffset + i]) * targetAlpha *
+              (255 - sourceAlpha) div 255
+          ) div outAlpha
+        target.pixels[targetOffset + i] = value.uint8
+      target.pixels[targetOffset + 3] = outAlpha.uint8
+
 proc strokeRect*(
   sprite: var RgbaSprite,
   x, y, width, height: int,
