@@ -19,7 +19,7 @@ const
   FootHalfHeight = PlayerBoxHeight div 2
   FootMinX = FootHalfWidth
   FootMinY = FootHalfHeight
-  CollectActionRadius = 80
+  CollectActionRadius = 32
   GreetingRadius = 90
   NavStep = 2
   PathArrivePixels = 3
@@ -33,7 +33,6 @@ const
   DefaultName = "viliger"
   UnknownHouse = -1
   HouseCount = 9
-  PartyRoleCount = 4
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
   ViewerWindowWidth = 1480
@@ -62,11 +61,14 @@ const
   ViewerInventoryGap = 8.0'f
   ViewerInventoryScale = 1.0'f
   DayStartMinutes = 8 * 60
-  GatherUntilMinutes = 14 * 60
-  PartyPlanMinutes = 12 * 60 + 15
   HouseEnterMinutes = 17 * 60
-  DinnerMinutes = 18 * 60
+  PartyLeaveMinutes = 20 * 60
   DayEndMinutes = 22 * 60
+  LatePartySearchMinutes = 16 * 60
+  MaxHostWaitMinutes = 90
+  StrongHostFood = 12
+  MediumHostFood = 6
+  LowHostFood = 2
   HouseGatherMaxRadius = 96
   MorningIdentityUntilMinutes = 9 * 60
   MorningIdentityRadius = 140
@@ -117,11 +119,6 @@ type
     GoalEnterHouse
     GoalExitHouse
     GoalMove
-
-  PartyRole = enum
-    PartyHost
-    PartyEarly
-    PartyLate
 
   Rect = object
     x, y, w, h: int
@@ -199,6 +196,10 @@ type
     greetedNames: seq[string]
     currentGarden: int
     partyHouse: int
+    searchHouse: int
+    hostUntilMinutes: int
+    hostCommitted: bool
+    dayIndex: int
     frameTick: int
     desiredMask: uint8
     target: Point
@@ -268,21 +269,6 @@ proc houseIndexForPlayerName(name: string): int =
     if playerName == name:
       return i
   -1
-
-proc partyRole(bot: Bot): PartyRole =
-  ## Returns this bot's deterministic party role.
-  case bot.homeIndex mod PartyRoleCount
-  of 0:
-    PartyHost
-  of 1:
-    PartyEarly
-  else:
-    PartyLate
-
-proc isHostHouse(houseIndex: int): bool =
-  ## Returns true when a house belongs to a self-appointed host.
-  houseIndex >= 0 and houseIndex < HouseCount and
-    houseIndex mod PartyRoleCount == 0
 
 proc loadBotResources(): Resources =
   ## Loads house, garden, and home-exit resource rectangles.
@@ -1256,10 +1242,14 @@ proc parseClockMinutes(text: string): int =
 
 proc resetGardenPlan(bot: Bot) =
   ## Resets the static garden checklist and greetings for a new day.
+  inc bot.dayIndex
   bot.gardenChecked = newSeq[bool](bot.resources.gardens.len)
   bot.greetedNames.setLen(0)
   bot.currentGarden = -1
   bot.partyHouse = UnknownHouse
+  bot.searchHouse = UnknownHouse
+  bot.hostUntilMinutes = -1
+  bot.hostCommitted = false
   bot.path.setLen(0)
   bot.goal = Goal(kind: GoalIdle, mapKind: MapUnknown)
 
@@ -1352,6 +1342,7 @@ proc adoptHomeIdentity(bot: Bot, homeIndex: int) =
       UnknownHouse
   bot.pendingHouse = UnknownHouse
   bot.partyHouse = UnknownHouse
+  bot.searchHouse = UnknownHouse
   bot.currentGarden = -1
   bot.path.setLen(0)
   bot.goal = Goal(kind: GoalIdle, mapKind: MapUnknown)
@@ -1429,10 +1420,6 @@ proc updateStuck(bot: Bot, mask: uint8) =
   bot.previousX = footX
   bot.previousY = footY
 
-proc gatherUntilMinutes(bot: Bot): int =
-  ## Returns the gather cutoff for this bot's dinner role.
-  GatherUntilMinutes
-
 proc gardenHasMarker(bot: Bot, gardenIndex: int): bool =
   ## Returns true when the current view has a garden exclamation marker.
   let objectId = GardenObjectBase + gardenIndex
@@ -1472,13 +1459,51 @@ proc nearbyMarkedGarden(bot: Bot): int =
       result = i
       bestDistance = distance
 
+proc parseInventoryCount(label: string): int =
+  ## Parses a count from one inventory count sprite label.
+  let parts = strutils.splitWhitespace(label)
+  if parts.len == 0:
+    return 0
+  try:
+    result = parseInt(parts[^1])
+  except ValueError:
+    result = 0
+
+proc inventoryTotal(bot: Bot): int =
+  ## Returns how many food items this bot is carrying.
+  for foodIndex in 0 ..< FoodVeggieSlots:
+    let countObjectId = InventoryCountObjectBase + foodIndex
+    if countObjectId < bot.objects.len and
+        bot.objects[countObjectId].present:
+      let sprite = bot.spriteInfo(bot.objects[countObjectId].spriteId)
+      if sprite != nil:
+        result += sprite.label.parseInventoryCount()
+        continue
+    let iconObjectId = InventoryObjectBase + foodIndex
+    if iconObjectId < bot.objects.len and bot.objects[iconObjectId].present:
+      inc result
+
+proc gardensExhausted(bot: Bot): bool =
+  ## Returns true when the bot has checked every known garden.
+  if bot.gardenChecked.len != bot.resources.gardens.len:
+    return false
+  if bot.anyGardenMarkers():
+    return false
+  for checked in bot.gardenChecked:
+    if not checked:
+      return false
+  true
+
+proc shouldGather(bot: Bot): bool =
+  ## Returns true when the bot should keep gathering food.
+  bot.minutes < HouseEnterMinutes and not bot.gardensExhausted()
+
 proc analyze(bot: Bot) =
   ## Rebuilds high-level bot state from decoded objects.
   bot.updateClock()
   bot.updateMapKind()
   bot.updateSelf()
   if bot.mapKind == MapHome and bot.currentHouse == UnknownHouse and
-      bot.minutes < bot.gatherUntilMinutes() and
       bot.playerName.len > 0:
     bot.currentHouse = bot.homeIndex
 
@@ -1559,6 +1584,10 @@ proc initBot(name: string, slot: int, decodeVisualSprites = false): Bot =
   result.goal = Goal(kind: GoalIdle, mapKind: MapUnknown)
   result.currentGarden = -1
   result.partyHouse = UnknownHouse
+  result.searchHouse = UnknownHouse
+  result.hostUntilMinutes = -1
+  result.hostCommitted = false
+  result.dayIndex = 0
   result.gardenChecked = newSeq[bool](result.resources.gardens.len)
   result.greetedNames = @[]
 
@@ -1724,10 +1753,8 @@ proc visiblePlayerHome(bot: Bot, playerIndex: int): int =
   ## Returns the fixed home index for one visible player.
   bot.visiblePlayerName(playerIndex).houseIndexForPlayerName()
 
-proc houseHasHost(bot: Bot, houseIndex: int): bool =
-  ## Returns true when a self-appointed host is visible near their house.
-  if not houseIndex.isHostHouse():
-    return false
+proc houseOwnerPresent(bot: Bot, houseIndex: int): bool =
+  ## Returns true when a home owner is visible near their house.
   for objectId, objectState in bot.objects:
     if not objectState.present:
       continue
@@ -1739,31 +1766,21 @@ proc houseHasHost(bot: Bot, houseIndex: int): bool =
     if bot.playerNearHouse(objectState, houseIndex):
       return true
 
-proc closestHostHouse(bot: Bot): int =
-  ## Returns the closest valid self-appointed host house.
-  result = UnknownHouse
-  var bestDistance = high(int)
-  for houseIndex, house in bot.resources.houses:
-    if not houseIndex.isHostHouse():
+proc houseHasGuest(bot: Bot, houseIndex: int): bool =
+  ## Returns true when another visible player waits near one house.
+  if houseIndex < 0 or
+      houseIndex >= bot.resources.houseValid.len or
+      not bot.resources.houseValid[houseIndex]:
+    return false
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
       continue
-    if not bot.resources.houseValid[houseIndex]:
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
       continue
-    let distance = bot.playerDistanceSquared(house)
-    if distance < bestDistance:
-      bestDistance = distance
-      result = houseIndex
-
-proc closestHouseWithHost(bot: Bot): int =
-  ## Returns the closest visible host house with its host present.
-  result = UnknownHouse
-  var bestDistance = high(int)
-  for houseIndex, house in bot.resources.houses:
-    if not bot.houseHasHost(houseIndex):
+    if objectId - PlayerObjectBase == bot.selfIndex:
       continue
-    let distance = bot.playerDistanceSquared(house)
-    if distance < bestDistance:
-      bestDistance = distance
-      result = houseIndex
+    if bot.playerNearHouse(objectState, houseIndex):
+      return true
 
 proc houseCrowd(bot: Bot, houseIndex: int): int =
   ## Returns how many visible gnomes are gathered near one house.
@@ -1775,51 +1792,178 @@ proc houseCrowd(bot: Bot, houseIndex: int): int =
     if bot.playerNearHouse(objectState, houseIndex):
       inc result
 
-proc mostCrowdedHouse(bot: Bot): int =
-  ## Returns the visible house with the largest gathered crowd.
-  result = UnknownHouse
+proc socialRandom(bot: Bot, salt, limit: int): int =
+  ## Returns one deterministic daily pseudo-random value.
+  if limit <= 0:
+    return 0
+  var value = uint32(bot.homeIndex + 1)
+  value = value * 1103515245'u32 + uint32(bot.dayIndex + 1)
+  value = value xor (uint32(max(0, salt)) * 2654435761'u32)
+  value = value xor (value shr 16)
+  int(value mod uint32(limit))
+
+proc hostWaitDuration(bot: Bot): int =
+  ## Returns how long this bot should try hosting today.
+  let food = bot.inventoryTotal()
+  if food >= StrongHostFood:
+    return MaxHostWaitMinutes
   var
-    bestCount = 0
-    bestDistance = high(int)
-  for houseIndex, house in bot.resources.houses:
-    if not houseIndex.isHostHouse():
-      continue
+    base = 0
+    jitter = 15
+  if food <= 0:
+    base = 0
+    jitter = 10
+  elif food <= LowHostFood:
+    base = 5
+    jitter = 15
+  elif food < MediumHostFood:
+    base = 15
+    jitter = 25
+  else:
+    base = 40
+    jitter = 45
+  min(MaxHostWaitMinutes, base + bot.socialRandom(31 + food, jitter + 1))
+
+proc ensureHostWait(bot: Bot) =
+  ## Initializes this day's host patience window.
+  if bot.hostUntilMinutes >= 0:
+    return
+  bot.hostUntilMinutes = min(
+    HouseEnterMinutes,
+    bot.minutes + bot.hostWaitDuration()
+  )
+
+proc shouldHostOwnHouse(bot: Bot): bool =
+  ## Returns true when the bot should keep trying to host at home.
+  if bot.homeIndex < 0 or bot.homeIndex >= HouseCount:
+    return false
+  if bot.houseHasGuest(bot.homeIndex):
+    bot.hostCommitted = true
+    bot.partyHouse = bot.homeIndex
+    return true
+  if bot.hostCommitted:
+    bot.partyHouse = bot.homeIndex
+    return true
+  if bot.minutes >= LatePartySearchMinutes:
+    return false
+  let food = bot.inventoryTotal()
+  if food >= StrongHostFood:
+    bot.partyHouse = bot.homeIndex
+    return true
+  bot.ensureHostWait()
+  if bot.minutes < bot.hostUntilMinutes:
+    bot.partyHouse = bot.homeIndex
+    return true
+  false
+
+proc requiredPartyCrowd(bot: Bot): int =
+  ## Returns the crowd size this bot prefers before joining a party.
+  if bot.minutes >= LatePartySearchMinutes:
+    return 1
+  let minutesLeft = max(0, HouseEnterMinutes - bot.minutes)
+  result =
+    if minutesLeft > 180:
+      4
+    elif minutesLeft > 90:
+      3
+    elif minutesLeft > 30:
+      2
+    else:
+      1
+  let food = bot.inventoryTotal()
+  if food <= LowHostFood:
+    result = max(1, result - 1)
+  elif food >= MediumHostFood:
+    result = min(4, result + 1)
+
+proc acceptsPartyCrowd(bot: Bot, houseIndex, crowd: int): bool =
+  ## Returns true when this bot accepts a visible house crowd.
+  if crowd <= 0:
+    return false
+  if bot.minutes >= LatePartySearchMinutes:
+    return true
+  let required = bot.requiredPartyCrowd()
+  if crowd >= required:
+    return true
+  let
+    minutesLeft = max(0, HouseEnterMinutes - bot.minutes)
+    deficit = required - crowd
+  var chance =
+    if minutesLeft > 180:
+      case deficit
+      of 1: 20
+      of 2: 5
+      else: 0
+    elif minutesLeft > 90:
+      case deficit
+      of 1: 45
+      of 2: 15
+      else: 3
+    elif minutesLeft > 30:
+      case deficit
+      of 1: 70
+      of 2: 35
+      else: 10
+    else:
+      100
+  let food = bot.inventoryTotal()
+  if food <= LowHostFood:
+    chance += 15
+  elif food >= MediumHostFood:
+    chance -= 10
+  chance = chance.clamp(0, 100)
+  let salt = 1000 + houseIndex * 17 + bot.minutes div 15
+  bot.socialRandom(salt, 100) < chance
+
+proc visiblePartyScore(bot: Bot, houseIndex, crowd: int): int =
+  ## Returns a score for a visible candidate dinner house.
+  let distance = bot.playerDistanceSquared(bot.resources.houses[houseIndex])
+  result = crowd * 10_000 - distance div 16
+  if houseIndex == bot.partyHouse:
+    result += 2_000
+
+proc bestVisiblePartyHouse(bot: Bot, relaxed = false): int =
+  ## Returns the best visible house party this bot is willing to join.
+  result = UnknownHouse
+  var bestScore = low(int)
+  for houseIndex in 0 ..< HouseCount:
     if not bot.resources.houseValid[houseIndex]:
       continue
-    let count = bot.houseCrowd(houseIndex)
-    if count <= 0:
+    if houseIndex == bot.homeIndex:
       continue
-    let distance = bot.playerDistanceSquared(house)
-    if count > bestCount or
-        (count == bestCount and distance < bestDistance):
-      bestCount = count
-      bestDistance = distance
+    if not bot.houseOwnerPresent(houseIndex):
+      continue
+    let count = bot.houseCrowd(houseIndex)
+    if not relaxed and not bot.acceptsPartyCrowd(houseIndex, count):
+      continue
+    let score = bot.visiblePartyScore(houseIndex, count)
+    if score > bestScore:
+      bestScore = score
       result = houseIndex
 
+proc scoutingHouseIndex(bot: Bot): int =
+  ## Returns the next house this bot should inspect while seeking.
+  result = bot.homeIndex
+  let step = max(0, bot.minutes - DayStartMinutes) div 20
+  for offset in 0 ..< HouseCount:
+    let houseIndex = (bot.homeIndex + step + offset + 1) mod HouseCount
+    if houseIndex == bot.homeIndex:
+      continue
+    if bot.resources.houseValid[houseIndex]:
+      result = houseIndex
+      break
+  bot.searchHouse = result
+
 proc partyHouseIndex(bot: Bot): int =
-  ## Returns the house this bot currently wants to visit for dinner.
-  case bot.partyRole()
-  of PartyHost:
-    return bot.homeIndex
-  of PartyEarly:
-    if bot.partyHouse >= 0 and
-        (bot.minutes >= HouseEnterMinutes or bot.mapKind == MapHome):
-      return bot.partyHouse
-    if bot.partyHouse >= 0 and bot.houseHasHost(bot.partyHouse):
-      return bot.partyHouse
-    result = bot.closestHouseWithHost()
-    if result < 0:
-      result = bot.closestHostHouse()
-    bot.partyHouse = result
-  of PartyLate:
-    if bot.minutes >= HouseEnterMinutes and bot.partyHouse >= 0:
-      return bot.partyHouse
-    result = bot.mostCrowdedHouse()
-    if result < 0:
-      result = bot.closestHouseWithHost()
-    if result < 0:
-      result = bot.closestHostHouse()
-    bot.partyHouse = result
+  ## Returns the house this bot currently wants for dinner.
+  if bot.partyHouse >= 0:
+    return bot.partyHouse
+  result = bot.bestVisiblePartyHouse(true)
+  if result < 0 and bot.searchHouse >= 0:
+    result = bot.searchHouse
+  if result < 0:
+    result = bot.homeIndex
+  bot.partyHouse = result
 
 proc desiredHouseGatherPoint(bot: Bot, house: Rect): Point =
   ## Returns this bot's preferred outside door spot around one house.
@@ -1866,13 +2010,26 @@ proc gatherAtHouseGoal(bot: Bot, houseIndex: int): Goal =
     gardenIndex: -1
   )
 
-proc gatherHouseGoal(bot: Bot): Goal =
-  ## Returns the goal that keeps the bot outside its dinner house.
-  bot.gatherAtHouseGoal(bot.partyHouseIndex())
-
 proc gatherOwnHouseGoal(bot: Bot): Goal =
   ## Returns the goal that keeps the bot outside its own house.
   bot.gatherAtHouseGoal(bot.homeIndex)
+
+proc dinnerGatherGoal(bot: Bot): Goal =
+  ## Returns the outside-house goal for pre-dinner social planning.
+  if bot.mapKind == MapHome:
+    return bot.exitGoal()
+  if bot.mapKind != MapMain:
+    return Goal(kind: GoalIdle, mapKind: bot.mapKind)
+  if bot.shouldHostOwnHouse():
+    return bot.gatherOwnHouseGoal()
+  let partyHouse = bot.bestVisiblePartyHouse()
+  if partyHouse >= 0:
+    bot.partyHouse = partyHouse
+    return bot.gatherAtHouseGoal(partyHouse)
+  let scoutHouse = bot.scoutingHouseIndex()
+  bot.partyHouse = UnknownHouse
+  bot.searchHouse = scoutHouse
+  bot.gatherAtHouseGoal(scoutHouse)
 
 proc firstDinerGoal(bot: Bot): Goal =
   ## Returns a small idle movement goal away from the home exit.
@@ -1912,18 +2069,15 @@ proc chooseGoal(bot: Bot): Goal =
     return Goal(kind: GoalIdle, mapKind: bot.mapKind)
   if bot.mapKind == MapOverlay:
     return Goal(kind: GoalIdle, mapKind: bot.mapKind)
-  if bot.minutes < bot.gatherUntilMinutes():
+  if bot.shouldGather():
     if bot.mapKind == MapHome:
       return bot.exitGoal()
     let garden = bot.gardenGoal()
     if garden.kind != GoalIdle:
       return garden
-    return bot.gatherOwnHouseGoal()
-  if bot.minutes < PartyPlanMinutes:
-    return bot.gatherOwnHouseGoal()
   if bot.minutes < HouseEnterMinutes:
-    return bot.gatherHouseGoal()
-  if bot.minutes < DinnerMinutes:
+    return bot.dinnerGatherGoal()
+  if bot.minutes < PartyLeaveMinutes:
     return bot.partyGoal()
   if bot.minutes < DayEndMinutes:
     return bot.ownHomeGoal()
@@ -2191,15 +2345,21 @@ proc mapKindName(kind: MapKind): string =
   of MapOverlay:
     "overlay"
 
-proc partyRoleName(role: PartyRole): string =
-  ## Returns a readable party-role label.
-  case role
-  of PartyHost:
-    "host"
-  of PartyEarly:
-    "early"
-  of PartyLate:
-    "late"
+proc socialPlanName(bot: Bot): string =
+  ## Returns the bot's current social dinner plan.
+  if bot.shouldGather():
+    return "gather"
+  if bot.minutes >= HouseEnterMinutes and bot.minutes < PartyLeaveMinutes:
+    return "enter"
+  if bot.hostCommitted:
+    return "committed host"
+  if bot.partyHouse == bot.homeIndex:
+    return "host"
+  if bot.partyHouse >= 0:
+    return "guest"
+  if bot.searchHouse >= 0:
+    return "seek"
+  "plan"
 
 proc checkedGardenCount(bot: Bot): int =
   ## Returns how many static gardens have been ruled out today.
@@ -2871,8 +3031,12 @@ proc pumpViewer(
         " home=" & $(bot.homeIndex + 1) & "\n" &
       "bot: " & bot.logName() &
         " slot=" & $bot.slot &
-        " role=" & bot.partyRole().partyRoleName() &
-        " party house=" & $(bot.partyHouse + 1) & "\n" &
+        " plan=" & bot.socialPlanName() &
+        " food=" & $bot.inventoryTotal() &
+        " host until=" & $bot.hostUntilMinutes & "\n" &
+      "party house=" & $(bot.partyHouse + 1) &
+        " search house=" & $(bot.searchHouse + 1) &
+        " committed=" & $bot.hostCommitted & "\n" &
       "camera: (" & $bot.cameraX & ", " & $bot.cameraY & ")\n" &
       "player: (" & $bot.selfX & ", " & $bot.selfY & ")" &
         " foot=(" & $bot.playerFootX() & ", " &
@@ -2910,6 +3074,36 @@ proc queryEscape(value: string): string =
       result.add('%')
       result.add(Hex[(byte shr 4) and 0x0f])
       result.add(Hex[byte and 0x0f])
+
+proc queryParam(url, name: string): string =
+  ## Returns one raw query parameter value from a URL.
+  let queryAt = url.find('?')
+  if queryAt < 0:
+    return
+  var stop = url.find('#')
+  if stop < 0:
+    stop = url.len
+  if queryAt + 1 >= stop:
+    return
+  for part in url[queryAt + 1 ..< stop].split('&'):
+    let equalsAt = part.find('=')
+    if equalsAt < 0:
+      if part == name:
+        return ""
+      continue
+    if part[0 ..< equalsAt] == name:
+      return part[equalsAt + 1 .. ^1]
+
+proc slotFromUrl(url: string): int =
+  ## Returns the slot query value from a Coworld websocket URL.
+  result = -1
+  let text = url.queryParam("slot")
+  if text.len == 0:
+    return
+  try:
+    result = parseInt(text)
+  except ValueError:
+    result = -1
 
 proc playerUrl(
   host: string,
@@ -3025,8 +3219,10 @@ when isMainModule:
     name = DefaultName
     token = ""
     slot = -1
-    url = ""
+    url = getEnv("COGAMES_ENGINE_WS_URL")
     gui = false
+  if url.len == 0:
+    url = getEnv("COGAME_ENGINE_WS_URL")
   for kind, key, val in getopt():
     case kind
     of cmdLongOption:
@@ -3049,4 +3245,6 @@ when isMainModule:
         discard
     else:
       discard
+  if slot < 0 and url.len > 0:
+    slot = url.slotFromUrl()
   runBot(address, port, name, token, slot, url, gui)

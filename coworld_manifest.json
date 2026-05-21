@@ -20,13 +20,23 @@
         "tokens": {
           "description": "One connection token per player slot, indexed by slot.",
           "type": "array",
-          "minItems": 0,
-          "maxItems": 64,
+          "minItems": 9,
+          "maxItems": 9,
           "items": {
             "type": "string",
             "minLength": 0
           },
-          "default": []
+          "default": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
         },
         "seed": {
           "description": "Random seed.",
@@ -55,6 +65,8 @@
       "required": [
         "day",
         "names",
+        "usernames",
+        "playerNames",
         "scores"
       ],
       "properties": {
@@ -66,6 +78,26 @@
         "names": {
           "description": "Player names in score order.",
           "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "items": {
+            "type": "string"
+          }
+        },
+        "usernames": {
+          "description": "Connection usernames in score order.",
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "items": {
+            "type": "string"
+          }
+        },
+        "playerNames": {
+          "description": "Fixed Heartleaf gnome names in score order.",
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
           "items": {
             "type": "string"
           }
@@ -73,8 +105,11 @@
         "scores": {
           "description": "Cumulative player scores at the end of this day.",
           "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
           "items": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
           }
         }
       }
@@ -90,7 +125,18 @@
       }
     }
   },
-  "player": [],
+  "player": [
+    {
+      "id": "viliger",
+      "name": "Viliger",
+      "type": "player",
+      "description": "Sprite-protocol Heartleaf bot that gathers food, greets nearby gnomes, hosts dinner, and searches for active parties.",
+      "image": "ghcr.io/treeform/cogame-heartleaf-viliger:latest",
+      "run": [
+        "/bin/viliger"
+      ]
+    }
+  ],
   "variants": [
     {
       "id": "freeplay",
@@ -112,5 +158,41 @@
       },
       "description": "Short deterministic Heartleaf configuration used for smoke checks."
     }
-  ]
+  ],
+  "certification": {
+    "game_config": {
+      "seed": 4731713,
+      "maxTicks": 4600,
+      "maxGames": 1
+    },
+    "players": [
+      {
+        "player_id": "viliger"
+      },
+      {
+        "player_id": "viliger"
+      },
+      {
+        "player_id": "viliger"
+      },
+      {
+        "player_id": "viliger"
+      },
+      {
+        "player_id": "viliger"
+      },
+      {
+        "player_id": "viliger"
+      },
+      {
+        "player_id": "viliger"
+      },
+      {
+        "player_id": "viliger"
+      },
+      {
+        "player_id": "viliger"
+      }
+    ]
+  }
 }

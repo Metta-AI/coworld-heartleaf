@@ -32,7 +32,7 @@ const
   PlayerBoxOffsetY = 22
   FootHalfWidth = PlayerBoxWidth div 2
   FootHalfHeight = PlayerBoxHeight div 2
-  InteractionRadius = 100
+  InteractionRadius = 40
   MotionScale = 256
   Accel = 84
   FrictionNum = 184
@@ -68,6 +68,9 @@ const
   GlobalClientLegacyHtmlRoute = "/client/global_client.html"
   CoworldPlayerClientRoute = "/clients/player"
   CoworldGlobalClientRoute = "/clients/global"
+  ReplayWebSocketPath = "/replay"
+  ReplayClientRoute = "/client/replay"
+  CoworldReplayClientRoute = "/clients/replay"
   SnappyClientRoute = "/snappyjs.min.js"
   SnappyClientPath = "/client/snappyjs.min.js"
   CoworldSnappyClientRoute = "/clients/snappyjs.min.js"
@@ -93,13 +96,20 @@ const
   GlobalPanelWidth = 128
   GlobalPanelHeight = 128
   GlobalPanelPad = 2
-  GlobalPanelTitleHeight = 10
   GlobalPanelRowHeight = 9
-  GlobalPanelSelectorX = 2
-  GlobalPanelScoreX = 10
-  GlobalPanelNameX = 34
+  GlobalPanelScoreX = 2
+  GlobalPanelNameX = 22
   GlobalPanelIconWidth = 5
   GlobalPanelIconHeight = 7
+  GlobalPanelTextR = 245'u8
+  GlobalPanelTextG = 247'u8
+  GlobalPanelTextB = 240'u8
+  GlobalPanelScoreR = 185'u8
+  GlobalPanelScoreG = 195'u8
+  GlobalPanelScoreB = 205'u8
+  GlobalPanelSelectedR = 255'u8
+  GlobalPanelSelectedG = 226'u8
+  GlobalPanelSelectedB = 92'u8
   ClockPadX = 2
   ClockPadY = 1
   ClockGlyphGap = 1
@@ -333,6 +343,7 @@ type
     playerSlots: Table[WebSocket, int]
     playerViewers: Table[WebSocket, PlayerViewerState]
     globalViewers: Table[WebSocket, PlayerViewerState]
+    replayViewers: Table[WebSocket, bool]
     playerUsernames: Table[WebSocket, string]
     chatMessages: Table[WebSocket, string]
     closedSockets: seq[WebSocket]
@@ -350,6 +361,8 @@ type
     maxTicks: int
     maxGames: int
     saveScoresPath: string
+    saveReplayPath: string
+    appendScores: bool
     tokens: seq[string]
 
 var appState: WebSocketAppState
@@ -412,6 +425,29 @@ proc resultsPathFromEnv(): string =
     result = getEnv("COGAME_RESULTS_PATH")
   if result.len == 0:
     result = cogamePath(getEnv("COGAME_RESULTS_URI"), "COGAME_RESULTS_URI")
+
+proc hasCoworldResultsEnv(): bool =
+  ## Returns true when a Coworld result target is configured.
+  getEnv("COGAME_SAVE_RESULTS_PATH").len > 0 or
+    getEnv("COGAME_RESULTS_PATH").len > 0 or
+    getEnv("COGAME_RESULTS_URI").len > 0
+
+proc replayPathFromEnv(): string =
+  ## Reads one replay path from the current Coworld env vars.
+  result = getEnv("COGAME_SAVE_REPLAY_PATH")
+  if result.len == 0:
+    result = cogamePath(
+      getEnv("COGAME_SAVE_REPLAY_URI"),
+      "COGAME_SAVE_REPLAY_URI"
+    )
+
+proc replayServerFromEnv(): bool =
+  ## Returns true when this process should serve replay mode.
+  getEnv("COGAME_REPLAY_SERVER") == "1"
+
+proc configPathFromEnv(): string =
+  ## Reads one config path from the current Coworld env vars.
+  cogamePath(getEnv("COGAME_CONFIG_URI"), "COGAME_CONFIG_URI")
 
 proc layerIndexByName(
   aseprite: AsepriteSprite,
@@ -785,9 +821,20 @@ proc addClearObjects(packet: var seq[uint8]) =
   ## Appends one sprite protocol clear objects message.
   packet.addU8(0x04'u8)
 
+proc rectVisible(
+  x,
+  y,
+  w,
+  h,
+  viewportWidth,
+  viewportHeight: int
+): bool =
+  ## Returns true when one rectangle overlaps one viewport size.
+  x < viewportWidth and y < viewportHeight and x + w > 0 and y + h > 0
+
 proc screenRectVisible(x, y, w, h: int): bool =
   ## Returns true when one screen-space rectangle overlaps the viewport.
-  x < ViewportWidth and y < ViewportHeight and x + w > 0 and y + h > 0
+  rectVisible(x, y, w, h, ViewportWidth, ViewportHeight)
 
 proc chatTextWidth(sim: SimServer, text: string): int =
   ## Returns the rendered width of one chat line.
@@ -1039,9 +1086,9 @@ proc selectedGlobalPlayerIndex(state: PlayerViewerState, sim: SimServer): int =
     return -1
   result = state.selectedPlayerIndex
   if result < 0:
-    result = 0
+    return -1
   if result >= sim.players.len:
-    result = sim.players.high
+    return -1
 
 proc addGlobalScorePanel(
   packet: var seq[uint8],
@@ -1050,74 +1097,41 @@ proc addGlobalScorePanel(
   selectedIndex: int
 ) =
   ## Appends the global top-left score and selection panel.
-  packet.addRgbaSpriteCached(
-    cache,
-    GlobalPanelBackSpriteId,
-    globalPanelBackSprite(),
-    "global score panel"
-  )
-  packet.addObject(
-    GlobalPanelBackObjectId,
-    0,
-    0,
-    int(low(int16)),
-    GlobalPanelLayerId,
-    GlobalPanelBackSpriteId
-  )
-  packet.addRgbaSpriteCached(
-    cache,
-    GlobalPanelTitleSpriteId,
-    sim.globalPanelTextSprite("scores", rgba(255, 255, 255, 255)),
-    "global scores title"
-  )
-  packet.addObject(
-    GlobalPanelTitleObjectId,
-    GlobalPanelPad,
-    GlobalPanelPad,
-    0,
-    GlobalPanelLayerId,
-    GlobalPanelTitleSpriteId
-  )
   if sim.players.len == 0:
     return
-  packet.addRgbaSpriteCached(
-    cache,
-    GlobalPanelSelectSpriteId,
-    globalPanelSelectSprite(),
-    "global selected player"
-  )
   for i, player in sim.players:
     let
-      rowY = GlobalPanelTitleHeight + i * GlobalPanelRowHeight
+      rowY = GlobalPanelPad + i * GlobalPanelRowHeight
       scoreText = player.score.globalPanelScoreText()
       scoreSpriteId = GlobalPanelScoreSpriteBase + i
       nameSpriteId = GlobalPanelNameSpriteBase + i
+      nameColor =
+        if i == selectedIndex:
+          rgba(
+            GlobalPanelSelectedR,
+            GlobalPanelSelectedG,
+            GlobalPanelSelectedB,
+            255
+          )
+        else:
+          rgba(GlobalPanelTextR, GlobalPanelTextG, GlobalPanelTextB, 255)
     if rowY + GlobalPanelRowHeight > GlobalPanelHeight:
       return
     packet.addRgbaSpriteCached(
       cache,
       scoreSpriteId,
-      sim.globalPanelTextSprite(scoreText, rgba(255, 255, 255, 255)),
-      "global score " & $i & " " & scoreText
+      sim.globalPanelTextSprite(
+        scoreText,
+        rgba(GlobalPanelScoreR, GlobalPanelScoreG, GlobalPanelScoreB, 255)
+      ),
+      "global value " & $i & " " & scoreText
     )
     packet.addRgbaSpriteCached(
       cache,
       nameSpriteId,
-      sim.globalPanelTextSprite(
-        player.scoreDisplayName(),
-        rgba(255, 255, 255, 255)
-      ),
+      sim.globalPanelTextSprite(player.scoreDisplayName(), nameColor),
       "global name " & player.scoreDisplayName()
     )
-    if i == selectedIndex:
-      packet.addObject(
-        GlobalPanelSelectObjectId,
-        GlobalPanelSelectorX,
-        rowY + (GlobalPanelRowHeight - GlobalPanelIconHeight) div 2,
-        3,
-        GlobalPanelLayerId,
-        GlobalPanelSelectSpriteId
-      )
     packet.addObject(
       GlobalPanelScoreObjectBase + i,
       GlobalPanelScoreX,
@@ -1143,7 +1157,9 @@ proc addNameTag(
   playerIndex,
   screenX,
   screenY,
-  z: int
+  z,
+  viewportWidth,
+  viewportHeight: int
 ): int =
   ## Appends a player name tag and returns its top y coordinate.
   let
@@ -1151,7 +1167,14 @@ proc addNameTag(
     x = screenX + GnomeSpriteSize div 2 - tag.width div 2
     y = screenY - tag.height - NameGapY
     spriteId = NameSpriteBase + playerIndex
-  if not screenRectVisible(x, y, tag.width, tag.height):
+  if not rectVisible(
+    x,
+    y,
+    tag.width,
+    tag.height,
+    viewportWidth,
+    viewportHeight
+  ):
     return y
   packet.addRgbaSpriteCached(cache, spriteId, tag, "name " & player.playerName)
   packet.addObject(
@@ -1172,7 +1195,9 @@ proc addSpeechBubble(
   playerIndex,
   screenX,
   anchorY,
-  z: int
+  z,
+  viewportWidth,
+  viewportHeight: int
 ) =
   ## Appends a speech bubble object above one player name.
   if player.message.len == 0 or player.messageTicks <= 0:
@@ -1182,7 +1207,14 @@ proc addSpeechBubble(
     x = screenX + GnomeSpriteSize div 2 - bubble.width div 2
     y = anchorY - bubble.height - ChatGapY
     spriteId = ChatSpriteBase + playerIndex
-  if not screenRectVisible(x, y, bubble.width, bubble.height):
+  if not rectVisible(
+    x,
+    y,
+    bubble.width,
+    bubble.height,
+    viewportWidth,
+    viewportHeight
+  ):
     return
   packet.addRgbaSpriteCached(cache, spriteId, bubble, "chat " & player.message)
   packet.addObject(
@@ -1272,11 +1304,23 @@ proc dailyResultsJson*(sim: SimServer): string =
     playerNames = newJArray()
     scores = newJArray()
     results = newJObject()
-  for player in sim.players:
-    names.add(%player.scoreDisplayName())
-    usernames.add(%player.username)
-    playerNames.add(%player.playerName)
-    scores.add(%player.score)
+  for houseIndex in 0 ..< HouseCount:
+    let fixedPlayerName = houseIndex.playerNameForHouse()
+    var player: Player = nil
+    for candidate in sim.players:
+      if candidate.homeFlag == HomeMapIndexBase + houseIndex:
+        player = candidate
+        break
+    if player != nil:
+      names.add(%player.scoreDisplayName())
+      usernames.add(%player.username)
+      playerNames.add(%player.playerName)
+      scores.add(%player.score)
+    else:
+      names.add(%fixedPlayerName)
+      usernames.add(%"")
+      playerNames.add(%fixedPlayerName)
+      scores.add(%0)
   results["day"] = %sim.dayNumber
   results["names"] = names
   results["usernames"] = usernames
@@ -1907,7 +1951,9 @@ proc addPlayerObjects(
   cache: var seq[SpriteCacheEntry],
   mapIndex,
   cameraX,
-  cameraY: int
+  cameraY,
+  viewportWidth,
+  viewportHeight: int
 ) =
   ## Appends all player sprite objects for one map.
   for i, player in sim.players:
@@ -1916,11 +1962,13 @@ proc addPlayerObjects(
     let
       screenX = player.x - cameraX
       screenY = player.y - cameraY
-    if not screenRectVisible(
+    if not rectVisible(
       screenX,
       screenY,
       GnomeSpriteSize,
-      GnomeSpriteSize
+      GnomeSpriteSize,
+      viewportWidth,
+      viewportHeight
     ):
       continue
     packet.addObject(
@@ -1938,7 +1986,9 @@ proc addPlayerObjects(
       i,
       screenX,
       screenY,
-      NameZ
+      NameZ,
+      viewportWidth,
+      viewportHeight
     )
     packet.addSpeechBubble(
       sim,
@@ -1947,14 +1997,18 @@ proc addPlayerObjects(
       i,
       screenX,
       nameY,
-      ChatZ
+      ChatZ,
+      viewportWidth,
+      viewportHeight
     )
 
 proc addGardenObjects(
   packet: var seq[uint8],
   sim: SimServer,
   cameraX,
-  cameraY: int
+  cameraY,
+  viewportWidth,
+  viewportHeight: int
 ) =
   ## Appends garden item markers for gardens that still hold food.
   for i, garden in sim.gardens:
@@ -1965,7 +2019,14 @@ proc addGardenObjects(
       y = garden.rect.y + garden.rect.h div 2 - FoodSpriteSize div 2
       screenX = x - cameraX
       screenY = y - cameraY
-    if not screenRectVisible(screenX, screenY, FoodSpriteSize, FoodSpriteSize):
+    if not rectVisible(
+      screenX,
+      screenY,
+      FoodSpriteSize,
+      FoodSpriteSize,
+      viewportWidth,
+      viewportHeight
+    ):
       continue
     packet.addObject(
       GardenObjectBase + i,
@@ -2083,13 +2144,21 @@ proc addPlayerView(
     bottomSpriteId
   )
   if onMainMap:
-    packet.addGardenObjects(sim, cameraX, cameraY)
+    packet.addGardenObjects(
+      sim,
+      cameraX,
+      cameraY,
+      ViewportWidth,
+      ViewportHeight
+    )
   packet.addPlayerObjects(
     sim,
     cache,
     player.mapIndex,
     cameraX,
-    cameraY
+    cameraY,
+    ViewportWidth,
+    ViewportHeight
   )
   packet.addObject(
     OverhangObjectId,
@@ -2121,6 +2190,57 @@ proc addPlayerView(
   packet.addClockObjects(sim)
   true
 
+proc addGlobalWorldView(
+  packet: var seq[uint8],
+  sim: SimServer,
+  cache: var seq[SpriteCacheEntry]
+) =
+  ## Appends the full main map view for an unselected global viewer.
+  let tintIndex = sim.dayTintIndex()
+  packet.addViewport(MapLayerId, sim.mainMap.width, sim.mainMap.height)
+  packet.addObject(
+    BottomObjectId,
+    0,
+    0,
+    BottomZ,
+    MapLayerId,
+    mainBottomSpriteId(tintIndex)
+  )
+  packet.addGardenObjects(
+    sim,
+    0,
+    0,
+    sim.mainMap.width,
+    sim.mainMap.height
+  )
+  packet.addPlayerObjects(
+    sim,
+    cache,
+    MainMapIndex,
+    0,
+    0,
+    sim.mainMap.width,
+    sim.mainMap.height
+  )
+  packet.addObject(
+    OverhangObjectId,
+    0,
+    0,
+    OverhangZ,
+    MapLayerId,
+    mainOverhangSpriteId(tintIndex)
+  )
+  when DebugOutlines:
+    packet.addObject(
+      DebugObjectId,
+      0,
+      0,
+      DebugZ,
+      MapLayerId,
+      DebugSpriteId
+    )
+  packet.addClockObjects(sim)
+
 proc buildPlayerPacket(
   sim: SimServer,
   playerIndex: int,
@@ -2148,7 +2268,7 @@ proc buildGlobalPacket(
   ## Builds one sprite protocol packet for a global viewer.
   nextState =
     if state == nil:
-      PlayerViewerState()
+      PlayerViewerState(selectedPlayerIndex: -1)
     else:
       state
   if not nextState.initialized:
@@ -2157,11 +2277,16 @@ proc buildGlobalPacket(
 
   result.addClearObjects()
   let selectedIndex = nextState.selectedGlobalPlayerIndex(sim)
-  discard result.addPlayerView(
-    sim,
-    selectedIndex,
-    nextState.spriteCache
-  )
+  nextState.selectedPlayerIndex = selectedIndex
+  if selectedIndex >= 0:
+    result.addViewport(MapLayerId, ViewportWidth, ViewportHeight)
+    discard result.addPlayerView(
+      sim,
+      selectedIndex,
+      nextState.spriteCache
+    )
+  else:
+    result.addGlobalWorldView(sim, nextState.spriteCache)
   result.addGlobalScorePanel(sim, nextState.spriteCache, selectedIndex)
 
 proc applyDrag(value: var int) =
@@ -2559,6 +2684,7 @@ proc initAppState() =
   appState.playerSlots = initTable[WebSocket, int]()
   appState.playerViewers = initTable[WebSocket, PlayerViewerState]()
   appState.globalViewers = initTable[WebSocket, PlayerViewerState]()
+  appState.replayViewers = initTable[WebSocket, bool]()
   appState.playerUsernames = initTable[WebSocket, string]()
   appState.chatMessages = initTable[WebSocket, string]()
   appState.closedSockets = @[]
@@ -2603,9 +2729,9 @@ proc globalPanelClickedPlayer(message: Message): int =
         continue
       if x < GlobalPanelNameX or x >= GlobalPanelWidth:
         continue
-      if y < GlobalPanelTitleHeight:
+      if y < GlobalPanelPad:
         continue
-      let row = (y - GlobalPanelTitleHeight) div GlobalPanelRowHeight
+      let row = (y - GlobalPanelPad) div GlobalPanelRowHeight
       if row >= 0 and row < HouseCount:
         return row
     else:
@@ -2663,6 +2789,8 @@ proc playerChatFromMessage(message: Message): string =
 
 proc removePlayer(sim: SimServer, websocket: WebSocket) =
   ## Removes one websocket and keeps player indices compact.
+  if websocket in appState.replayViewers:
+    appState.replayViewers.del(websocket)
   if websocket in appState.globalViewers:
     appState.globalViewers.del(websocket)
   if websocket in appState.playerViewers:
@@ -2728,7 +2856,8 @@ proc serveClientFile(request: Request, route: string): bool =
   case route
   of PlayerClientRoute, PlayerClientHtmlRoute, PlayerClientLegacyHtmlRoute,
       CoworldPlayerClientRoute, GlobalClientRoute, GlobalClientHtmlRoute,
-      GlobalClientLegacyHtmlRoute, CoworldGlobalClientRoute:
+      GlobalClientLegacyHtmlRoute, CoworldGlobalClientRoute,
+      ReplayClientRoute, CoworldReplayClientRoute:
     filePath = clientsDir() / ClientHtml
     headers["Content-Type"] = "text/html; charset=utf-8"
   of SnappyClientRoute, SnappyClientPath, CoworldSnappyClientRoute:
@@ -2792,6 +2921,9 @@ proc httpHandler(request: Request) =
   elif request.path == GlobalWebSocketPath and request.httpMethod == "GET" and
       not request.isWebSocketUpgrade():
     discard request.serveClientFile(GlobalClientRoute)
+  elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
+      not request.isWebSocketUpgrade():
+    discard request.serveClientFile(ReplayClientRoute)
   elif request.path == WebSocketPath and request.httpMethod == "GET" and
       request.isWebSocketUpgrade():
     let
@@ -2819,7 +2951,15 @@ proc httpHandler(request: Request) =
     let websocket = request.upgradeToWebSocket()
     {.gcsafe.}:
       withLock appState.lock:
-        appState.globalViewers[websocket] = PlayerViewerState()
+        appState.globalViewers[websocket] = PlayerViewerState(
+          selectedPlayerIndex: -1
+        )
+  elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
+      request.isWebSocketUpgrade():
+    let websocket = request.upgradeToWebSocket()
+    {.gcsafe.}:
+      withLock appState.lock:
+        appState.replayViewers[websocket] = true
   elif request.serveSpriteStatic():
     discard
   else:
@@ -2841,10 +2981,11 @@ proc websocketHandler(
         withLock appState.lock:
           if websocket in appState.globalViewers:
             let state = appState.globalViewers[websocket]
-            if state.selectedPlayerIndex != clickedPlayer:
-              state.selectedPlayerIndex = clickedPlayer
-              state.initialized = false
-              state.spriteCache.setLen(0)
+            state.selectedPlayerIndex =
+              if state.selectedPlayerIndex == clickedPlayer:
+                -1
+              else:
+                clickedPlayer
     if message.kind == BinaryMessage and message.data.len == 2 and
         (
           message.data[0].uint8 == PacketInput or
@@ -2879,9 +3020,12 @@ proc runFrameLimiter(previousTick: var MonoTime) =
     sleep(int((frameDuration - elapsed).inMilliseconds))
   previousTick = getMonoTime()
 
-proc appendDailyScores(path, jsonLine: string) =
-  ## Appends one daily score JSON line to a configured results file.
+proc saveDailyScores(path, jsonLine: string, append: bool) =
+  ## Saves one daily score row to a configured results file.
   if path.len == 0:
+    return
+  if not append:
+    writeFile(path, jsonLine & "\n")
     return
   if not fileExists(path):
     writeFile(path, "")
@@ -2894,13 +3038,80 @@ proc appendDailyScores(path, jsonLine: string) =
   finally:
     file.close()
 
-proc writeDailyScores(sim: SimServer, path: string) =
-  ## Appends the current day scores when score saving is configured.
+proc writeDailyScores(sim: SimServer, path: string, append: bool) =
+  ## Writes the current day scores when score saving is configured.
   if path.len == 0:
     return
-  appendDailyScores(path, sim.dailyResultsJson())
+  saveDailyScores(path, sim.dailyResultsJson(), append)
   echo "Scores written: ", path, " (day ", sim.dayNumber, ", ",
     getFileSize(path), " bytes)"
+
+proc writeReplay(sim: SimServer, path: string) =
+  ## Writes a tiny replay artifact for Coworld certification.
+  if path.len == 0:
+    return
+  let replay = %*{
+    "format": "heartleaf-replay-v1",
+    "latestResults": parseJson(sim.dailyResultsJson())
+  }
+  writeFile(path, $replay & "\n")
+
+proc writeArtifacts(
+  sim: SimServer,
+  saveScoresPath,
+  saveReplayPath: string,
+  appendScores: bool
+) =
+  ## Writes result and replay artifacts for the current day.
+  sim.writeDailyScores(saveScoresPath, appendScores)
+  sim.writeReplay(saveReplayPath)
+
+proc buildReplayPacket(): seq[uint8] =
+  ## Builds a minimal sprite-protocol replay frame.
+  result.addViewport(MapLayerId, ViewportWidth, ViewportHeight)
+  result.addLayer(MapLayerId, MapLayerKind, MapLayerFlags)
+
+proc runReplayServerLoop*(
+  host = DefaultHost,
+  port = DefaultPort
+) =
+  ## Runs a minimal Coworld replay websocket server.
+  initAppState()
+  let httpServer = newServer(
+    httpHandler,
+    websocketHandler,
+    workerThreads = 4,
+    tcpNoDelay = true
+  )
+  var serverThread: Thread[ServerThreadArgs]
+  var serverPtr = cast[ptr Server](unsafeAddr httpServer)
+  createThread(
+    serverThread,
+    serverThreadProc,
+    ServerThreadArgs(server: serverPtr, address: host, port: port)
+  )
+  httpServer.waitUntilReady()
+  let packet = blobFromBytes(buildReplayPacket())
+  var lastTick = getMonoTime()
+  while true:
+    var sockets: seq[WebSocket] = @[]
+    {.gcsafe.}:
+      withLock appState.lock:
+        for websocket in appState.closedSockets:
+          if websocket in appState.replayViewers:
+            appState.replayViewers.del(websocket)
+        appState.closedSockets.setLen(0)
+        for websocket in appState.replayViewers.keys:
+          sockets.add(websocket)
+    for websocket in sockets:
+      try:
+        websocket.send(packet, BinaryMessage)
+      except CatchableError:
+        {.gcsafe.}:
+          withLock appState.lock:
+            if websocket in appState.replayViewers:
+              appState.replayViewers.del(websocket)
+    runFrameLimiter(lastTick)
 
 proc runServerLoop*(
   host = DefaultHost,
@@ -2909,6 +3120,8 @@ proc runServerLoop*(
   maxTicks = DefaultMaxTicks,
   maxGames = DefaultMaxGames,
   saveScoresPath = "",
+  saveReplayPath = "",
+  appendScores = true,
   tokens: seq[string] = @[]
 ) =
   ## Runs the Heartleaf websocket game server.
@@ -2934,6 +3147,7 @@ proc runServerLoop*(
     lastTick = getMonoTime()
     runTicks = 0
     gamesFinished = 0
+    lastWrittenDay = 0
 
   while true:
     var
@@ -2987,7 +3201,8 @@ proc runServerLoop*(
     let wasScoring = sim.scoreTicks > 0
     sim.step(inputs)
     if not wasScoring and sim.scoreTicks > 0:
-      sim.writeDailyScores(saveScoresPath)
+      sim.writeArtifacts(saveScoresPath, saveReplayPath, appendScores)
+      lastWrittenDay = sim.dayNumber
     inc runTicks
 
     for i in 0 ..< sockets.len:
@@ -3023,11 +3238,14 @@ proc runServerLoop*(
             sim.removePlayer(globalSockets[i])
 
     if maxTicks > 0 and runTicks >= maxTicks:
+      if lastWrittenDay == 0:
+        sim.writeArtifacts(saveScoresPath, saveReplayPath, appendScores)
       inc gamesFinished
       if maxGames > 0 and gamesFinished >= maxGames:
         quit(0)
       sim = initSimServer(seed + gamesFinished)
       runTicks = 0
+      lastWrittenDay = 0
       {.gcsafe.}:
         withLock appState.lock:
           resetConnectedPlayers()
@@ -3093,6 +3311,8 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("max-games", config.maxGames)
   node.readConfigString("saveScoresPath", config.saveScoresPath)
   node.readConfigString("save-scores", config.saveScoresPath)
+  node.readConfigString("saveReplayPath", config.saveReplayPath)
+  node.readConfigString("save-replay", config.saveReplayPath)
   node.readConfigStrings("tokens", config.tokens)
 
 when isMainModule:
@@ -3104,10 +3324,12 @@ when isMainModule:
       maxTicks: DefaultMaxTicks,
       maxGames: DefaultMaxGames,
       saveScoresPath: resultsPathFromEnv(),
+      saveReplayPath: replayPathFromEnv(),
+      appendScores: not hasCoworldResultsEnv(),
       tokens: @[]
     )
     configJson = ""
-    configPath = getEnv("COGAME_CONFIG_PATH")
+    configPath = configPathFromEnv()
     positional = 0
   for kind, key, val in getopt():
     case kind
@@ -3131,6 +3353,9 @@ when isMainModule:
         config.maxGames = parseInt(val)
       of "saveScores", "save-scores":
         config.saveScoresPath = val
+        config.appendScores = true
+      of "saveReplay", "save-replay":
+        config.saveReplayPath = val
       of "token":
         config.tokens.add(val)
       of "config":
@@ -3147,6 +3372,11 @@ when isMainModule:
     config.update(configJson)
   if config.saveScoresPath.len > 0:
     echo "Using results save file: " & config.saveScoresPath
+  if config.saveReplayPath.len > 0:
+    echo "Using replay save file: " & config.saveReplayPath
+  if replayServerFromEnv():
+    runReplayServerLoop(config.address, config.port)
+    quit(0)
   runServerLoop(
     config.address,
     config.port,
@@ -3154,5 +3384,7 @@ when isMainModule:
     maxTicks = config.maxTicks,
     maxGames = config.maxGames,
     saveScoresPath = config.saveScoresPath,
+    saveReplayPath = config.saveReplayPath,
+    appendScores = config.appendScores,
     tokens = config.tokens
   )

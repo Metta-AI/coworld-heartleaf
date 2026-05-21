@@ -177,6 +177,8 @@ function websocketPathForClientPage(path){
     ["/client/global.html","/global"],
     ["/client/global_client.html","/global"],
     ["/clients/global","/global"],
+    ["/client/replay","/replay"],
+    ["/clients/replay","/replay"],
     ["/client/player","/player"],
     ["/client/player.html","/player"],
     ["/client/player_client.html","/player"],
@@ -199,6 +201,7 @@ function defaultAddress(){
   const host=location.host||"localhost:8080";
   return protocol+"//"+host+websocketPathForClientPage(location.pathname);
 }
+const explicitAddress=url.searchParams.has("address");
 const address=url.searchParams.get("address")||defaultAddress();
 const reconnectSeconds=Math.max(0,Number(url.searchParams.get("reconnect"))||0);
 function websocketAddress(){
@@ -207,9 +210,11 @@ function websocketAddress(){
     if(wsUrl.protocol==="http:")wsUrl.protocol="ws:";
     if(wsUrl.protocol==="https:")wsUrl.protocol="wss:";
     let changed=wsUrl.toString()!==address;
-    for(const key of ["name","username","slot","token"]){
-      const value=url.searchParams.get(key);
-      if(value!==null){
+    if(!explicitAddress){
+      for(const [key,value] of url.searchParams.entries()){
+        if(key==="address"){
+          continue;
+        }
         wsUrl.searchParams.set(key,value);
         changed=true;
       }
@@ -443,6 +448,11 @@ function fit(){
 function maybeFit(){
   if(autoFit)fit();
   else applyView();
+}
+
+function recenter(){
+  autoFit=true;
+  fit();
 }
 
 function clearBlack(){
@@ -711,12 +721,15 @@ function defineLayer(id,type,flags){
 
 function setViewport(layerId,width,height){
   const layer=ensureLayer(layerId);
+  const mainLayer=(layer.flags&ZoomableFlag)!==0||layer.type===MapLayerType;
+  const sizeChanged=layer.width!==width||layer.height!==height;
   layer.width=width;
   layer.height=height;
   layer.canvas.width=width;
   layer.canvas.height=height;
   layer.image=layer.ctx.createImageData(width,height);
-  maybeFit();
+  if(mainLayer&&sizeChanged)recenter();
+  else maybeFit();
 }
 
 function putSpritePixel(layer,x,y,sprite,srcOffset){
@@ -869,6 +882,9 @@ function parse(bytes){
     }else if(type===0x06){
       defineLayer(bytes[offset],bytes[offset+1],bytes[offset+2]);
       offset+=3;
+    }else if(type===0x07){
+      // Identity packet: u16 selfObjectId. Browser viewers do not act on it.
+      offset+=2;
     }else{
       socket.close();
       break;
@@ -967,10 +983,7 @@ addEventListener("pointerup",event=>{
   activeMouseLayer=null;
   try{canvas.releasePointerCapture(event.pointerId)}catch(e){}
 });
-addEventListener("dblclick",()=>{
-  autoFit=true;
-  fit();
-});
+addEventListener("dblclick",recenter);
 for(const eventName of ["pointerdown","pointermove","pointerup","dblclick"]){
   debugPanel.addEventListener(eventName,event=>event.stopPropagation());
 }
