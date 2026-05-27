@@ -1,7 +1,7 @@
 import
-  std/[json, locks, math, monotimes, os, parseopt, random, strutils,
+  std/[json, locks, math, monotimes, os, random, strutils,
     tables, times],
-  mummy, pixie, supersnappy,
+  jsony, mummy, pixie, supersnappy,
   bitworld/client as bitworldClient, bitworld/runtime,
   heartleaf/aseprite, heartleaf/pixelfonts, heartleaf/protocol,
   heartleaf/resources
@@ -359,9 +359,6 @@ type
     seed: int
     maxTicks: int
     maxGames: int
-    saveScoresPath: string
-    saveReplayPath: string
-    appendScores: bool
     tokens: seq[string]
 
 var appState: WebSocketAppState
@@ -386,26 +383,6 @@ proc dataDir(): string =
   if fileExists(sourceData / "map.aseprite"):
     return sourceData
   currentSourcePath().parentDir() / "data"
-
-proc resultsPathFromEnv(): string =
-  ## Reads one scores path from the Coworld result URI.
-  outputPathFromCogameEnv(CogameResultsUriEnv, "scores.json")
-
-proc hasCoworldResultsEnv(): bool =
-  ## Returns true when a Coworld result target is configured.
-  getEnv(CogameResultsUriEnv).len > 0
-
-proc replayPathFromEnv(): string =
-  ## Reads one replay path from the current Coworld env vars.
-  outputPathFromCogameEnv(CogameSaveReplayUriEnv, "replay.bitreplay")
-
-proc replayServerFromEnv(): bool =
-  ## Returns true when this process should serve replay mode.
-  getEnv(CogameReplayServerEnv) == "1"
-
-proc configPathFromEnv(): string =
-  ## Reads one config path from the current Coworld env vars.
-  pathFromCogameEnv(CogameConfigUriEnv)
 
 proc layerIndexByName(
   aseprite: AsepriteSprite,
@@ -2972,67 +2949,21 @@ proc runFrameLimiter(previousTick: var MonoTime) =
     sleep(int((frameDuration - elapsed).inMilliseconds))
   previousTick = getMonoTime()
 
-proc saveDailyScores(path, jsonLine: string, append: bool) =
-  ## Saves one daily score row to a configured results file.
-  if path.len == 0:
-    return
-  let dir = path.parentDir()
-  if dir.len > 0:
-    createDir(dir)
-  if not append:
-    writeFile(path, jsonLine & "\n")
-    return
-  if not fileExists(path):
-    writeFile(path, "")
-  var file: File
-  if not open(file, path, fmAppend):
-    raise newException(HeartleafError, "Could not open scores file: " & path)
-  try:
-    file.write(jsonLine)
-    file.write("\n")
-  finally:
-    file.close()
-
-proc writeDailyScores(sim: SimServer, path: string, append: bool) =
-  ## Writes the current day scores when score saving is configured.
-  if path.len == 0:
-    return
-  saveDailyScores(path, sim.dailyResultsJson(), append)
-  echo "Scores written: ", path, " (day ", sim.dayNumber, ", ",
-    getFileSize(path), " bytes)"
-
-proc writeReplay(sim: SimServer, path: string) =
-  ## Writes a tiny replay artifact for Coworld certification.
-  if path.len == 0:
-    return
-  let dir = path.parentDir()
-  if dir.len > 0:
-    createDir(dir)
+proc replayJson(sim: SimServer): string =
+  ## Builds a tiny replay artifact for Coworld certification.
   let replay = %*{
     "format": "heartleaf-replay-v1",
     "latestResults": parseJson(sim.dailyResultsJson())
   }
-  writeFile(path, $replay & "\n")
+  $replay & "\n"
 
 proc writeArtifacts(
   sim: SimServer,
-  saveScoresPath,
-  saveReplayPath: string,
-  appendScores: bool
+  runtimeConfig: RuntimeConfig
 ) =
   ## Writes result and replay artifacts for the current day.
-  sim.writeDailyScores(saveScoresPath, appendScores)
-  sim.writeReplay(saveReplayPath)
-  writeCogameFileEnv(
-    CogameResultsUriEnv,
-    saveScoresPath,
-    "application/json"
-  )
-  writeCogameFileEnv(
-    CogameSaveReplayUriEnv,
-    saveReplayPath,
-    "application/octet-stream"
-  )
+  runtimeConfig.writeResults(sim.dailyResultsJson() & "\n")
+  runtimeConfig.writeReplay(sim.replayJson())
 
 proc buildReplayPacket(): seq[uint8] =
   ## Builds a minimal sprite-protocol replay frame.
@@ -3087,10 +3018,8 @@ proc runServerLoop*(
   seed = DefaultSeed,
   maxTicks = DefaultMaxTicks,
   maxGames = DefaultMaxGames,
-  saveScoresPath = "",
-  saveReplayPath = "",
-  appendScores = true,
-  tokens: seq[string] = @[]
+  tokens: seq[string] = @[],
+  runtimeConfig = RuntimeConfig()
 ) =
   ## Runs the Heartleaf websocket game server.
   initAppState()
@@ -3169,7 +3098,7 @@ proc runServerLoop*(
     let wasScoring = sim.scoreTicks > 0
     sim.step(inputs)
     if not wasScoring and sim.scoreTicks > 0:
-      sim.writeArtifacts(saveScoresPath, saveReplayPath, appendScores)
+      sim.writeArtifacts(runtimeConfig)
       lastWrittenDay = sim.dayNumber
     inc runTicks
 
@@ -3207,7 +3136,7 @@ proc runServerLoop*(
 
     if maxTicks > 0 and runTicks >= maxTicks:
       if lastWrittenDay == 0:
-        sim.writeArtifacts(saveScoresPath, saveReplayPath, appendScores)
+        sim.writeArtifacts(runtimeConfig)
       inc gamesFinished
       if maxGames > 0 and gamesFinished >= maxGames:
         quit(0)
@@ -3267,7 +3196,14 @@ proc update(config: var RunConfig, jsonText: string) =
   ## Updates the run config from a JSON object.
   if jsonText.len == 0:
     return
-  let node = parseJson(jsonText)
+  var node: JsonNode
+  try:
+    node = fromJson(jsonText)
+  except jsony.JsonError as e:
+    raise newException(
+      HeartleafError,
+      "Could not parse config JSON: " & e.msg
+    )
   if node.kind != JObject:
     raise newException(HeartleafError, "Config must be a JSON object.")
   node.readConfigString("address", config.address)
@@ -3277,72 +3213,25 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("max-ticks", config.maxTicks)
   node.readConfigInt("maxGames", config.maxGames)
   node.readConfigInt("max-games", config.maxGames)
-  node.readConfigString("saveScoresPath", config.saveScoresPath)
-  node.readConfigString("save-scores", config.saveScoresPath)
-  node.readConfigString("saveReplayPath", config.saveReplayPath)
-  node.readConfigString("save-replay", config.saveReplayPath)
   node.readConfigStrings("tokens", config.tokens)
 
 when isMainModule:
+  let runtimeConfig = readRuntimeConfig(DefaultHost, DefaultPort)
   var
     config = RunConfig(
-      address: cogameHost(DefaultHost),
-      port: cogamePort(DefaultPort),
+      address: runtimeConfig.host,
+      port: runtimeConfig.port,
       seed: DefaultSeed,
       maxTicks: DefaultMaxTicks,
       maxGames: DefaultMaxGames,
-      saveScoresPath: resultsPathFromEnv(),
-      saveReplayPath: replayPathFromEnv(),
-      appendScores: not hasCoworldResultsEnv(),
       tokens: @[]
     )
-    configJson = ""
-    configPath = configPathFromEnv()
-    positional = 0
-  for kind, key, val in getopt():
-    case kind
-    of cmdArgument:
-      if positional == 0:
-        config.address = key
-      elif positional == 1:
-        config.port = parseInt(key)
-      inc positional
-    of cmdLongOption:
-      case key
-      of "address":
-        config.address = val
-      of "port":
-        config.port = parseInt(val)
-      of "seed":
-        config.seed = parseInt(val)
-      of "maxTicks", "max-ticks":
-        config.maxTicks = parseInt(val)
-      of "maxGames", "max-games":
-        config.maxGames = parseInt(val)
-      of "saveScores", "save-scores":
-        config.saveScoresPath = val
-        config.appendScores = true
-      of "saveReplay", "save-replay":
-        config.saveReplayPath = val
-      of "token":
-        config.tokens.add(val)
-      of "config":
-        configJson = val
-      of "config-file":
-        configPath = val
-      else:
-        discard
-    else:
-      discard
-  if configPath.len > 0:
-    config.update(readFile(configPath))
-  if configJson.len > 0:
-    config.update(configJson)
-  if config.saveScoresPath.len > 0:
-    echo "Using results save file: " & config.saveScoresPath
-  if config.saveReplayPath.len > 0:
-    echo "Using replay save file: " & config.saveReplayPath
-  if replayServerFromEnv():
+  config.update(runtimeConfig.config)
+  if runtimeConfig.resultsUri.len > 0:
+    echo "Using results target: " & runtimeConfig.resultsUri
+  if runtimeConfig.replayUri.len > 0:
+    echo "Using replay target: " & runtimeConfig.replayUri
+  if runtimeConfig.replayMode:
     runReplayServerLoop(config.address, config.port)
     quit(0)
   runServerLoop(
@@ -3351,8 +3240,6 @@ when isMainModule:
     seed = config.seed,
     maxTicks = config.maxTicks,
     maxGames = config.maxGames,
-    saveScoresPath = config.saveScoresPath,
-    saveReplayPath = config.saveReplayPath,
-    appendScores = config.appendScores,
-    tokens = config.tokens
+    tokens = config.tokens,
+    runtimeConfig = runtimeConfig
   )

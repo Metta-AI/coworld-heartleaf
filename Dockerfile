@@ -44,4 +44,4 @@ WORKDIR /workspace/heartleaf
 COPY --from=build /workspace/heartleaf/heartleaf /bin/heartleaf
 COPY --from=build /workspace/heartleaf/data ./data
 
-CMD ["/bin/heartleaf", "--address:0.0.0.0", "--port:8080"]
+CMD ["/bin/heartleaf"]
