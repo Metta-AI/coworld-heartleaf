@@ -3037,14 +3037,12 @@ proc writeArtifacts(
   writeCogameFileEnv(
     CogameResultsUriEnv,
     saveScoresPath,
-    "application/json",
-    CogameResultsMethodEnv
+    "application/json"
   )
   writeCogameFileEnv(
     CogameSaveReplayUriEnv,
     saveReplayPath,
-    "application/octet-stream",
-    CogameSaveReplayMethodEnv
+    "application/octet-stream"
   )
 
 proc buildReplayPacket(): seq[uint8] =
