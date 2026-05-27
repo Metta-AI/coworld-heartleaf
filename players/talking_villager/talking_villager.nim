@@ -4347,8 +4347,6 @@ when isMainModule:
     slot = -1
     url = getEnv("COGAMES_ENGINE_WS_URL")
     gui = false
-  if url.len == 0:
-    url = getEnv("COGAME_ENGINE_WS_URL")
   for kind, key, val in getopt():
     case kind
     of cmdLongOption:
