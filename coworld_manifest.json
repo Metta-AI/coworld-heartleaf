@@ -135,6 +135,16 @@
       "run": [
         "/bin/viliger"
       ]
+    },
+    {
+      "id": "talking_viliger",
+      "name": "Talking Viliger",
+      "type": "player",
+      "description": "LLM-guided Heartleaf bot that gathers food, talks to players, invites guests, and honors party commitments.",
+      "image": "ghcr.io/treeform/cogame-heartleaf-talking-viliger:latest",
+      "run": [
+        "/bin/talking_viliger"
+      ]
     }
   ],
   "variants": [
