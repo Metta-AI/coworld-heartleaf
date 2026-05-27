@@ -7,6 +7,7 @@ srcDir = "src"
 bin = @["heartleaf"]
 
 requires "nim >= 2.2.4"
+requires "bitworld >= 0.1.0"
 requires "pixie"
 requires "mummy >= 0.4.7"
 requires "curly"
