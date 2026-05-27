@@ -39,9 +39,9 @@ COPY . .
 ARG NimFlags="-d:release -d:useMalloc --opt:speed --stackTrace:on"
 RUN nim c \
   $NimFlags \
-  --nimcache:/tmp/heartleaf-viliger-nimcache \
-  --out:viliger \
-  players/viliger/viliger.nim
+  --nimcache:/tmp/heartleaf-villager-nimcache \
+  --out:villager \
+  players/villager/villager.nim
 
 # Run Docker.
 FROM debian:bookworm-slim
@@ -59,7 +59,7 @@ RUN apt-get update && \
   rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/heartleaf
-COPY --from=build /workspace/heartleaf/viliger /bin/viliger
+COPY --from=build /workspace/heartleaf/villager /bin/villager
 COPY --from=build /workspace/heartleaf/data ./data
 
-CMD ["/bin/viliger"]
+CMD ["/bin/villager"]

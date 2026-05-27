@@ -1,16 +1,9 @@
 import
-  std/[algorithm, heapqueue, json, options, os, parseopt, strutils],
-  curly, pixie, silky, supersnappy, vmath, whisky, windy,
-  heartleaf/protocol, heartleaf/resources,
-  decisions
+  std/[algorithm, heapqueue, options, os, parseopt, strutils],
+  pixie, silky, supersnappy, vmath, whisky, windy,
+  heartleaf/protocol, heartleaf/resources
 
 const
-  BedrockVersion = "bedrock-2023-05-31"
-  DefaultBedrockRegion = "us-east-1"
-  DefaultBedrockModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-  DefaultBedrockTimeoutSeconds = 30
-  DefaultBedrockMaxTokens = 192
-  BedrockTemperature = 0.2
   ViewportWidth = 320
   ViewportHeight = 200
   GnomeSpriteSize = 32
@@ -27,8 +20,7 @@ const
   FootMinX = FootHalfWidth
   FootMinY = FootHalfHeight
   CollectActionRadius = 32
-  GreetingRadius = 180
-  PersonStandRadius = 30
+  GreetingRadius = 90
   NavStep = 2
   PathArrivePixels = 3
   PathRejoinPixels = 8
@@ -38,12 +30,9 @@ const
   StuckLookaheadTicks = 18
   RepathStuckTicks = 48
   MaxDrainMessages = 256
-  DefaultName = "talking_viliger"
+  DefaultName = "villager"
   UnknownHouse = -1
   HouseCount = 9
-  DecisionRetryTicks = 24
-  DecisionStuckTicks = RepathStuckTicks * 2
-  HighFoodForInvites = 6
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
   ViewerWindowWidth = 1480
@@ -72,10 +61,7 @@ const
   ViewerInventoryGap = 8.0'f
   ViewerInventoryScale = 1.0'f
   DayStartMinutes = 8 * 60
-  HostPrepMinutes = 15 * 60
-  InviteStartMinutes = 16 * 60
   HouseEnterMinutes = 17 * 60
-  DinnerMinutes = 18 * 60
   PartyLeaveMinutes = 20 * 60
   DayEndMinutes = 22 * 60
   LatePartySearchMinutes = 16 * 60
@@ -89,12 +75,12 @@ const
   BottomObjectId = 1
   PlayerObjectBase = 1000
   NameObjectBase = 2000
-  ChatObjectBase = 3000
   GardenObjectBase = 4000
   InventoryObjectBase = 5000
   InventoryCountObjectBase = 6000
   ClockObjectBase = 7000
   ScoreObjectBase = 7100
+  GreetingWords = ["Hey", "Hi", "Hello"]
   PlayerNames = [
     "Ivan",
     "Anton",
@@ -123,7 +109,6 @@ type
     SpriteGarden
     SpriteGnome
     SpriteName
-    SpriteChat
     SpriteClock
     SpriteOverlay
 
@@ -133,7 +118,6 @@ type
     GoalGatherHouse
     GoalEnterHouse
     GoalExitHouse
-    GoalStandPerson
     GoalMove
 
   Rect = object
@@ -148,7 +132,6 @@ type
     x, y: int
     houseIndex: int
     gardenIndex: int
-    targetName: string
 
   SpriteInfo = ref object
     defined: bool
@@ -184,24 +167,9 @@ type
   DrawItem = object
     layer, z, y, id: int
 
-  ConversationMessage = object
-    role: string
-    content: string
-
-  BedrockResult = object
-    done: bool
-    ok: bool
-    statusCode: int
-    tag: string
-    reply: string
-    error: string
-
-  TalkingViligerError = object of CatchableError
-
   Bot = ref object
     name: string
     playerName: string
-    soulInstructions: string
     slot: int
     homeIndex: int
     sprites: seq[SpriteInfo]
@@ -222,12 +190,10 @@ type
     minutes: int
     lastMask: uint8
     attackCooldown: int
-    lastCollectTick: int
     goal: Goal
     path: seq[Point]
     gardenChecked: seq[bool]
     greetedNames: seq[string]
-    lastGreetingTick: int
     currentGarden: int
     partyHouse: int
     searchHouse: int
@@ -239,20 +205,6 @@ type
     target: Point
     hasTarget: bool
     decodeVisualSprites: bool
-    decision: LlmDecision
-    hasDecision: bool
-    decisionChatSent: bool
-    decisionStartedTick: int
-    decisionState: string
-    decisionFoodBand: int
-    decisionTimePhase: int
-    decisionChatSignature: string
-    decisionCrowdSignature: string
-    llmWaiting: bool
-    llmTag: string
-    llmSerial: int
-    lastLlmError: string
-    committedPartyHouse: int
 
   ViewerApp = ref object
     window: Window
@@ -265,232 +217,9 @@ proc `<`(a, b: PathNode): bool =
     return a.index < b.index
   a.priority < b.priority
 
-var bedrockCurl = newCurly(1)
-
-proc bedrockRegion(): string =
-  ## Returns the configured AWS Region for Bedrock.
-  result = getEnv("AWS_REGION").strip()
-  if result.len == 0:
-    result = getEnv("AWS_DEFAULT_REGION").strip()
-  if result.len == 0:
-    result = DefaultBedrockRegion
-
-proc bedrockModel(): string =
-  ## Returns the configured Bedrock model id.
-  result = getEnv("BEDROCK_MODEL").strip()
-  if result.len == 0:
-    result = DefaultBedrockModel
-
-proc bedrockToken(): string =
-  ## Returns the configured Bedrock bearer token.
-  result = getEnv("AWS_BEARER_TOKEN_BEDROCK").strip()
-  if result.len == 0:
-    result = getEnv("BEDROCK_KEY").strip()
-
-proc mockBedrockReply(): string =
-  ## Returns a configured mock LLM reply for smoke tests.
-  getEnv("TALKING_VILIGER_MOCK_REPLY").strip()
-
-proc bedrockTimeoutSeconds(): int =
-  ## Returns the configured Bedrock request timeout.
-  let value = getEnv("BEDROCK_TIMEOUT_SECONDS").strip()
-  if value.len == 0:
-    return DefaultBedrockTimeoutSeconds
-  try:
-    max(1, int(parseFloat(value)))
-  except ValueError:
-    DefaultBedrockTimeoutSeconds
-
-proc bedrockMaxTokens(): int =
-  ## Returns the configured maximum Bedrock response tokens.
-  let value = getEnv("BEDROCK_MAX_TOKENS").strip()
-  if value.len == 0:
-    return DefaultBedrockMaxTokens
-  try:
-    max(32, parseInt(value))
-  except ValueError:
-    DefaultBedrockMaxTokens
-
-proc bedrockPerformanceLatency(): string =
-  ## Returns the optional Bedrock latency performance setting.
-  let value = getEnv("BEDROCK_PERFORMANCE_LATENCY").strip().toLowerAscii()
-  if value == "standard" or value == "optimized":
-    return value
-
-proc requireBedrockConfig() =
-  ## Raises when live Bedrock cannot be called.
-  if mockBedrockReply().len > 0:
-    return
-  if bedrockToken().len == 0:
-    raise newException(
-      TalkingViligerError,
-      "AWS_BEARER_TOKEN_BEDROCK or BEDROCK_KEY is not set."
-    )
-
-proc transientBedrockError(answer: BedrockResult): bool =
-  ## Returns true for Bedrock failures worth retrying later.
-  let message = answer.error.toLowerAscii()
-  if answer.statusCode == 408 or
-      answer.statusCode == 429 or
-      answer.statusCode == 500 or
-      answer.statusCode == 502 or
-      answer.statusCode == 503 or
-      answer.statusCode == 504:
-    return true
-  if message.contains("timeout") or
-      message.contains("timed out") or
-      message.contains("timeout was reached") or
-      message.contains("operation timed out") or
-      message.contains("temporarily unavailable") or
-      message.contains("service unavailable") or
-      message.contains("throttl") or
-      message.contains("rate exceeded") or
-      message.contains("too many requests") or
-      message.contains("connection reset") or
-      message.contains("couldn't connect") or
-      message.contains("could not connect"):
-    return true
-
-proc permanentBedrockError(answer: BedrockResult): bool =
-  ## Returns true for Bedrock failures that should stop the bot.
-  if answer.transientBedrockError():
-    return false
-  let message = answer.error.toLowerAscii()
-  if answer.statusCode == 400 or
-      answer.statusCode == 401 or
-      answer.statusCode == 403 or
-      answer.statusCode == 404:
-    return true
-  if message.contains("too many tokens") or
-      message.contains("input is too long") or
-      message.contains("context length") or
-      message.contains("maximum context") or
-      message.contains("token limit") or
-      message.contains("validationexception") or
-      message.contains("accessdenied") or
-      message.contains("unauthorized") or
-      message.contains("forbidden") or
-      message.contains("not authorized") or
-      message.contains("not supported") or
-      message.contains("model") or
-      message.contains("malformed") or
-      message.contains("invalid"):
-    return true
-
-proc bedrockUrl(): string =
-  ## Builds the Bedrock Runtime InvokeModel URL.
-  "https://bedrock-runtime." & bedrockRegion() &
-    ".amazonaws.com/model/" & bedrockModel() & "/invoke"
-
-proc bedrockHeaders(): HttpHeaders =
-  ## Builds one Bedrock HTTP header set.
-  result["Authorization"] = "Bearer " & bedrockToken()
-  result["Accept"] = "application/json"
-  result["Content-Type"] = "application/json"
-  let latency = bedrockPerformanceLatency()
-  if latency.len > 0:
-    result["X-Amzn-Bedrock-PerformanceConfig-Latency"] = latency
-
-proc bedrockBody(messages: openArray[ConversationMessage]): string =
-  ## Builds one Anthropic Messages request body for Bedrock.
-  var
-    systemPrompt = ""
-    chatMessages = newJArray()
-  for message in messages:
-    if message.role == "system":
-      systemPrompt = message.content
-    else:
-      chatMessages.add(%*{
-        "role": message.role,
-        "content": message.content
-      })
-  let body = %*{
-    "anthropic_version": BedrockVersion,
-    "max_tokens": bedrockMaxTokens(),
-    "temperature": BedrockTemperature,
-    "system": systemPrompt,
-    "messages": chatMessages
-  }
-  $body
-
-proc parseBedrockReply(body: string): string =
-  ## Extracts output text from one Bedrock response body.
-  let data = parseJson(body)
-  for part in data["content"]:
-    if part{"type"}.getStr() == "text":
-      result.add(part["text"].getStr())
-
-proc startTalkToBedrock(
-  messages: openArray[ConversationMessage],
-  tag: string
-): bool =
-  ## Starts a non-blocking Bedrock request.
-  if bedrockToken().len == 0:
-    return false
-  bedrockCurl.startRequest(
-    "POST",
-    bedrockUrl(),
-    bedrockHeaders(),
-    bedrockBody(messages),
-    bedrockTimeoutSeconds(),
-    tag
-  )
-  true
-
-proc pollTalkToBedrock(): BedrockResult =
-  ## Polls for one completed Bedrock response.
-  let answer = bedrockCurl.pollForResponse()
-  if answer.isNone:
-    return BedrockResult(done: false)
-  result.done = true
-  result.tag = answer.get.response.request.tag
-  if answer.get.error.len > 0:
-    result.error = answer.get.error
-    return
-  let response = answer.get.response
-  result.statusCode = response.code
-  if response.code != 200:
-    result.error = response.body
-    return
-  try:
-    result.reply = response.body.parseBedrockReply()
-  except CatchableError as e:
-    result.error = e.msg
-    return
-  if result.reply.len == 0:
-    result.error = "Bedrock response did not include text."
-    return
-  result.ok = true
-
 proc repoDir(): string =
   ## Returns the Heartleaf repository directory.
   currentSourcePath().parentDir().parentDir().parentDir()
-
-proc soulDir(): string =
-  ## Returns the talking Viliger soul instruction directory.
-  currentSourcePath().parentDir() / "souls"
-
-proc soulFileName(name: string): string =
-  ## Returns the markdown soul filename for one player name.
-  name.strip().toLowerAscii() & ".md"
-
-proc defaultSoulInstructions(name: string): string =
-  ## Returns fallback soul instructions for unknown player names.
-  "You are " & name & ". Speak in short friendly phrases. " &
-    "Gather food early, invite when you have food, attend parties when low."
-
-proc loadSoulInstructions(name: string): string =
-  ## Loads the markdown soul instructions for one player name.
-  let cleanName = name.strip()
-  if cleanName.len == 0:
-    return defaultSoulInstructions("a Heartleaf gnome")
-  let path = soulDir() / cleanName.soulFileName()
-  if fileExists(path):
-    return readFile(path).strip()
-  let defaultPath = soulDir() / "default.md"
-  if fileExists(defaultPath):
-    return readFile(defaultPath).strip()
-  defaultSoulInstructions(cleanName)
 
 proc atlasPath(): string =
   ## Returns the Silky atlas path used by the debug viewer.
@@ -663,34 +392,6 @@ proc visiblePlayerName(bot: Bot, playerIndex: int): string =
     return
   sprite.label["name ".len .. ^1]
 
-proc visiblePlayerIndexByName(bot: Bot, name: string): int =
-  ## Returns the visible player index for one fixed player name.
-  result = -1
-  let target = name.strip()
-  if target.len == 0:
-    return
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    let playerIndex = objectId - PlayerObjectBase
-    if bot.visiblePlayerName(playerIndex) == target:
-      return playerIndex
-
-proc visibleChatText(bot: Bot, playerIndex: int): string =
-  ## Returns the visible chat bubble text for one player.
-  let objectId = ChatObjectBase + playerIndex
-  if objectId < 0 or objectId >= bot.objects.len:
-    return
-  let objectState = bot.objects[objectId]
-  if not objectState.present:
-    return
-  let sprite = bot.spriteInfo(objectState.spriteId)
-  if sprite == nil or not sprite.label.startsWith("chat "):
-    return
-  sprite.label["chat ".len .. ^1]
-
 proc hasGreeted(bot: Bot, name: string): bool =
   ## Returns true when this bot has greeted a name today.
   for greetedName in bot.greetedNames:
@@ -699,7 +400,10 @@ proc hasGreeted(bot: Bot, name: string): bool =
 
 proc greetingText(bot: Bot, name: string): string =
   ## Returns one short greeting for a nearby player.
-  "Hi " & name
+  let word = GreetingWords[
+    (bot.selfIndex + bot.greetedNames.len) mod GreetingWords.len
+  ]
+  word & " " & name
 
 proc logName(bot: Bot): string =
   ## Returns the username and fixed player name for bot logs.
@@ -753,8 +457,6 @@ proc classifySprite(label: string): tuple[kind: SpriteKind, glyph: char] =
     result.kind = SpriteGnome
   elif lower.startsWith("name "):
     result.kind = SpriteName
-  elif lower.startsWith("chat "):
-    result.kind = SpriteChat
   elif lower.startsWith("clock "):
     result.kind = SpriteClock
     if label.len > "clock ".len:
@@ -1362,8 +1064,7 @@ proc sameGoal(a, b: Goal): bool =
     a.x == b.x and
     a.y == b.y and
     a.houseIndex == b.houseIndex and
-    a.gardenIndex == b.gardenIndex and
-    a.targetName == b.targetName
+    a.gardenIndex == b.gardenIndex
 
 proc navForCurrentMap(bot: Bot): NavMap =
   ## Returns the navigation map for the current observed map.
@@ -1539,42 +1240,16 @@ proc parseClockMinutes(text: string): int =
   except ValueError:
     result = -1
 
-proc clockName(minutes: int): string =
-  ## Formats day minutes as one AM/PM clock string.
-  let wrapped = ((minutes mod (24 * 60)) + (24 * 60)) mod (24 * 60)
-  var hour = wrapped div 60
-  let minute = wrapped mod 60
-  let suffix =
-    if hour >= 12:
-      "pm"
-    else:
-      "am"
-  hour = hour mod 12
-  if hour == 0:
-    hour = 12
-  let minuteText =
-    if minute < 10:
-      "0" & $minute
-    else:
-      $minute
-  $hour & ":" & minuteText & suffix
-
 proc resetGardenPlan(bot: Bot) =
   ## Resets the static garden checklist and greetings for a new day.
   inc bot.dayIndex
   bot.gardenChecked = newSeq[bool](bot.resources.gardens.len)
   bot.greetedNames.setLen(0)
-  bot.lastGreetingTick = -1
   bot.currentGarden = -1
   bot.partyHouse = UnknownHouse
   bot.searchHouse = UnknownHouse
   bot.hostUntilMinutes = -1
   bot.hostCommitted = false
-  bot.hasDecision = false
-  bot.decisionChatSent = false
-  bot.llmWaiting = false
-  bot.lastLlmError = ""
-  bot.committedPartyHouse = UnknownHouse
   bot.path.setLen(0)
   bot.goal = Goal(kind: GoalIdle, mapKind: MapUnknown)
 
@@ -1659,7 +1334,6 @@ proc adoptHomeIdentity(bot: Bot, homeIndex: int) =
     return
   let name = homeIndex.playerNameForHouse()
   bot.playerName = name
-  bot.soulInstructions = name.loadSoulInstructions()
   bot.homeIndex = homeIndex
   bot.currentHouse =
     if bot.mapKind == MapHome:
@@ -1669,8 +1343,6 @@ proc adoptHomeIdentity(bot: Bot, homeIndex: int) =
   bot.pendingHouse = UnknownHouse
   bot.partyHouse = UnknownHouse
   bot.searchHouse = UnknownHouse
-  bot.committedPartyHouse = UnknownHouse
-  bot.hasDecision = false
   bot.currentGarden = -1
   bot.path.setLen(0)
   bot.goal = Goal(kind: GoalIdle, mapKind: MapUnknown)
@@ -1835,10 +1507,10 @@ proc analyze(bot: Bot) =
       bot.playerName.len > 0:
     bot.currentHouse = bot.homeIndex
 
-proc maybeGreetNearby(bot: Bot, ws: WebSocket): bool =
+proc maybeGreetNearby(bot: Bot, ws: WebSocket) =
   ## Greets newly seen nearby players once per day.
   if not bot.localized or bot.mapKind == MapOverlay:
-    return false
+    return
   let
     selfX = bot.playerFootX()
     selfY = bot.playerFootY()
@@ -1864,11 +1536,9 @@ proc maybeGreetNearby(bot: Bot, ws: WebSocket): bool =
       continue
     let message = bot.greetingText(name)
     bot.greetedNames.add(name)
-    bot.lastGreetingTick = bot.frameTick
     ws.send(blobFromChat(message), BinaryMessage)
     bot.log("chat " & message)
-    return true
-  false
+    return
 
 proc homeIndexFromName(name: string): int =
   ## Guesses a zero-based home index from trailing name digits.
@@ -1883,7 +1553,7 @@ proc homeIndexFromName(name: string): int =
     result = 0
 
 proc initBot(name: string, slot: int, decodeVisualSprites = false): Bot =
-  ## Builds a new talking Viliger bot state.
+  ## Builds a new Villager bot state.
   result = Bot()
   result.decodeVisualSprites = decodeVisualSprites
   result.name =
@@ -1902,11 +1572,6 @@ proc initBot(name: string, slot: int, decodeVisualSprites = false): Bot =
       result.homeIndex.playerNameForHouse()
     else:
       ""
-  result.soulInstructions =
-    if result.playerName.len > 0:
-      result.playerName.loadSoulInstructions()
-    else:
-      DefaultName.loadSoulInstructions()
   result.resources = loadBotResources()
   result.currentHouse =
     if result.playerName.len > 0:
@@ -1922,14 +1587,9 @@ proc initBot(name: string, slot: int, decodeVisualSprites = false): Bot =
   result.searchHouse = UnknownHouse
   result.hostUntilMinutes = -1
   result.hostCommitted = false
-  result.hasDecision = false
-  result.decisionChatSent = false
-  result.llmWaiting = false
-  result.committedPartyHouse = UnknownHouse
   result.dayIndex = 0
   result.gardenChecked = newSeq[bool](result.resources.gardens.len)
   result.greetedNames = @[]
-  result.lastGreetingTick = -1
 
 proc gardenGoal(bot: Bot): Goal =
   ## Returns a goal for the nearest garden that may still have food.
@@ -2128,21 +1788,6 @@ proc houseCrowd(bot: Bot, houseIndex: int): int =
     if not objectState.present:
       continue
     if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    if bot.playerNearHouse(objectState, houseIndex):
-      inc result
-
-proc houseCrowdOthers(bot: Bot, houseIndex: int): int =
-  ## Returns how many other visible gnomes are gathered near one house.
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    let playerIndex = objectId - PlayerObjectBase
-    if playerIndex == bot.selfIndex:
-      continue
-    if bot.visiblePlayerName(playerIndex) == bot.playerName:
       continue
     if bot.playerNearHouse(objectState, houseIndex):
       inc result
@@ -2418,689 +2063,25 @@ proc ownHomeGoal(bot: Bot): Goal =
     return bot.enterHouseGoal(bot.homeIndex)
   Goal(kind: GoalIdle, mapKind: bot.mapKind)
 
-proc visibleOtherPlayerCount(bot: Bot): int =
-  ## Returns how many other player sprites are visible now.
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    if objectId - PlayerObjectBase != bot.selfIndex:
-      inc result
-
-proc visiblePlayerNear(bot: Bot, name: string): bool =
-  ## Returns true when one named visible player is close enough to talk.
-  let playerIndex = bot.visiblePlayerIndexByName(name)
-  if playerIndex < 0:
-    return false
-  let objectId = PlayerObjectBase + playerIndex
-  if objectId < 0 or objectId >= bot.objects.len:
-    return false
-  let objectState = bot.objects[objectId]
-  if not objectState.present:
-    return false
-  distanceSquared(
-    bot.playerFootX(),
-    bot.playerFootY(),
-    bot.objectFootX(objectState),
-    bot.objectFootY(objectState)
-  ) <= PersonStandRadius * PersonStandRadius
-
-proc standNextToPersonGoal(bot: Bot, name: string): Goal =
-  ## Returns a goal for walking near one visible or likely player.
-  let playerIndex = bot.visiblePlayerIndexByName(name)
-  if playerIndex >= 0:
-    let objectState = bot.objects[PlayerObjectBase + playerIndex]
-    return Goal(
-      kind: GoalStandPerson,
-      mapKind: bot.mapKind,
-      x: bot.objectFootX(objectState),
-      y: bot.objectFootY(objectState),
-      houseIndex: bot.visiblePlayerHome(playerIndex),
-      gardenIndex: -1,
-      targetName: name
-    )
-  if bot.mapKind == MapHome:
-    return bot.exitGoal()
-  if bot.mapKind == MapMain:
-    let houseIndex = name.houseIndexForPlayerName()
-    if houseIndex >= 0:
-      return bot.gatherAtHouseGoal(houseIndex)
-  Goal(kind: GoalIdle, mapKind: bot.mapKind)
-
-proc decisionHouse(bot: Bot, decision: LlmDecision): int =
-  ## Returns the best house target for one LLM decision.
-  result = decision.houseIndex
-  if result < 0 and decision.targetName.len > 0:
-    result = decision.targetName.houseIndexForPlayerName()
-  if result < 0 and bot.committedPartyHouse >= 0:
-    result = bot.committedPartyHouse
-
-proc mentionedHouseIndex(message: string): int =
-  ## Returns a house index mentioned by owner name in chat text.
-  result = UnknownHouse
-  let lower = message.toLowerAscii()
-  for i, playerName in PlayerNames:
-    let owner = playerName.toLowerAscii()
-    if lower.contains(owner & "'s house") or
-        lower.contains(owner & "s house") or
-        lower.contains(owner & " house"):
-      return i
-
-proc isHostInviteMessage(message: string): bool =
-  ## Returns true when chat text invites people to this bot's house.
-  let lower = message.toLowerAscii()
-  lower.contains("my house") or
-    lower.contains("my place") or
-    lower.contains("come to my") or
-    lower.contains("party at my") or
-    lower.contains("meet at my")
-
-proc isAttendanceMessage(message: string): bool =
-  ## Returns true when chat text confirms attendance at a party.
-  let lower = message.toLowerAscii()
-  lower.contains("i will come") or
-    lower.contains("i'll come") or
-    lower.contains("i will be there") or
-    lower.contains("i'll be there") or
-    lower.contains("i am coming") or
-    lower.contains("i'm coming") or
-    lower.contains("see you") or
-    lower.contains("sounds great") or
-    lower.contains("count me in") or
-    lower.contains("coming to")
-
-proc inferSocialCommitment(bot: Bot, decision: LlmDecision): LlmDecision =
-  ## Infers party commitments from social chat decisions.
-  result = decision
-  let mentionedHouse = decision.message.mentionedHouseIndex()
-  if result.houseIndex < 0 and mentionedHouse >= 0:
-    result.houseIndex = mentionedHouse
-  if result.action == LlmGoToParty and result.houseIndex < 0:
-    let targetHouse = result.targetName.houseIndexForPlayerName()
-    if targetHouse >= 0:
-      result.houseIndex = targetHouse
-  if result.action != LlmSayToPerson:
-    return
-  if result.message.isHostInviteMessage():
-    result.commitParty = true
-    result.houseIndex = bot.homeIndex
-    return
-  if result.commitParty or result.message.isAttendanceMessage():
-    if result.houseIndex < 0:
-      let targetHouse = result.targetName.houseIndexForPlayerName()
-      if targetHouse >= 0:
-        result.houseIndex = targetHouse
-    if result.houseIndex >= 0:
-      result.commitParty = true
-
-proc timePhase(bot: Bot): int =
-  ## Returns a coarse strategic time phase.
-  if bot.minutes < HostPrepMinutes:
-    return 0
-  if bot.minutes < InviteStartMinutes:
-    return 1
-  if bot.minutes < HouseEnterMinutes:
-    return 2
-  if bot.minutes < DinnerMinutes:
-    return 3
-  if bot.minutes < PartyLeaveMinutes:
-    return 4
-  if bot.minutes < DayEndMinutes:
-    return 5
-  6
-
-proc foodBand(bot: Bot): int =
-  ## Returns a coarse inventory band for interrupt detection.
-  let food = bot.inventoryTotal()
-  if food <= LowHostFood:
-    return 0
-  if food >= HighFoodForInvites:
-    return 2
-  1
-
-proc commitmentHasCompany(bot: Bot): bool =
-  ## Returns true while a party commitment should still be honored.
-  let houseIndex = bot.committedPartyHouse
-  if houseIndex < 0:
-    return false
-  if bot.hostCommitted and houseIndex == bot.homeIndex:
-    return true
-  if bot.mapKind == MapHome and bot.currentHouse == houseIndex:
-    return bot.visibleOtherPlayerCount() > 0
-  true
-
-proc mapNameForPrompt(kind: MapKind): string =
-  ## Returns a readable map name for the LLM prompt.
-  case kind
-  of MapUnknown:
-    "unknown"
-  of MapMain:
-    "world"
-  of MapHome:
-    "home"
-  of MapOverlay:
-    "overlay"
-
-proc visiblePlayersText(bot: Bot): string =
-  ## Returns visible player facts for the LLM prompt.
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    let
-      playerIndex = objectId - PlayerObjectBase
-      name = bot.visiblePlayerName(playerIndex)
-    if name.len == 0 or playerIndex == bot.selfIndex or
-        name == bot.playerName:
-      continue
-    if result.len > 0:
-      result.add("\n")
-    let
-      footX = bot.objectFootX(objectState)
-      footY = bot.objectFootY(objectState)
-      distance = distanceSquared(
-        bot.playerFootX(),
-        bot.playerFootY(),
-        footX,
-        footY
-      )
-      chat = bot.visibleChatText(playerIndex)
-    result.add(
-      "- " & name &
-      " homeOwner=" & name &
-      " homeHouseIndex=" & $(name.houseIndexForPlayerName() + 1) &
-      " x=" & $footX &
-      " y=" & $footY &
-      " distanceSquared=" & $distance
-    )
-    if chat.len > 0:
-      result.add(" says=\"" & chat & "\"")
-  if result.len == 0:
-    result = "- none"
-
-proc visibleChatsSignature(bot: Bot): string =
-  ## Returns a compact signature of visible chat bubbles.
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < ChatObjectBase or objectId >= GardenObjectBase:
-      continue
-    let playerIndex = objectId - ChatObjectBase
-    let chat = bot.visibleChatText(playerIndex)
-    if chat.len == 0:
-      continue
-    result.add(bot.visiblePlayerName(playerIndex) & ":" & chat & "|")
-
-proc houseCrowdsText(bot: Bot): string =
-  ## Returns visible house crowd facts for the LLM prompt.
-  for houseIndex in 0 ..< HouseCount:
-    if not bot.resources.houseValid[houseIndex]:
-      continue
-    if result.len > 0:
-      result.add("\n")
-    result.add(
-      "- houseOwner=" & houseIndex.playerNameForHouse() &
-      " houseIndex=" & $(houseIndex + 1) &
-      " otherCrowd=" & $bot.houseCrowdOthers(houseIndex) &
-      " ownerPresent=" & $bot.houseOwnerPresent(houseIndex) &
-      " hasGuest=" & $bot.houseHasGuest(houseIndex)
-    )
-
-proc houseCrowdsSignature(bot: Bot): string =
-  ## Returns a compact signature of visible house crowds.
-  for houseIndex in 0 ..< HouseCount:
-    let crowd = bot.houseCrowdOthers(houseIndex)
-    if crowd > 0:
-      result.add($(houseIndex + 1) & ":" & $crowd & ",")
-  if result.len == 0:
-    result = "none"
-
-proc gardenMarkersText(bot: Bot): string =
-  ## Returns visible garden marker facts for the LLM prompt.
-  var count = 0
-  for i in 0 ..< bot.resources.gardens.len:
-    if bot.gardenHasMarker(i):
-      inc count
-      if result.len > 0:
-        result.add(", ")
-      result.add($i)
-  if result.len == 0:
-    result = "none"
-  result = "visible=" & $count & " indices=" & result
-
-proc decisionStateSignature(bot: Bot): string =
-  ## Returns the interrupt signature for the current strategic state.
-  "phase=" & $bot.timePhase() &
-    "|food=" & $bot.foodBand() &
-    "|chats=" & bot.visibleChatsSignature() &
-    "|crowds=" & bot.houseCrowdsSignature() &
-    "|commit=" & $bot.committedPartyHouse &
-    "|commitCompany=" & $bot.commitmentHasCompany()
-
-proc llmSystemPrompt(): string =
-  ## Returns the stable system prompt for the social player.
-  "You are talking_viliger, a Heartleaf gnome player. " &
-    "Return only one JSON object and no prose. " &
-    "Allowed actions are keep_gathering_plants, find_person, find_house, " &
-    "go_home, stand_at_house_garden, stand_next_to_person, say_to_person, " &
-    "and go_to_party. Fields are action, targetName, houseIndex, message, " &
-    "commitParty, and reason. houseIndex is 1 to 9. " &
-    "Gather as much food as possible early. If food is high by 3pm, " &
-    "stand at your house to greet people. At 4pm, invite people to " &
-    "your house if you have food. After 5pm, stop gathering and switch " &
-    "to social party planning. After 6pm, go to a party or your own " &
-    "house even if food is low. If food is low, seek a party. If food " &
-    "is high, invite people to your party using say_to_person. Say " &
-    "short friendly phrases to nearby players so " &
-    "they are more likely to cooperate. Prefer messages under 12 words. " &
-    "In chat messages, never call houses by number. Use my house, your " &
-    "house, or the owner's name, like Anton's house. Only use numeric " &
-    "houseIndex values in JSON fields. If you agree to attend a party, " &
-    "set commitParty true, set houseIndex to that owner's house, and say " &
-    "a short confirmation. Do not confirm attendance if you are already " &
-    "committed somewhere else or hosting your own party. " &
-    "Choose who to visit, who to invite, and exactly what to say. " &
-    "Honor party agreements unless nobody else is there."
-
-proc llmUserPrompt(bot: Bot): string =
-  ## Builds one current-state prompt for the LLM.
-  let commitment =
-    if bot.committedPartyHouse >= 0:
-      bot.committedPartyHouse.playerNameForHouse() & "'s house"
-    else:
-      "none"
-  let commitmentIndex =
-    if bot.committedPartyHouse >= 0:
-      $(bot.committedPartyHouse + 1)
-    else:
-      "none"
-  let currentHouse =
-    if bot.currentHouse >= 0:
-      $(bot.currentHouse + 1)
-    else:
-      "none"
-  let currentHouseOwner =
-    if bot.currentHouse >= 0:
-      bot.currentHouse.playerNameForHouse()
-    else:
-      "none"
-  result =
-    "Current Heartleaf state:\n" &
-    "timeMinutes=" & $bot.minutes & "\n" &
-    "map=" & bot.mapKind.mapNameForPrompt() & "\n" &
-    "homeOwner=" & bot.homeIndex.playerNameForHouse() & "\n" &
-    "homeHouseIndex=" & $(bot.homeIndex + 1) & "\n" &
-    "currentHouseOwner=" & currentHouseOwner & "\n" &
-    "currentHouseIndex=" & currentHouse & "\n" &
-    "foodTotal=" & $bot.inventoryTotal() & "\n" &
-    "partyCommitment=" & commitment & "\n" &
-    "partyCommitmentHouseIndex=" & commitmentIndex & "\n" &
-    "agentSoul:\n" & bot.soulInstructions & "\n" &
-    "strategyFoodLowAt=" & $LowHostFood & "\n" &
-    "strategyFoodHighAt=" & $HighFoodForInvites & "\n" &
-    "clock=" & bot.minutes.clockName() & "\n" &
-    "timeMeaning=timeMinutes is minutes after midnight; " &
-    $HostPrepMinutes & " is 3:00pm, " &
-    $InviteStartMinutes & " is 4:00pm, " &
-    $DinnerMinutes & " is 6:00pm\n" &
-    "hostPrepStartsAt=" & $HostPrepMinutes & "\n" &
-    "inviteStartsAt=" & $InviteStartMinutes & "\n" &
-    "partyPrepStartsAt=" & $HouseEnterMinutes & "\n" &
-    "dinnerStartsAt=" & $DinnerMinutes & "\n" &
-    "partyLeaveStartsAt=" & $PartyLeaveMinutes & "\n" &
-    "rules=before partyPrepStartsAt gather food; after partyPrepStartsAt " &
-    "do not keep gathering; after dinnerStartsAt choose go_to_party " &
-    "unless already safely home or honoring another commitment\n" &
-    "visiblePlayers:\n" & bot.visiblePlayersText() & "\n" &
-    "visibleHouseCrowds:\n" & bot.houseCrowdsText() & "\n" &
-    "gardenMarkers=" & bot.gardenMarkersText() & "\n" &
-    "availableActions=keep_gathering_plants, find_person, find_house, " &
-    "go_home, stand_at_house_garden, stand_next_to_person, say_to_person, " &
-    "go_to_party\n" &
-    "Return JSON now."
-
-proc partyFallbackHouse(bot: Bot): int =
-  ## Returns a deterministic party target for deadline guardrails.
-  result = bot.bestVisiblePartyHouse(true)
-  if result >= 0:
-    return
-  if bot.searchHouse >= 0:
-    return bot.searchHouse
-  result = bot.scoutingHouseIndex()
-  if result < 0:
-    result = bot.homeIndex
-
-proc partyTimeDecision(bot: Bot, reason: string): LlmDecision =
-  ## Returns a go-to-party decision for social deadline guardrails.
-  LlmDecision(
-    valid: true,
-    action: LlmGoToParty,
-    houseIndex: bot.partyFallbackHouse(),
-    commitParty: true,
-    reason: reason
-  )
-
-proc prepTimeDecision(bot: Bot, reason: string): LlmDecision =
-  ## Returns a pre-dinner social decision when gathering must stop.
-  let partyHouse = bot.bestVisiblePartyHouse(true)
-  if partyHouse >= 0 or bot.inventoryTotal() <= LowHostFood:
-    return bot.partyTimeDecision(reason)
-  LlmDecision(
-    valid: true,
-    action: LlmStandAtHouseGarden,
-    houseIndex: bot.homeIndex,
-    reason: reason
-  )
-
-proc enforceTimePolicy(bot: Bot, decision: LlmDecision): LlmDecision =
-  ## Prevents late gathering from overriding dinner and party time.
-  result = decision
-  if bot.minutes < InviteStartMinutes and
-      decision.action == LlmSayToPerson and
-      decision.message.isHostInviteMessage():
-    if bot.minutes >= HostPrepMinutes:
-      result = LlmDecision(
-        valid: true,
-        action: LlmStandAtHouseGarden,
-        houseIndex: bot.homeIndex,
-        reason: "wait until 4pm to invite people"
-      )
-    else:
-      result = LlmDecision(
-        valid: true,
-        action: LlmKeepGatheringPlants,
-        reason: "too early to invite people"
-      )
-    return
-  if bot.minutes >= DayEndMinutes:
-    if decision.action != LlmGoToParty:
-      result = LlmDecision(
-        valid: true,
-        action: LlmGoHome,
-        reason: "day is ending"
-      )
-    return
-  if bot.minutes >= DinnerMinutes:
-    case decision.action
-    of LlmGoToParty, LlmGoHome:
-      return
-    else:
-      result = bot.partyTimeDecision(
-        "dinner time has started; stop gathering and attend a party"
-      )
-      return
-  if bot.minutes >= HouseEnterMinutes and
-      decision.action == LlmKeepGatheringPlants:
-    result = bot.prepTimeDecision(
-      "party planning time has started; stop gathering"
-    )
-    return
-  if bot.minutes >= HostPrepMinutes and
-      bot.inventoryTotal() >= HighFoodForInvites and
-      decision.action == LlmKeepGatheringPlants and
-      bot.committedPartyHouse < 0:
-    result = LlmDecision(
-      valid: true,
-      action: LlmStandAtHouseGarden,
-      houseIndex: bot.homeIndex,
-      reason: "food reserve is ready; prepare at own house"
-    )
-
-proc fallbackDecision(bot: Bot): LlmDecision =
-  ## Returns the safest deterministic decision when the LLM is unavailable.
-  result = LlmDecision(
-    valid: true,
-    action: LlmKeepGatheringPlants,
-    houseIndex: UnknownHouse,
-    reason: "fallback"
-  )
-  if bot.committedPartyHouse >= 0 and bot.commitmentHasCompany():
-    result.action = LlmGoToParty
-    result.houseIndex = bot.committedPartyHouse
-    result.commitParty = true
-  elif bot.minutes >= DayEndMinutes:
-    result.action = LlmGoHome
-  elif bot.minutes >= DinnerMinutes:
-    result = bot.partyTimeDecision("fallback dinner party")
-  elif bot.minutes >= HouseEnterMinutes:
-    result = bot.prepTimeDecision("fallback party planning")
-  elif bot.minutes >= HostPrepMinutes and
-      bot.inventoryTotal() >= HighFoodForInvites:
-    result.action = LlmStandAtHouseGarden
-    result.houseIndex = bot.homeIndex
-    result.reason = "fallback host preparation"
-  elif bot.shouldGather():
-    result.action = LlmKeepGatheringPlants
-  elif bot.inventoryTotal() >= HighFoodForInvites:
-    result.action = LlmStandAtHouseGarden
-    result.houseIndex = bot.homeIndex
-  else:
-    let houseIndex = bot.bestVisiblePartyHouse(true)
-    result.action = LlmGoToParty
-    result.houseIndex =
-      if houseIndex >= 0:
-        houseIndex
-      else:
-        bot.homeIndex
-    result.commitParty = true
-
-proc enforceCommitment(bot: Bot, decision: LlmDecision): LlmDecision =
-  ## Forces party commitments unless the bot is alone at that party.
-  result = decision
-  if bot.committedPartyHouse < 0:
-    return
-  if bot.hostCommitted and bot.committedPartyHouse == bot.homeIndex:
-    if decision.action == LlmSayToPerson:
-      if not decision.commitParty or
-          decision.houseIndex < 0 or
-          decision.houseIndex == bot.homeIndex:
-        return
-    let decisionHouse = bot.decisionHouse(decision)
-    if decision.action == LlmStandAtHouseGarden and
-        (decisionHouse < 0 or decisionHouse == bot.homeIndex):
-      return
-    if decision.action == LlmGoHome:
-      return
-  if not bot.commitmentHasCompany():
-    bot.log("party commitment cleared because no one else is there")
-    if bot.searchHouse == bot.committedPartyHouse:
-      bot.searchHouse = UnknownHouse
-    if bot.partyHouse == bot.committedPartyHouse:
-      bot.partyHouse = UnknownHouse
-    bot.committedPartyHouse = UnknownHouse
-    return
-  if decision.action == LlmGoToParty and
-      decision.houseIndex == bot.committedPartyHouse:
-    return
-  result = LlmDecision(
-    valid: true,
-    action: LlmGoToParty,
-    houseIndex: bot.committedPartyHouse,
-    commitParty: true,
-    reason: "honoring party commitment"
-  )
-
-proc applyDecision(bot: Bot, decision: LlmDecision) =
-  ## Stores one parsed LLM decision and updates social commitments.
-  var nextDecision =
-    if decision.valid:
-      decision
-    else:
-      bot.fallbackDecision()
-  nextDecision = bot.inferSocialCommitment(nextDecision)
-  nextDecision = bot.enforceTimePolicy(nextDecision)
-  nextDecision = bot.enforceCommitment(nextDecision)
-  let commitHouse =
-    if nextDecision.houseIndex >= 0:
-      nextDecision.houseIndex
-    elif nextDecision.commitParty:
-      bot.homeIndex
-    else:
-      UnknownHouse
-  if nextDecision.action == LlmGoToParty and commitHouse >= 0:
-    bot.committedPartyHouse = commitHouse
-    nextDecision.houseIndex = commitHouse
-    nextDecision.commitParty = true
-  elif nextDecision.commitParty and commitHouse >= 0:
-    bot.committedPartyHouse = commitHouse
-    nextDecision.houseIndex = commitHouse
-    if commitHouse == bot.homeIndex and
-        nextDecision.message.isHostInviteMessage():
-      bot.hostCommitted = true
-      bot.partyHouse = bot.homeIndex
-  bot.decision = nextDecision
-  bot.hasDecision = true
-  bot.decisionChatSent = false
-  bot.decisionStartedTick = bot.frameTick
-  bot.decisionState = bot.decisionStateSignature()
-  bot.decisionFoodBand = bot.foodBand()
-  bot.decisionTimePhase = bot.timePhase()
-  bot.decisionChatSignature = bot.visibleChatsSignature()
-  bot.decisionCrowdSignature = bot.houseCrowdsSignature()
-  bot.path.setLen(0)
-  bot.goal = Goal(kind: GoalIdle, mapKind: MapUnknown)
-  bot.log(
-    "llm action " & nextDecision.action.actionName() &
-    " house=" & $(nextDecision.houseIndex + 1) &
-    " target=" & nextDecision.targetName &
-    " message=" & nextDecision.message &
-    " reason=" & nextDecision.reason
-  )
-
-proc applyLlmReply(bot: Bot, reply: string) =
-  ## Parses and applies one LLM reply.
-  let decision = reply.parseLlmDecision()
-  if not decision.valid:
-    bot.lastLlmError = decision.error
-    bot.log("llm parse error " & decision.error)
-  bot.applyDecision(decision)
-
-proc startLlmDecision(bot: Bot): bool =
-  ## Starts a Bedrock decision request or applies an immediate fallback.
-  let mockReply = mockBedrockReply()
-  if mockReply.len > 0:
-    bot.applyLlmReply(mockReply)
-    return false
-  inc bot.llmSerial
-  bot.llmTag = "decision-" & $bot.llmSerial
-  let messages = @[
-    ConversationMessage(role: "system", content: llmSystemPrompt()),
-    ConversationMessage(role: "user", content: bot.llmUserPrompt())
-  ]
-  var started = false
-  try:
-    started = startTalkToBedrock(messages, bot.llmTag)
-  except CatchableError as e:
-    let answer = BedrockResult(done: true, error: e.msg)
-    if answer.transientBedrockError():
-      bot.lastLlmError = e.msg
-      bot.log("llm transient start error " & e.msg & ", using fallback")
-      bot.applyDecision(bot.fallbackDecision())
-      return false
-    raise newException(
-      TalkingViligerError,
-      "Could not start Bedrock request: " & e.msg
-    )
-  if not started:
-    raise newException(
-      TalkingViligerError,
-      "AWS_BEARER_TOKEN_BEDROCK or BEDROCK_KEY is not set."
-    )
-  bot.llmWaiting = true
-  bot.decisionStartedTick = bot.frameTick
-  let latency = bedrockPerformanceLatency()
-  let latencyName =
-    if latency.len > 0:
-      latency
-    else:
-      "default"
-  bot.log(
-    "llm request " & bot.llmTag &
-    " model=" & bedrockModel() &
-    " region=" & bedrockRegion() &
-    " latency=" & latencyName
-  )
-  true
-
-proc pollLlmDecision(bot: Bot): bool =
-  ## Polls and applies a completed LLM request.
-  if not bot.llmWaiting:
-    return false
-  let answer = pollTalkToBedrock()
-  if not answer.done:
-    return false
-  if answer.tag != bot.llmTag:
-    return false
-  bot.llmWaiting = false
-  if answer.ok:
-    bot.applyLlmReply(answer.reply)
-  else:
-    bot.lastLlmError = answer.error
-    bot.log("llm error " & answer.error)
-    if answer.transientBedrockError():
-      bot.log("llm transient error, using fallback")
-      bot.applyDecision(bot.fallbackDecision())
-    elif answer.permanentBedrockError():
-      raise newException(
-        TalkingViligerError,
-        "Bedrock request failed: " & answer.error
-      )
-    else:
-      raise newException(
-        TalkingViligerError,
-        "Unknown Bedrock request failed: " & answer.error
-      )
-  true
-
-proc decisionGoal(bot: Bot, decision: LlmDecision): Goal =
-  ## Converts one LLM decision into a deterministic navigation goal.
-  case decision.action
-  of LlmKeepGatheringPlants:
-    if bot.minutes >= DinnerMinutes:
-      return bot.partyGoal()
-    if bot.minutes >= HouseEnterMinutes:
-      return bot.dinnerGatherGoal()
-    if bot.mapKind == MapHome:
-      return bot.exitGoal()
-    if bot.mapKind == MapMain:
-      let garden = bot.gardenGoal()
-      if garden.kind != GoalIdle:
-        return garden
-    Goal(kind: GoalIdle, mapKind: bot.mapKind)
-  of LlmFindPerson, LlmStandNextToPerson, LlmSayToPerson:
-    bot.standNextToPersonGoal(decision.targetName)
-  of LlmFindHouse, LlmStandAtHouseGarden:
-    let houseIndex = bot.decisionHouse(decision)
-    if houseIndex < 0:
-      return Goal(kind: GoalIdle, mapKind: bot.mapKind)
-    bot.gatherAtHouseGoal(houseIndex)
-  of LlmGoHome:
-    bot.ownHomeGoal()
-  of LlmGoToParty:
-    let houseIndex = bot.decisionHouse(decision)
-    if houseIndex < 0:
-      return bot.ownHomeGoal()
-    if bot.mapKind == MapHome:
-      if bot.currentHouse == houseIndex:
-        return bot.firstDinerGoal()
-      return bot.exitGoal()
-    if bot.mapKind == MapMain:
-      return bot.enterHouseGoal(houseIndex)
-    Goal(kind: GoalIdle, mapKind: bot.mapKind)
-  of LlmInvalid:
-    Goal(kind: GoalIdle, mapKind: bot.mapKind)
-
 proc chooseGoal(bot: Bot): Goal =
-  ## Chooses the current LLM-backed Heartleaf goal.
+  ## Chooses the current Heartleaf day-plan goal.
   if not bot.localized or bot.navForCurrentMap() == nil:
     return Goal(kind: GoalIdle, mapKind: bot.mapKind)
   if bot.mapKind == MapOverlay:
     return Goal(kind: GoalIdle, mapKind: bot.mapKind)
-  if not bot.hasDecision:
-    return Goal(kind: GoalIdle, mapKind: bot.mapKind)
-  bot.decisionGoal(bot.decision)
+  if bot.shouldGather():
+    if bot.mapKind == MapHome:
+      return bot.exitGoal()
+    let garden = bot.gardenGoal()
+    if garden.kind != GoalIdle:
+      return garden
+  if bot.minutes < HouseEnterMinutes:
+    return bot.dinnerGatherGoal()
+  if bot.minutes < PartyLeaveMinutes:
+    return bot.partyGoal()
+  if bot.minutes < DayEndMinutes:
+    return bot.ownHomeGoal()
+  Goal(kind: GoalIdle, mapKind: bot.mapKind)
 
 proc goalReached(bot: Bot, goal: Goal): bool =
   ## Returns true when the bot is close enough to a goal to act.
@@ -3125,13 +2106,6 @@ proc goalReached(bot: Bot, goal: Goal): bool =
     house.contains(bot.playerFootX(), bot.playerFootY())
   of GoalExitHouse:
     bot.resources.exit.contains(bot.playerFootX(), bot.playerFootY())
-  of GoalStandPerson:
-    distanceSquared(
-      bot.playerFootX(),
-      bot.playerFootY(),
-      goal.x,
-      goal.y
-    ) <= PersonStandRadius * PersonStandRadius
   of GoalGatherHouse, GoalMove:
     distanceSquared(
       bot.playerFootX(),
@@ -3155,8 +2129,6 @@ proc goalLabel(goal: Goal): string =
     "enter house " & $(goal.houseIndex + 1)
   of GoalExitHouse:
     "exit house"
-  of GoalStandPerson:
-    "stand next to " & goal.targetName
   of GoalMove:
     "wait"
 
@@ -3170,7 +2142,6 @@ proc interactionMask(bot: Bot, goal: Goal): uint8 =
   case goal.kind
   of GoalCollect:
     bot.attackCooldown = 8
-    bot.lastCollectTick = bot.frameTick
     if bot.currentGarden == goal.gardenIndex:
       bot.currentGarden = -1
     bot.path.setLen(0)
@@ -3187,78 +2158,6 @@ proc interactionMask(bot: Bot, goal: Goal): uint8 =
     ButtonA
   else:
     0
-
-proc decisionComplete(bot: Bot): bool =
-  ## Returns true when the current LLM action has completed.
-  if not bot.hasDecision:
-    return true
-  case bot.decision.action
-  of LlmKeepGatheringPlants:
-    if not bot.shouldGather():
-      return true
-    bot.inventoryTotal() >= HighFoodForInvites
-  of LlmFindPerson, LlmStandNextToPerson:
-    bot.visiblePlayerNear(bot.decision.targetName)
-  of LlmSayToPerson:
-    bot.decisionChatSent
-  of LlmFindHouse, LlmStandAtHouseGarden:
-    bot.goal.kind == GoalGatherHouse and bot.goalReached(bot.goal)
-  of LlmGoHome:
-    bot.mapKind == MapHome and bot.currentHouse == bot.homeIndex
-  of LlmGoToParty:
-    let houseIndex = bot.decisionHouse(bot.decision)
-    bot.mapKind == MapHome and bot.currentHouse == houseIndex
-  of LlmInvalid:
-    true
-
-proc decisionInterrupted(bot: Bot): bool =
-  ## Returns true when major state changes should interrupt an action.
-  if not bot.hasDecision:
-    return true
-  if bot.frameTick - bot.decisionStartedTick < DecisionRetryTicks:
-    return false
-  if bot.stuckTicks >= DecisionStuckTicks:
-    return true
-  let chatSignature = bot.visibleChatsSignature()
-  if chatSignature.len > 0 and chatSignature != bot.decisionChatSignature:
-    return true
-  if bot.timePhase() != bot.decisionTimePhase:
-    return true
-  let foodBand = bot.foodBand()
-  if foodBand != bot.decisionFoodBand:
-    if bot.decision.action == LlmKeepGatheringPlants:
-      return foodBand == 2
-    return true
-  let crowdSignature = bot.houseCrowdsSignature()
-  if crowdSignature == bot.decisionCrowdSignature:
-    return false
-  if bot.decision.action == LlmKeepGatheringPlants:
-    return bot.minutes >= LatePartySearchMinutes and crowdSignature != "none"
-  true
-
-proc needsFreshDecision(bot: Bot): bool =
-  ## Returns true when the bot should ask the LLM again.
-  if bot.llmWaiting:
-    return false
-  if not bot.hasDecision:
-    return true
-  bot.decisionComplete() or bot.decisionInterrupted()
-
-proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
-  ## Sends the chat text chosen by the current LLM decision.
-  if not bot.hasDecision or bot.decisionChatSent:
-    return
-  if bot.decision.action != LlmSayToPerson:
-    return
-  if bot.decision.message.len == 0:
-    bot.decisionChatSent = true
-    return
-  if bot.decision.targetName.len > 0 and
-      not bot.visiblePlayerNear(bot.decision.targetName):
-    return
-  ws.send(blobFromChat(bot.decision.message), BinaryMessage)
-  bot.decisionChatSent = true
-  bot.log("chat " & bot.decision.message)
 
 proc ensurePath(bot: Bot, goal: Goal) =
   ## Recomputes the path when the navigation goal changes.
@@ -3387,28 +2286,12 @@ proc firstMovingPathTarget(bot: Bot, goal: Goal): Point =
       return point
   result = Point(x: goal.x, y: goal.y)
 
-proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
+proc decideNextMask(bot: Bot): uint8 =
   ## Chooses the next input mask for one game frame.
   bot.analyze()
   if not bot.localized:
     bot.desiredMask = 0
     bot.hasTarget = false
-    return 0
-  if bot.maybeGreetNearby(ws):
-    bot.desiredMask = 0
-    bot.hasTarget = false
-    bot.updateStuck(0)
-    return 0
-  discard bot.pollLlmDecision()
-  if bot.llmWaiting:
-    bot.desiredMask = 0
-    bot.hasTarget = false
-    bot.updateStuck(0)
-    return 0
-  if bot.needsFreshDecision() and bot.startLlmDecision():
-    bot.desiredMask = 0
-    bot.hasTarget = false
-    bot.updateStuck(0)
     return 0
   let goal = bot.chooseGoal()
   let action = bot.interactionMask(goal)
@@ -4044,7 +2927,7 @@ proc initViewerApp(): ViewerApp =
   ## Opens the diagnostic viewer window.
   result = ViewerApp()
   result.window = newWindow(
-    title = "Heartleaf Talking Viliger Viewer",
+    title = "Heartleaf Villager Viewer",
     size = ivec2(ViewerWindowWidth, ViewerWindowHeight),
     style = DecoratedResizable,
     visible = true
@@ -4280,18 +3163,13 @@ proc runBot(
   url: string,
   gui: bool
 ) =
-  ## Connects the talking Viliger bot to a Heartleaf sprite player endpoint.
+  ## Connects the Villager bot to a Heartleaf sprite player endpoint.
   let connectUrl =
     if url.len > 0:
       url
     else:
       playerUrl(host, port, name, token, slot)
   var bot = initBot(name, slot, gui)
-  try:
-    requireBedrockConfig()
-  except TalkingViligerError as e:
-    echo "talking_viliger fatal: ", e.msg
-    quit(1)
   let viewer =
     if gui:
       initViewerApp()
@@ -4301,7 +3179,7 @@ proc runBot(
   while viewer.viewerOpen():
     try:
       let ws = newWebSocket(connectUrl)
-      echo "talking_viliger connected to ", connectUrl
+      echo "villager connected to ", connectUrl
       connected = true
       bot.lastMask = 0xff'u8
       while viewer.viewerOpen():
@@ -4312,9 +3190,8 @@ proc runBot(
               ws.close()
               break
           continue
-        let nextMask = bot.decideNextMask(ws)
-        if bot.lastGreetingTick != bot.frameTick:
-          bot.maybeSendDecisionChat(ws)
+        let nextMask = bot.decideNextMask()
+        bot.maybeGreetNearby(ws)
         if nextMask != bot.lastMask:
           ws.send(blobFromMask(nextMask), BinaryMessage)
           bot.lastMask = nextMask
@@ -4323,12 +3200,9 @@ proc runBot(
           if not viewer.viewerOpen():
             ws.close()
             break
-    except TalkingViligerError as e:
-      echo "talking_viliger fatal: ", e.msg
-      quit(1)
     except CatchableError as e:
       connected = false
-      echo "talking_viliger reconnecting: ", e.msg
+      echo "villager reconnecting: ", e.msg
       if gui:
         for i in 0 ..< 25:
           if not viewer.viewerOpen():

@@ -1,7 +1,7 @@
 import
   std/os,
   heartleaf/resources,
-  ../players/talking_viliger/decisions
+  ../players/talking_villager/decisions
 
 echo "Testing assets"
 doAssert fileExists("data/map.aseprite"), "map asset should exist"
@@ -21,7 +21,7 @@ let homeRects = loadResourceRects("data/home_map.resource")
 doAssert homeRects.len > 0, "home resource rectangles should parse"
 doAssert homeRects[0].name == "exit", "home exit should be first"
 
-echo "Testing talking_viliger decisions"
+echo "Testing talking_villager decisions"
 let inviteDecision = parseLlmDecision("""
 {
   "action": "say_to_person",
