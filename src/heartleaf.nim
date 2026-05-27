@@ -2,6 +2,7 @@ import
   std/[json, locks, math, monotimes, os, parseopt, random, strutils,
     tables, times],
   mummy, pixie, supersnappy,
+  bitworld/client as bitworldClient,
   heartleaf/aseprite, heartleaf/pixelfonts, heartleaf/protocol,
   heartleaf/resources
 
@@ -74,8 +75,6 @@ const
   SnappyClientRoute = "/snappyjs.min.js"
   SnappyClientPath = "/client/snappyjs.min.js"
   CoworldSnappyClientRoute = "/clients/snappyjs.min.js"
-  ClientHtml = "client.html"
-  SnappyClientJs = "snappyjs.min.js"
   MapLayerId = 0
   UiLayerId = 1
   ClockLayerId = 2
@@ -387,19 +386,6 @@ proc dataDir(): string =
   if fileExists(sourceData / "map.aseprite"):
     return sourceData
   currentSourcePath().parentDir() / "data"
-
-proc clientsDir(): string =
-  ## Returns the Heartleaf clients directory.
-  let cwdClients = getCurrentDir() / "clients"
-  if fileExists(cwdClients / ClientHtml):
-    return cwdClients
-  let repoClients = getCurrentDir() / "heartleaf" / "clients"
-  if fileExists(repoClients / ClientHtml):
-    return repoClients
-  let sourceClients = currentSourcePath().parentDir().parentDir() / "clients"
-  if fileExists(sourceClients / ClientHtml):
-    return sourceClients
-  currentSourcePath().parentDir() / "clients"
 
 proc cogamePath(value, source: string): string =
   ## Converts one COGAME file URI or path into a local path.
@@ -2852,26 +2838,20 @@ proc serveClientFile(request: Request, route: string): bool =
     return false
   var headers: HttpHeaders
   headers["Cache-Control"] = "no-cache"
-  var filePath = ""
+  var body = ""
   case route
   of PlayerClientRoute, PlayerClientHtmlRoute, PlayerClientLegacyHtmlRoute,
       CoworldPlayerClientRoute, GlobalClientRoute, GlobalClientHtmlRoute,
       GlobalClientLegacyHtmlRoute, CoworldGlobalClientRoute,
       ReplayClientRoute, CoworldReplayClientRoute:
-    filePath = clientsDir() / ClientHtml
+    body = bitworldClient.EmbeddedGlobalClientHtml
     headers["Content-Type"] = "text/html; charset=utf-8"
   of SnappyClientRoute, SnappyClientPath, CoworldSnappyClientRoute:
-    filePath = clientsDir() / SnappyClientJs
+    body = bitworldClient.EmbeddedSnappyClientJs
     headers["Content-Type"] = "application/javascript; charset=utf-8"
   else:
     return false
-  if not fileExists(filePath):
-    request.respond(404, headers, "Missing static client: " & route)
-    return true
-  try:
-    request.respond(200, headers, readFile(filePath))
-  except IOError as e:
-    request.respond(500, headers, "Could not read static client: " & e.msg)
+  request.respond(200, headers, body)
   true
 
 proc serveSpriteStatic(request: Request): bool =

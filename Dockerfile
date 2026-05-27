@@ -43,6 +43,5 @@ FROM debian:bookworm-slim
 WORKDIR /workspace/heartleaf
 COPY --from=build /workspace/heartleaf/heartleaf /bin/heartleaf
 COPY --from=build /workspace/heartleaf/data ./data
-COPY --from=build /workspace/heartleaf/clients ./clients
 
 CMD ["/bin/heartleaf", "--address:0.0.0.0", "--port:8080"]

@@ -1,5 +1,6 @@
 import
-  std/os,
+  std/[os, strutils],
+  bitworld/client as bitworldClient,
   heartleaf/resources,
   ../players/talking_villager/decisions
 
@@ -9,7 +10,11 @@ doAssert fileExists("data/gnomes.aseprite"), "gnome asset should exist"
 doAssert fileExists("data/food.aseprite"), "food asset should exist"
 doAssert fileExists("data/tiny5.aseprite"), "font asset should exist"
 doAssert fileExists("data/home_map.resource"), "home resource should exist"
-doAssert fileExists("clients/client.html"), "sprite client should exist"
+doAssert "function websocketPathForClientPage" in
+  bitworldClient.EmbeddedGlobalClientHtml,
+  "global sprite client should be embedded"
+doAssert bitworldClient.EmbeddedSnappyClientJs.len > 0,
+  "snappy client should be embedded"
 
 echo "Testing resources"
 let rects = loadResourceRects("data/map.resource")

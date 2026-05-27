@@ -1,8 +1,12 @@
 import
   std/[algorithm, heapqueue, json, options, os, parseopt, strutils],
-  curly, pixie, silky, supersnappy, vmath, whisky, windy,
+  curly, supersnappy, whisky,
   heartleaf/protocol, heartleaf/resources,
   decisions
+
+when defined(gui):
+  import
+    pixie, silky, vmath, windy
 
 const
   BedrockVersion = "bedrock-2023-05-31"
@@ -46,31 +50,6 @@ const
   HighFoodForInvites = 6
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
-  ViewerWindowWidth = 1480
-  ViewerWindowHeight = 900
-  ViewerMargin = 16.0'f
-  ViewerFrameScale = 2.0'f
-  ViewerMapWidth = 720.0'f
-  ViewerMapHeight = 480.0'f
-  ViewerBackground = rgbx(17, 20, 24, 255)
-  ViewerPanel = rgbx(31, 35, 42, 255)
-  ViewerPanelAlt = rgbx(24, 28, 34, 255)
-  ViewerText = rgbx(232, 237, 226, 255)
-  ViewerMutedText = rgbx(152, 164, 150, 255)
-  ViewerWall = rgbx(78, 58, 70, 255)
-  ViewerWalk = rgbx(48, 72, 57, 255)
-  ViewerViewport = rgbx(143, 197, 255, 190)
-  ViewerPath = rgbx(117, 219, 255, 235)
-  ViewerGoal = rgbx(255, 121, 104, 255)
-  ViewerTarget = rgbx(255, 221, 102, 255)
-  ViewerGarden = rgbx(108, 214, 117, 255)
-  ViewerHouse = rgbx(214, 173, 93, 255)
-  ViewerPlayer = rgbx(120, 255, 176, 255)
-  ViewerOther = rgbx(105, 169, 255, 255)
-  ViewerExit = rgbx(205, 130, 255, 255)
-  ViewerInventoryHeight = 64.0'f
-  ViewerInventoryGap = 8.0'f
-  ViewerInventoryScale = 1.0'f
   DayStartMinutes = 8 * 60
   HostPrepMinutes = 15 * 60
   InviteStartMinutes = 16 * 60
@@ -106,6 +85,34 @@ const
     "Dima",
     "Egor"
   ]
+
+when defined(gui):
+  const
+    ViewerWindowWidth = 1480
+    ViewerWindowHeight = 900
+    ViewerMargin = 16.0'f
+    ViewerFrameScale = 2.0'f
+    ViewerMapWidth = 720.0'f
+    ViewerMapHeight = 480.0'f
+    ViewerBackground = rgbx(17, 20, 24, 255)
+    ViewerPanel = rgbx(31, 35, 42, 255)
+    ViewerPanelAlt = rgbx(24, 28, 34, 255)
+    ViewerText = rgbx(232, 237, 226, 255)
+    ViewerMutedText = rgbx(152, 164, 150, 255)
+    ViewerWall = rgbx(78, 58, 70, 255)
+    ViewerWalk = rgbx(48, 72, 57, 255)
+    ViewerViewport = rgbx(143, 197, 255, 190)
+    ViewerPath = rgbx(117, 219, 255, 235)
+    ViewerGoal = rgbx(255, 121, 104, 255)
+    ViewerTarget = rgbx(255, 221, 102, 255)
+    ViewerGarden = rgbx(108, 214, 117, 255)
+    ViewerHouse = rgbx(214, 173, 93, 255)
+    ViewerPlayer = rgbx(120, 255, 176, 255)
+    ViewerOther = rgbx(105, 169, 255, 255)
+    ViewerExit = rgbx(205, 130, 255, 255)
+    ViewerInventoryHeight = 64.0'f
+    ViewerInventoryGap = 8.0'f
+    ViewerInventoryScale = 1.0'f
 
 type
   MapKind = enum
@@ -254,10 +261,15 @@ type
     lastLlmError: string
     committedPartyHouse: int
 
-  ViewerApp = ref object
-    window: Window
-    silky: Silky
-    contentScale: float32
+when defined(gui):
+  type
+    ViewerApp = ref object
+      window: Window
+      silky: Silky
+      contentScale: float32
+else:
+  type
+    ViewerApp = ref object
 
 proc `<`(a, b: PathNode): bool =
   ## Orders A-star queue nodes by priority and index.
@@ -492,22 +504,44 @@ proc loadSoulInstructions(name: string): string =
     return readFile(defaultPath).strip()
   defaultSoulInstructions(cleanName)
 
-proc atlasPath(): string =
-  ## Returns the Silky atlas path used by the debug viewer.
-  let localPath = repoDir() / "dist" / "atlas.png"
-  if fileExists(localPath):
-    return localPath
-  repoDir() / ".." / "bitworld" / "clients" / "dist" / "atlas.png"
+when defined(gui):
+  proc atlasPath(): string =
+    ## Returns the Silky atlas path used by the debug viewer.
+    let localPath = repoDir() / "dist" / "atlas.png"
+    if fileExists(localPath):
+      return localPath
+    repoDir() / ".." / "bitworld" / "clients" / "dist" / "atlas.png"
 
-proc displayScale(window: Window): float32 =
-  ## Returns a safe content scale for the window's current display.
-  result = window.contentScale
-  if result <= 0.0'f:
-    result = 1.0'f
+  proc displayScale(window: Window): float32 =
+    ## Returns a safe content scale for the window's current display.
+    result = window.contentScale
+    if result <= 0.0'f:
+      result = 1.0'f
 
-proc scaledWindowSize(size: IVec2, scale: float32): IVec2 =
-  ## Converts a logical window size to physical pixels.
-  (size.vec2 * scale).ivec2
+  proc scaledWindowSize(size: IVec2, scale: float32): IVec2 =
+    ## Converts a logical window size to physical pixels.
+    (size.vec2 * scale).ivec2
+else:
+  proc initViewerApp(): ViewerApp =
+    ## Returns an empty viewer for headless builds.
+    nil
+
+  proc viewerOpen(viewer: ViewerApp): bool =
+    ## Returns true for headless builds without a viewer.
+    discard viewer
+    true
+
+  proc pumpViewer(
+    viewer: ViewerApp,
+    bot: Bot,
+    connected: bool,
+    url: string
+  ) =
+    ## Skips viewer updates in headless builds.
+    discard viewer
+    discard bot
+    discard connected
+    discard url
 
 proc toRect(rect: ResourceRect): Rect =
   ## Converts one resource rectangle to the bot rectangle type.
@@ -3490,309 +3524,516 @@ proc markedGardenCount(bot: Bot): int =
     if bot.gardenHasMarker(i):
       inc result
 
-proc drawOutline(
-  sk: Silky,
-  pos,
-  size: Vec2,
-  color: ColorRGBX,
-  thickness = 1.0'f
-) =
-  ## Draws an unfilled rectangle.
-  sk.drawRect(pos, vec2(size.x, thickness), color)
-  sk.drawRect(
-    vec2(pos.x, pos.y + size.y - thickness),
-    vec2(size.x, thickness),
-    color
-  )
-  sk.drawRect(pos, vec2(thickness, size.y), color)
-  sk.drawRect(
-    vec2(pos.x + size.x - thickness, pos.y),
-    vec2(thickness, size.y),
-    color
-  )
-
-proc drawLine(sk: Silky, a, b: Vec2, color: ColorRGBX) =
-  ## Draws a simple pixel-like debug line.
-  let
-    dx = b.x - a.x
-    dy = b.y - a.y
-    steps = max(1, int(max(abs(dx), abs(dy)) / 4.0'f))
-  for i in 0 .. steps:
-    let t = i.float32 / steps.float32
+when defined(gui):
+  proc drawOutline(
+    sk: Silky,
+    pos,
+    size: Vec2,
+    color: ColorRGBX,
+    thickness = 1.0'f
+  ) =
+    ## Draws an unfilled rectangle.
+    sk.drawRect(pos, vec2(size.x, thickness), color)
     sk.drawRect(
-      vec2(a.x + dx * t - 1.0'f, a.y + dy * t - 1.0'f),
-      vec2(3, 3),
+      vec2(pos.x, pos.y + size.y - thickness),
+      vec2(size.x, thickness),
+      color
+    )
+    sk.drawRect(pos, vec2(thickness, size.y), color)
+    sk.drawRect(
+      vec2(pos.x + size.x - thickness, pos.y),
+      vec2(thickness, size.y),
       color
     )
 
-proc colorFromSpritePixel(sprite: SpriteInfo, offset: int): ColorRGBX =
-  ## Converts one decoded RGBA sprite pixel to a viewer color.
-  rgbx(
-    sprite.pixels[offset],
-    sprite.pixels[offset + 1],
-    sprite.pixels[offset + 2],
-    sprite.pixels[offset + 3]
-  )
-
-proc compareDrawItems(a, b: DrawItem): int =
-  ## Orders sprite protocol objects by render layer and stable id.
-  result = cmp(a.layer, b.layer)
-  if result != 0:
-    return
-  result = cmp(a.z, b.z)
-  if result != 0:
-    return
-  result = cmp(a.y, b.y)
-  if result != 0:
-    return
-  result = cmp(a.id, b.id)
-
-proc drawSpriteAt(
-  sk: Silky,
-  sprite: SpriteInfo,
-  pos: Vec2,
-  scale: float32
-) =
-  ## Draws one decoded sprite at an explicit viewer position.
-  if sprite == nil or sprite.pixels.len != sprite.width * sprite.height * 4:
-    return
-  for py in 0 ..< sprite.height:
-    for px in 0 ..< sprite.width:
-      let offset = (py * sprite.width + px) * 4
-      if sprite.pixels[offset + 3] == 0:
-        continue
+  proc drawLine(sk: Silky, a, b: Vec2, color: ColorRGBX) =
+    ## Draws a simple pixel-like debug line.
+    let
+      dx = b.x - a.x
+      dy = b.y - a.y
+      steps = max(1, int(max(abs(dx), abs(dy)) / 4.0'f))
+    for i in 0 .. steps:
+      let t = i.float32 / steps.float32
       sk.drawRect(
-        vec2(
-          pos.x + px.float32 * scale,
-          pos.y + py.float32 * scale
-        ),
-        vec2(scale, scale),
-        sprite.colorFromSpritePixel(offset)
+        vec2(a.x + dx * t - 1.0'f, a.y + dy * t - 1.0'f),
+        vec2(3, 3),
+        color
       )
 
-proc drawSpriteObject(
-  sk: Silky,
-  sprite: SpriteInfo,
-  objectState: ObjectState,
-  origin: Vec2,
-  scale: float32
-) =
-  ## Draws one decoded sprite protocol object into the frame panel.
-  if sprite == nil or sprite.pixels.len != sprite.width * sprite.height * 4:
-    return
-  let
-    startX = max(0, -objectState.x)
-    startY = max(0, -objectState.y)
-    stopX = min(sprite.width, ViewportWidth - objectState.x)
-    stopY = min(sprite.height, ViewportHeight - objectState.y)
-  if startX >= stopX or startY >= stopY:
-    return
-  for py in startY ..< stopY:
-    for px in startX ..< stopX:
-      let offset = (py * sprite.width + px) * 4
-      if sprite.pixels[offset + 3] == 0:
+  proc colorFromSpritePixel(sprite: SpriteInfo, offset: int): ColorRGBX =
+    ## Converts one decoded RGBA sprite pixel to a viewer color.
+    rgbx(
+      sprite.pixels[offset],
+      sprite.pixels[offset + 1],
+      sprite.pixels[offset + 2],
+      sprite.pixels[offset + 3]
+    )
+
+  proc compareDrawItems(a, b: DrawItem): int =
+    ## Orders sprite protocol objects by render layer and stable id.
+    result = cmp(a.layer, b.layer)
+    if result != 0:
+      return
+    result = cmp(a.z, b.z)
+    if result != 0:
+      return
+    result = cmp(a.y, b.y)
+    if result != 0:
+      return
+    result = cmp(a.id, b.id)
+
+  proc drawSpriteAt(
+    sk: Silky,
+    sprite: SpriteInfo,
+    pos: Vec2,
+    scale: float32
+  ) =
+    ## Draws one decoded sprite at an explicit viewer position.
+    if sprite == nil or sprite.pixels.len != sprite.width * sprite.height * 4:
+      return
+    for py in 0 ..< sprite.height:
+      for px in 0 ..< sprite.width:
+        let offset = (py * sprite.width + px) * 4
+        if sprite.pixels[offset + 3] == 0:
+          continue
+        sk.drawRect(
+          vec2(
+            pos.x + px.float32 * scale,
+            pos.y + py.float32 * scale
+          ),
+          vec2(scale, scale),
+          sprite.colorFromSpritePixel(offset)
+        )
+
+  proc drawSpriteObject(
+    sk: Silky,
+    sprite: SpriteInfo,
+    objectState: ObjectState,
+    origin: Vec2,
+    scale: float32
+  ) =
+    ## Draws one decoded sprite protocol object into the frame panel.
+    if sprite == nil or sprite.pixels.len != sprite.width * sprite.height * 4:
+      return
+    let
+      startX = max(0, -objectState.x)
+      startY = max(0, -objectState.y)
+      stopX = min(sprite.width, ViewportWidth - objectState.x)
+      stopY = min(sprite.height, ViewportHeight - objectState.y)
+    if startX >= stopX or startY >= stopY:
+      return
+    for py in startY ..< stopY:
+      for px in startX ..< stopX:
+        let offset = (py * sprite.width + px) * 4
+        if sprite.pixels[offset + 3] == 0:
+          continue
+        sk.drawRect(
+          vec2(
+            origin.x + (objectState.x + px).float32 * scale,
+            origin.y + (objectState.y + py).float32 * scale
+          ),
+          vec2(scale, scale),
+          sprite.colorFromSpritePixel(offset)
+        )
+
+  proc drawInventoryPanel(
+    sk: Silky,
+    bot: Bot,
+    pos,
+    size: Vec2
+  ) =
+    ## Draws the visible bot inventory along the viewer bottom edge.
+    sk.drawRect(pos, size, ViewerPanel)
+    var
+      x = pos.x + ViewerInventoryGap
+      drewAny = false
+    let y = pos.y + (size.y - FoodSpriteSize.float32) / 2.0'f
+    for foodIndex in 0 ..< FoodVeggieSlots:
+      let objectId = InventoryObjectBase + foodIndex
+      if objectId >= bot.objects.len:
         continue
-      sk.drawRect(
-        vec2(
-          origin.x + (objectState.x + px).float32 * scale,
-          origin.y + (objectState.y + py).float32 * scale
-        ),
-        vec2(scale, scale),
-        sprite.colorFromSpritePixel(offset)
+      let objectState = bot.objects[objectId]
+      if not objectState.present:
+        continue
+      let icon = bot.spriteInfo(objectState.spriteId)
+      if icon == nil or icon.pixels.len == 0:
+        continue
+      if x + FoodSpriteSize.float32 > pos.x + size.x - ViewerInventoryGap:
+        break
+      let iconPos = vec2(x, y)
+      sk.drawSpriteAt(icon, iconPos, ViewerInventoryScale)
+      let countObjectId = InventoryCountObjectBase + foodIndex
+      if countObjectId < bot.objects.len:
+        let countObject = bot.objects[countObjectId]
+        if countObject.present:
+          let countSprite = bot.spriteInfo(countObject.spriteId)
+          if countSprite != nil and countSprite.pixels.len > 0:
+            sk.drawSpriteAt(
+              countSprite,
+              vec2(
+                iconPos.x + FoodSpriteSize.float32 - countSprite.width.float32,
+                iconPos.y + FoodSpriteSize.float32 - countSprite.height.float32
+              ),
+              ViewerInventoryScale
+            )
+      drewAny = true
+      x += FoodSpriteSize.float32 + ViewerInventoryGap
+    if not drewAny:
+      discard sk.drawText(
+        "Default",
+        "inventory empty",
+        pos + vec2(ViewerInventoryGap, ViewerInventoryGap),
+        ViewerMutedText
       )
 
-proc drawInventoryPanel(
-  sk: Silky,
-  bot: Bot,
-  pos,
-  size: Vec2
-) =
-  ## Draws the visible bot inventory along the viewer bottom edge.
-  sk.drawRect(pos, size, ViewerPanel)
-  var
-    x = pos.x + ViewerInventoryGap
-    drewAny = false
-  let y = pos.y + (size.y - FoodSpriteSize.float32) / 2.0'f
-  for foodIndex in 0 ..< FoodVeggieSlots:
-    let objectId = InventoryObjectBase + foodIndex
-    if objectId >= bot.objects.len:
-      continue
-    let objectState = bot.objects[objectId]
-    if not objectState.present:
-      continue
-    let icon = bot.spriteInfo(objectState.spriteId)
-    if icon == nil or icon.pixels.len == 0:
-      continue
-    if x + FoodSpriteSize.float32 > pos.x + size.x - ViewerInventoryGap:
-      break
-    let iconPos = vec2(x, y)
-    sk.drawSpriteAt(icon, iconPos, ViewerInventoryScale)
-    let countObjectId = InventoryCountObjectBase + foodIndex
-    if countObjectId < bot.objects.len:
-      let countObject = bot.objects[countObjectId]
-      if countObject.present:
-        let countSprite = bot.spriteInfo(countObject.spriteId)
-        if countSprite != nil and countSprite.pixels.len > 0:
-          sk.drawSpriteAt(
-            countSprite,
-            vec2(
-              iconPos.x + FoodSpriteSize.float32 - countSprite.width.float32,
-              iconPos.y + FoodSpriteSize.float32 - countSprite.height.float32
-            ),
-            ViewerInventoryScale
-          )
-    drewAny = true
-    x += FoodSpriteSize.float32 + ViewerInventoryGap
-  if not drewAny:
-    discard sk.drawText(
-      "Default",
-      "inventory empty",
-      pos + vec2(ViewerInventoryGap, ViewerInventoryGap),
-      ViewerMutedText
-    )
-
-proc drawSpriteObjects(
-  sk: Silky,
-  bot: Bot,
-  origin: Vec2,
-  scale: float32
-) =
-  ## Draws decoded non-inventory sprite protocol objects in visible order.
-  var drawItems: seq[DrawItem]
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId >= InventoryObjectBase and objectId < ClockObjectBase:
-      continue
-    let sprite = bot.spriteInfo(objectState.spriteId)
-    if sprite == nil or sprite.pixels.len == 0:
-      continue
-    drawItems.add(DrawItem(
-      layer: objectState.layer,
-      z: objectState.z,
-      y: objectState.y,
-      id: objectId
-    ))
-  drawItems.sort(compareDrawItems)
-  for item in drawItems:
-    let objectState = bot.objects[item.id]
-    sk.drawSpriteObject(
-      bot.spriteInfo(objectState.spriteId),
-      objectState,
-      origin,
-      scale
-    )
-
-proc rectVisible(rect: Rect): bool =
-  ## Returns true when a world rectangle overlaps the current viewport.
-  rect.x + rect.w >= 0 and rect.y + rect.h >= 0 and
-    rect.x < ViewportWidth and rect.y < ViewportHeight
-
-proc screenRect(bot: Bot, rect: Rect): Rect =
-  ## Converts a world rectangle to current screen coordinates.
-  Rect(
-    x: rect.x - bot.cameraX,
-    y: rect.y - bot.cameraY,
-    w: rect.w,
-    h: rect.h
-  )
-
-proc drawScreenRect(
-  sk: Silky,
-  rect: Rect,
-  origin: Vec2,
-  scale: float32,
-  color: ColorRGBX,
-  thickness = 1.0'f
-) =
-  ## Draws one screen-space rectangle if it overlaps the viewport.
-  if not rect.rectVisible():
-    return
-  sk.drawOutline(
-    vec2(
-      origin.x + rect.x.float32 * scale,
-      origin.y + rect.y.float32 * scale
-    ),
-    vec2(rect.w.float32 * scale, rect.h.float32 * scale),
-    color,
-    thickness
-  )
-
-proc drawFramePath(sk: Silky, bot: Bot, origin: Vec2, scale: float32) =
-  ## Draws the current path over the semantic screen view.
-  if not bot.localized or bot.path.len == 0:
-    return
-  var previous = vec2(
-    origin.x + (bot.playerFootX() - bot.cameraX).float32 * scale,
-    origin.y + (bot.playerFootY() - bot.cameraY).float32 * scale
-  )
-  for i in countup(0, bot.path.high, 4):
-    let current = vec2(
-      origin.x + (bot.path[i].x - bot.cameraX).float32 * scale,
-      origin.y + (bot.path[i].y - bot.cameraY).float32 * scale
-    )
-    sk.drawLine(previous, current, ViewerPath)
-    previous = current
-
-proc drawFrameView(sk: Silky, bot: Bot, x, y: float32) =
-  ## Draws a semantic 320x200 view from the latest sprite state.
-  let
-    scale = ViewerFrameScale
-    origin = vec2(x, y)
-  sk.drawRect(
-    origin,
-    vec2(ViewportWidth.float32 * scale, ViewportHeight.float32 * scale),
-    ViewerPanelAlt
-  )
-  sk.drawSpriteObjects(bot, origin, scale)
-  if bot.mapKind == MapMain:
-    for rect in bot.resources.gardens:
-      sk.drawScreenRect(
-        bot.screenRect(rect),
+  proc drawSpriteObjects(
+    sk: Silky,
+    bot: Bot,
+    origin: Vec2,
+    scale: float32
+  ) =
+    ## Draws decoded non-inventory sprite protocol objects in visible order.
+    var drawItems: seq[DrawItem]
+    for objectId, objectState in bot.objects:
+      if not objectState.present:
+        continue
+      if objectId >= InventoryObjectBase and objectId < ClockObjectBase:
+        continue
+      let sprite = bot.spriteInfo(objectState.spriteId)
+      if sprite == nil or sprite.pixels.len == 0:
+        continue
+      drawItems.add(DrawItem(
+        layer: objectState.layer,
+        z: objectState.z,
+        y: objectState.y,
+        id: objectId
+      ))
+    drawItems.sort(compareDrawItems)
+    for item in drawItems:
+      let objectState = bot.objects[item.id]
+      sk.drawSpriteObject(
+        bot.spriteInfo(objectState.spriteId),
+        objectState,
         origin,
-        scale,
-        ViewerGarden
+        scale
       )
-    for i, rect in bot.resources.houses:
-      if bot.resources.houseValid[i]:
+
+  proc rectVisible(rect: Rect): bool =
+    ## Returns true when a world rectangle overlaps the current viewport.
+    rect.x + rect.w >= 0 and rect.y + rect.h >= 0 and
+      rect.x < ViewportWidth and rect.y < ViewportHeight
+
+  proc screenRect(bot: Bot, rect: Rect): Rect =
+    ## Converts a world rectangle to current screen coordinates.
+    Rect(
+      x: rect.x - bot.cameraX,
+      y: rect.y - bot.cameraY,
+      w: rect.w,
+      h: rect.h
+    )
+
+  proc drawScreenRect(
+    sk: Silky,
+    rect: Rect,
+    origin: Vec2,
+    scale: float32,
+    color: ColorRGBX,
+    thickness = 1.0'f
+  ) =
+    ## Draws one screen-space rectangle if it overlaps the viewport.
+    if not rect.rectVisible():
+      return
+    sk.drawOutline(
+      vec2(
+        origin.x + rect.x.float32 * scale,
+        origin.y + rect.y.float32 * scale
+      ),
+      vec2(rect.w.float32 * scale, rect.h.float32 * scale),
+      color,
+      thickness
+    )
+
+  proc drawFramePath(sk: Silky, bot: Bot, origin: Vec2, scale: float32) =
+    ## Draws the current path over the semantic screen view.
+    if not bot.localized or bot.path.len == 0:
+      return
+    var previous = vec2(
+      origin.x + (bot.playerFootX() - bot.cameraX).float32 * scale,
+      origin.y + (bot.playerFootY() - bot.cameraY).float32 * scale
+    )
+    for i in countup(0, bot.path.high, 4):
+      let current = vec2(
+        origin.x + (bot.path[i].x - bot.cameraX).float32 * scale,
+        origin.y + (bot.path[i].y - bot.cameraY).float32 * scale
+      )
+      sk.drawLine(previous, current, ViewerPath)
+      previous = current
+
+  proc drawFrameView(sk: Silky, bot: Bot, x, y: float32) =
+    ## Draws a semantic 320x200 view from the latest sprite state.
+    let
+      scale = ViewerFrameScale
+      origin = vec2(x, y)
+    sk.drawRect(
+      origin,
+      vec2(ViewportWidth.float32 * scale, ViewportHeight.float32 * scale),
+      ViewerPanelAlt
+    )
+    sk.drawSpriteObjects(bot, origin, scale)
+    if bot.mapKind == MapMain:
+      for rect in bot.resources.gardens:
         sk.drawScreenRect(
           bot.screenRect(rect),
           origin,
           scale,
-          ViewerHouse
+          ViewerGarden
         )
-  elif bot.mapKind == MapHome and bot.resources.hasExit:
-    sk.drawScreenRect(
-      bot.screenRect(bot.resources.exit),
-      origin,
-      scale,
-      ViewerExit
+      for i, rect in bot.resources.houses:
+        if bot.resources.houseValid[i]:
+          sk.drawScreenRect(
+            bot.screenRect(rect),
+            origin,
+            scale,
+            ViewerHouse
+          )
+    elif bot.mapKind == MapHome and bot.resources.hasExit:
+      sk.drawScreenRect(
+        bot.screenRect(bot.resources.exit),
+        origin,
+        scale,
+        ViewerExit
+      )
+
+    sk.drawFramePath(bot, origin, scale)
+    if bot.goal.kind != GoalIdle:
+      sk.drawScreenRect(
+        bot.screenRect(Rect(x: bot.goal.x - 3, y: bot.goal.y - 3, w: 6, h: 6)),
+        origin,
+        scale,
+        ViewerGoal,
+        2
+      )
+    if bot.hasTarget:
+      sk.drawScreenRect(
+        bot.screenRect(
+          Rect(x: bot.target.x - 2, y: bot.target.y - 2, w: 5, h: 5)
+        ),
+        origin,
+        scale,
+        ViewerTarget,
+        2
+      )
+
+    for objectId, objectState in bot.objects:
+      if not objectState.present:
+        continue
+      if objectId >= PlayerObjectBase and objectId < NameObjectBase:
+        let
+          playerIndex = objectId - PlayerObjectBase
+          color =
+            if playerIndex == bot.selfIndex:
+              ViewerPlayer
+            else:
+              ViewerOther
+        sk.drawOutline(
+          vec2(
+            origin.x + objectState.x.float32 * scale,
+            origin.y + objectState.y.float32 * scale
+          ),
+          vec2(GnomeSpriteSize.float32 * scale, GnomeSpriteSize.float32 * scale),
+          color,
+          2
+        )
+        sk.drawRect(
+          vec2(
+            origin.x + (objectState.x + NavPointOffsetX).float32 * scale - 2,
+            origin.y + (objectState.y + NavPointOffsetY).float32 * scale - 2
+          ),
+          vec2(5, 5),
+          color
+        )
+      elif objectId >= GardenObjectBase and objectId < InventoryObjectBase:
+        sk.drawRect(
+          vec2(
+            origin.x + objectState.x.float32 * scale - 3,
+            origin.y + objectState.y.float32 * scale - 3
+          ),
+          vec2(7, 7),
+          ViewerTarget
+        )
+
+  proc activeNav(bot: Bot): NavMap =
+    ## Returns the navigation map currently being debugged.
+    case bot.mapKind
+    of MapMain:
+      bot.mainNav
+    of MapHome:
+      bot.homeNav
+    else:
+      if bot.mainNav != nil:
+        bot.mainNav
+      else:
+        bot.homeNav
+
+  proc navScale(nav: NavMap): float32 =
+    ## Returns a map scale that fits the viewer map panel.
+    if nav == nil or nav.width <= 0 or nav.height <= 0:
+      return 1.0'f
+    min(
+      ViewerMapWidth / nav.width.float32,
+      ViewerMapHeight / nav.height.float32
     )
 
-  sk.drawFramePath(bot, origin, scale)
-  if bot.goal.kind != GoalIdle:
-    sk.drawScreenRect(
-      bot.screenRect(Rect(x: bot.goal.x - 3, y: bot.goal.y - 3, w: 6, h: 6)),
-      origin,
-      scale,
-      ViewerGoal,
+  proc navSampleStep(scale: float32): int =
+    ## Returns a walkability sampling step for the map panel.
+    if scale < 0.25'f:
+      8
+    elif scale < 0.5'f:
+      4
+    elif scale < 1.0'f:
       2
-    )
-  if bot.hasTarget:
-    sk.drawScreenRect(
-      bot.screenRect(
-        Rect(x: bot.target.x - 2, y: bot.target.y - 2, w: 5, h: 5)
-      ),
-      origin,
-      scale,
-      ViewerTarget,
-      2
+    else:
+      1
+
+  proc drawMapRect(
+    sk: Silky,
+    rect: Rect,
+    origin: Vec2,
+    scale: float32,
+    color: ColorRGBX,
+    thickness = 1.0'f
+  ) =
+    ## Draws one map-space rectangle.
+    sk.drawOutline(
+      vec2(origin.x + rect.x.float32 * scale, origin.y + rect.y.float32 * scale),
+      vec2(rect.w.float32 * scale, rect.h.float32 * scale),
+      color,
+      thickness
     )
 
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId >= PlayerObjectBase and objectId < NameObjectBase:
+  proc drawMapSquare(
+    sk: Silky,
+    rect: Rect,
+    origin: Vec2,
+    scale: float32,
+    color: ColorRGBX,
+    filled: bool
+  ) =
+    ## Draws one square marker centered on a map-space rectangle.
+    let
+      size = max(6.0'f, 8.0'f * scale)
+      cx = origin.x + (rect.x + rect.w div 2).float32 * scale
+      cy = origin.y + (rect.y + rect.h div 2).float32 * scale
+      pos = vec2(cx - size / 2.0'f, cy - size / 2.0'f)
+      square = vec2(size, size)
+    if filled:
+      sk.drawRect(pos, square, color)
+    else:
+      sk.drawOutline(pos, square, color)
+
+  proc drawMapPath(sk: Silky, bot: Bot, origin: Vec2, scale: float32) =
+    ## Draws the current A-star path over the map panel.
+    if not bot.localized or bot.path.len == 0:
+      return
+    var previous = vec2(
+      origin.x + bot.playerFootX().float32 * scale,
+      origin.y + bot.playerFootY().float32 * scale
+    )
+    for i in countup(0, bot.path.high, 4):
+      let current = vec2(
+        origin.x + bot.path[i].x.float32 * scale,
+        origin.y + bot.path[i].y.float32 * scale
+      )
+      sk.drawLine(previous, current, ViewerPath)
+      previous = current
+    if bot.goal.kind != GoalIdle:
+      sk.drawLine(
+        previous,
+        vec2(
+          origin.x + bot.goal.x.float32 * scale,
+          origin.y + bot.goal.y.float32 * scale
+        ),
+        ViewerPath
+      )
+
+  proc drawMapView(sk: Silky, bot: Bot, x, y: float32) =
+    ## Draws walkability, resources, actors, viewport, and path state.
+    let
+      nav = bot.activeNav()
+      scale = nav.navScale()
+      origin = vec2(x, y)
+    sk.drawRect(origin, vec2(ViewerMapWidth, ViewerMapHeight), ViewerPanelAlt)
+    if nav == nil:
+      discard sk.drawText("Default", "waiting for walkability", origin,
+        ViewerMutedText)
+      return
+
+    let step = navSampleStep(scale)
+    for my in countup(0, nav.height - 1, step):
+      for mx in countup(0, nav.width - 1, step):
+        let color =
+          if nav.walkAt(mx, my):
+            ViewerWalk
+          else:
+            ViewerWall
+        sk.drawRect(
+          vec2(origin.x + mx.float32 * scale, origin.y + my.float32 * scale),
+          vec2(
+            max(1.0'f, step.float32 * scale),
+            max(1.0'f, step.float32 * scale)
+          ),
+          color
+        )
+
+    if bot.mapKind == MapMain:
+      for i, rect in bot.resources.gardens:
+        let checked =
+          i < bot.gardenChecked.len and bot.gardenChecked[i]
+        sk.drawMapSquare(
+          rect,
+          origin,
+          scale,
+          ViewerGarden,
+          not checked
+        )
+      for i, rect in bot.resources.houses:
+        if bot.resources.houseValid[i]:
+          sk.drawMapRect(rect, origin, scale, ViewerHouse)
+    elif bot.mapKind == MapHome and bot.resources.hasExit:
+      sk.drawMapRect(bot.resources.exit, origin, scale, ViewerExit, 2)
+
+    if bot.localized:
+      sk.drawMapRect(
+        Rect(x: bot.cameraX, y: bot.cameraY, w: ViewportWidth, h: ViewportHeight),
+        origin,
+        scale,
+        ViewerViewport
+      )
+    sk.drawMapPath(bot, origin, scale)
+    if bot.goal.kind != GoalIdle:
+      sk.drawRect(
+        vec2(
+          origin.x + bot.goal.x.float32 * scale - 4,
+          origin.y + bot.goal.y.float32 * scale - 4
+        ),
+        vec2(9, 9),
+        ViewerGoal
+      )
+    if bot.hasTarget:
+      sk.drawRect(
+        vec2(
+          origin.x + bot.target.x.float32 * scale - 3,
+          origin.y + bot.target.y.float32 * scale - 3
+        ),
+        vec2(7, 7),
+        ViewerTarget
+      )
+
+    for objectId, objectState in bot.objects:
+      if not objectState.present:
+        continue
+      if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+        continue
       let
         playerIndex = objectId - PlayerObjectBase
         color =
@@ -3800,385 +4041,179 @@ proc drawFrameView(sk: Silky, bot: Bot, x, y: float32) =
             ViewerPlayer
           else:
             ViewerOther
-      sk.drawOutline(
-        vec2(
-          origin.x + objectState.x.float32 * scale,
-          origin.y + objectState.y.float32 * scale
-        ),
-        vec2(GnomeSpriteSize.float32 * scale, GnomeSpriteSize.float32 * scale),
-        color,
-        2
-      )
+        worldX = bot.objectFootX(objectState)
+        worldY = bot.objectFootY(objectState)
       sk.drawRect(
         vec2(
-          origin.x + (objectState.x + NavPointOffsetX).float32 * scale - 2,
-          origin.y + (objectState.y + NavPointOffsetY).float32 * scale - 2
-        ),
-        vec2(5, 5),
-        color
-      )
-    elif objectId >= GardenObjectBase and objectId < InventoryObjectBase:
-      sk.drawRect(
-        vec2(
-          origin.x + objectState.x.float32 * scale - 3,
-          origin.y + objectState.y.float32 * scale - 3
+          origin.x + worldX.float32 * scale - 3,
+          origin.y + worldY.float32 * scale - 3
         ),
         vec2(7, 7),
-        ViewerTarget
-      )
-
-proc activeNav(bot: Bot): NavMap =
-  ## Returns the navigation map currently being debugged.
-  case bot.mapKind
-  of MapMain:
-    bot.mainNav
-  of MapHome:
-    bot.homeNav
-  else:
-    if bot.mainNav != nil:
-      bot.mainNav
-    else:
-      bot.homeNav
-
-proc navScale(nav: NavMap): float32 =
-  ## Returns a map scale that fits the viewer map panel.
-  if nav == nil or nav.width <= 0 or nav.height <= 0:
-    return 1.0'f
-  min(
-    ViewerMapWidth / nav.width.float32,
-    ViewerMapHeight / nav.height.float32
-  )
-
-proc navSampleStep(scale: float32): int =
-  ## Returns a walkability sampling step for the map panel.
-  if scale < 0.25'f:
-    8
-  elif scale < 0.5'f:
-    4
-  elif scale < 1.0'f:
-    2
-  else:
-    1
-
-proc drawMapRect(
-  sk: Silky,
-  rect: Rect,
-  origin: Vec2,
-  scale: float32,
-  color: ColorRGBX,
-  thickness = 1.0'f
-) =
-  ## Draws one map-space rectangle.
-  sk.drawOutline(
-    vec2(origin.x + rect.x.float32 * scale, origin.y + rect.y.float32 * scale),
-    vec2(rect.w.float32 * scale, rect.h.float32 * scale),
-    color,
-    thickness
-  )
-
-proc drawMapSquare(
-  sk: Silky,
-  rect: Rect,
-  origin: Vec2,
-  scale: float32,
-  color: ColorRGBX,
-  filled: bool
-) =
-  ## Draws one square marker centered on a map-space rectangle.
-  let
-    size = max(6.0'f, 8.0'f * scale)
-    cx = origin.x + (rect.x + rect.w div 2).float32 * scale
-    cy = origin.y + (rect.y + rect.h div 2).float32 * scale
-    pos = vec2(cx - size / 2.0'f, cy - size / 2.0'f)
-    square = vec2(size, size)
-  if filled:
-    sk.drawRect(pos, square, color)
-  else:
-    sk.drawOutline(pos, square, color)
-
-proc drawMapPath(sk: Silky, bot: Bot, origin: Vec2, scale: float32) =
-  ## Draws the current A-star path over the map panel.
-  if not bot.localized or bot.path.len == 0:
-    return
-  var previous = vec2(
-    origin.x + bot.playerFootX().float32 * scale,
-    origin.y + bot.playerFootY().float32 * scale
-  )
-  for i in countup(0, bot.path.high, 4):
-    let current = vec2(
-      origin.x + bot.path[i].x.float32 * scale,
-      origin.y + bot.path[i].y.float32 * scale
-    )
-    sk.drawLine(previous, current, ViewerPath)
-    previous = current
-  if bot.goal.kind != GoalIdle:
-    sk.drawLine(
-      previous,
-      vec2(
-        origin.x + bot.goal.x.float32 * scale,
-        origin.y + bot.goal.y.float32 * scale
-      ),
-      ViewerPath
-    )
-
-proc drawMapView(sk: Silky, bot: Bot, x, y: float32) =
-  ## Draws walkability, resources, actors, viewport, and path state.
-  let
-    nav = bot.activeNav()
-    scale = nav.navScale()
-    origin = vec2(x, y)
-  sk.drawRect(origin, vec2(ViewerMapWidth, ViewerMapHeight), ViewerPanelAlt)
-  if nav == nil:
-    discard sk.drawText("Default", "waiting for walkability", origin,
-      ViewerMutedText)
-    return
-
-  let step = navSampleStep(scale)
-  for my in countup(0, nav.height - 1, step):
-    for mx in countup(0, nav.width - 1, step):
-      let color =
-        if nav.walkAt(mx, my):
-          ViewerWalk
-        else:
-          ViewerWall
-      sk.drawRect(
-        vec2(origin.x + mx.float32 * scale, origin.y + my.float32 * scale),
-        vec2(
-          max(1.0'f, step.float32 * scale),
-          max(1.0'f, step.float32 * scale)
-        ),
         color
       )
+      let playerName = bot.visiblePlayerName(playerIndex)
+      if playerName.len > 0:
+        discard sk.drawText(
+          "Default",
+          playerName,
+          vec2(
+            origin.x + worldX.float32 * scale + 5,
+            origin.y + worldY.float32 * scale - 8
+          ),
+          ViewerText
+        )
 
-  if bot.mapKind == MapMain:
-    for i, rect in bot.resources.gardens:
-      let checked =
-        i < bot.gardenChecked.len and bot.gardenChecked[i]
-      sk.drawMapSquare(
-        rect,
-        origin,
-        scale,
-        ViewerGarden,
-        not checked
+  proc refreshDisplayScale(viewer: ViewerApp) =
+    ## Updates UI scaling after the viewer moves between displays.
+    if viewer.isNil:
+      return
+    let scale = viewer.window.displayScale()
+    if abs(scale - viewer.contentScale) <= 0.001'f:
+      return
+    viewer.contentScale = scale
+    viewer.silky.uiScale = scale
+    let logicalSize = (viewer.window.size.vec2 / scale).ivec2
+    viewer.window.size = logicalSize.scaledWindowSize(scale)
+
+  proc initViewerApp(): ViewerApp =
+    ## Opens the diagnostic viewer window.
+    result = ViewerApp()
+    result.window = newWindow(
+      title = "Heartleaf Talking Villager Viewer",
+      size = ivec2(ViewerWindowWidth, ViewerWindowHeight),
+      style = DecoratedResizable,
+      visible = true
+    )
+    makeContextCurrent(result.window)
+    when not defined(useDirectX):
+      loadExtensions()
+    result.silky = newSilky(result.window, atlasPath())
+    result.contentScale = result.window.displayScale()
+    result.silky.uiScale = result.contentScale
+    result.window.size =
+      ivec2(ViewerWindowWidth, ViewerWindowHeight).scaledWindowSize(
+        result.contentScale
       )
-    for i, rect in bot.resources.houses:
-      if bot.resources.houseValid[i]:
-        sk.drawMapRect(rect, origin, scale, ViewerHouse)
-  elif bot.mapKind == MapHome and bot.resources.hasExit:
-    sk.drawMapRect(bot.resources.exit, origin, scale, ViewerExit, 2)
+    result.window.style = Decorated
+    let viewer = result
+    result.window.onResize = proc() =
+      viewer.refreshDisplayScale()
 
-  if bot.localized:
-    sk.drawMapRect(
-      Rect(x: bot.cameraX, y: bot.cameraY, w: ViewportWidth, h: ViewportHeight),
-      origin,
-      scale,
-      ViewerViewport
-    )
-  sk.drawMapPath(bot, origin, scale)
-  if bot.goal.kind != GoalIdle:
-    sk.drawRect(
-      vec2(
-        origin.x + bot.goal.x.float32 * scale - 4,
-        origin.y + bot.goal.y.float32 * scale - 4
-      ),
-      vec2(9, 9),
-      ViewerGoal
-    )
-  if bot.hasTarget:
-    sk.drawRect(
-      vec2(
-        origin.x + bot.target.x.float32 * scale - 3,
-        origin.y + bot.target.y.float32 * scale - 3
-      ),
-      vec2(7, 7),
-      ViewerTarget
-    )
+  proc viewerOpen(viewer: ViewerApp): bool =
+    ## Returns true while the optional viewer should keep running.
+    viewer.isNil or not viewer.window.closeRequested
 
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    let
-      playerIndex = objectId - PlayerObjectBase
-      color =
-        if playerIndex == bot.selfIndex:
-          ViewerPlayer
-        else:
-          ViewerOther
-      worldX = bot.objectFootX(objectState)
-      worldY = bot.objectFootY(objectState)
-    sk.drawRect(
-      vec2(
-        origin.x + worldX.float32 * scale - 3,
-        origin.y + worldY.float32 * scale - 3
-      ),
-      vec2(7, 7),
-      color
-    )
-    let playerName = bot.visiblePlayerName(playerIndex)
-    if playerName.len > 0:
-      discard sk.drawText(
-        "Default",
-        playerName,
-        vec2(
-          origin.x + worldX.float32 * scale + 5,
-          origin.y + worldY.float32 * scale - 8
-        ),
-        ViewerText
-      )
-
-proc refreshDisplayScale(viewer: ViewerApp) =
-  ## Updates UI scaling after the viewer moves between displays.
-  if viewer.isNil:
-    return
-  let scale = viewer.window.displayScale()
-  if abs(scale - viewer.contentScale) <= 0.001'f:
-    return
-  viewer.contentScale = scale
-  viewer.silky.uiScale = scale
-  let logicalSize = (viewer.window.size.vec2 / scale).ivec2
-  viewer.window.size = logicalSize.scaledWindowSize(scale)
-
-proc initViewerApp(): ViewerApp =
-  ## Opens the diagnostic viewer window.
-  result = ViewerApp()
-  result.window = newWindow(
-    title = "Heartleaf Talking Villager Viewer",
-    size = ivec2(ViewerWindowWidth, ViewerWindowHeight),
-    style = DecoratedResizable,
-    visible = true
-  )
-  makeContextCurrent(result.window)
-  when not defined(useDirectX):
-    loadExtensions()
-  result.silky = newSilky(result.window, atlasPath())
-  result.contentScale = result.window.displayScale()
-  result.silky.uiScale = result.contentScale
-  result.window.size =
-    ivec2(ViewerWindowWidth, ViewerWindowHeight).scaledWindowSize(
-      result.contentScale
-    )
-  result.window.style = Decorated
-  let viewer = result
-  result.window.onResize = proc() =
+  proc pumpViewer(
+    viewer: ViewerApp,
+    bot: Bot,
+    connected: bool,
+    url: string
+  ) =
+    ## Pumps window events and draws one bot debugger frame.
+    if viewer.isNil:
+      return
+    pollEvents()
     viewer.refreshDisplayScale()
+    if viewer.window.buttonPressed[KeyEscape]:
+      viewer.window.closeRequested = true
+    if viewer.window.closeRequested:
+      return
 
-proc viewerOpen(viewer: ViewerApp): bool =
-  ## Returns true while the optional viewer should keep running.
-  viewer.isNil or not viewer.window.closeRequested
-
-proc pumpViewer(
-  viewer: ViewerApp,
-  bot: Bot,
-  connected: bool,
-  url: string
-) =
-  ## Pumps window events and draws one bot debugger frame.
-  if viewer.isNil:
-    return
-  pollEvents()
-  viewer.refreshDisplayScale()
-  if viewer.window.buttonPressed[KeyEscape]:
-    viewer.window.closeRequested = true
-  if viewer.window.closeRequested:
-    return
-
-  let
-    frameSize = viewer.window.size
-    logicalSize = frameSize.vec2 / viewer.silky.uiScale
-    framePos = vec2(ViewerMargin, ViewerMargin)
-    mapPos = vec2(
-      framePos.x + ViewportWidth.float32 * ViewerFrameScale + 24,
-      ViewerMargin
-    )
-    infoPos = vec2(
-      ViewerMargin,
-      framePos.y + ViewportHeight.float32 * ViewerFrameScale + 28
-    )
-    inventoryPos = vec2(
-      ViewerMargin,
-      max(
-        infoPos.y + 220.0'f,
-        logicalSize.y - ViewerMargin - ViewerInventoryHeight
+    let
+      frameSize = viewer.window.size
+      logicalSize = frameSize.vec2 / viewer.silky.uiScale
+      framePos = vec2(ViewerMargin, ViewerMargin)
+      mapPos = vec2(
+        framePos.x + ViewportWidth.float32 * ViewerFrameScale + 24,
+        ViewerMargin
       )
-    )
-    inventorySize = vec2(
-      logicalSize.x - ViewerMargin * 2,
-      ViewerInventoryHeight
-    )
-    infoSize = vec2(
-      logicalSize.x - ViewerMargin * 2,
-      max(120.0'f, inventoryPos.y - infoPos.y - 16.0'f)
-    )
-    sk = viewer.silky
+      infoPos = vec2(
+        ViewerMargin,
+        framePos.y + ViewportHeight.float32 * ViewerFrameScale + 28
+      )
+      inventoryPos = vec2(
+        ViewerMargin,
+        max(
+          infoPos.y + 220.0'f,
+          logicalSize.y - ViewerMargin - ViewerInventoryHeight
+        )
+      )
+      inventorySize = vec2(
+        logicalSize.x - ViewerMargin * 2,
+        ViewerInventoryHeight
+      )
+      infoSize = vec2(
+        logicalSize.x - ViewerMargin * 2,
+        max(120.0'f, inventoryPos.y - infoPos.y - 16.0'f)
+      )
+      sk = viewer.silky
 
-  sk.beginUI(viewer.window, frameSize)
-  sk.clearScreen(ViewerBackground)
-  sk.drawRect(
-    framePos - vec2(8, 8),
-    vec2(
-      ViewportWidth.float32 * ViewerFrameScale + 16,
-      ViewportHeight.float32 * ViewerFrameScale + 16
-    ),
-    ViewerPanel
-  )
-  sk.drawRect(
-    mapPos - vec2(8, 8),
-    vec2(ViewerMapWidth + 16, ViewerMapHeight + 16),
-    ViewerPanel
-  )
-  sk.drawRect(infoPos - vec2(8, 8), infoSize + vec2(16, 16), ViewerPanel)
-  sk.drawFrameView(bot, framePos.x, framePos.y)
-  sk.drawMapView(bot, mapPos.x, mapPos.y)
-  sk.drawInventoryPanel(bot, inventoryPos, inventorySize)
+    sk.beginUI(viewer.window, frameSize)
+    sk.clearScreen(ViewerBackground)
+    sk.drawRect(
+      framePos - vec2(8, 8),
+      vec2(
+        ViewportWidth.float32 * ViewerFrameScale + 16,
+        ViewportHeight.float32 * ViewerFrameScale + 16
+      ),
+      ViewerPanel
+    )
+    sk.drawRect(
+      mapPos - vec2(8, 8),
+      vec2(ViewerMapWidth + 16, ViewerMapHeight + 16),
+      ViewerPanel
+    )
+    sk.drawRect(infoPos - vec2(8, 8), infoSize + vec2(16, 16), ViewerPanel)
+    sk.drawFrameView(bot, framePos.x, framePos.y)
+    sk.drawMapView(bot, mapPos.x, mapPos.y)
+    sk.drawInventoryPanel(bot, inventoryPos, inventorySize)
 
-  let
-    target =
-      if bot.hasTarget:
-        "(" & $bot.target.x & ", " & $bot.target.y & ")"
-      else:
-        "none"
-    infoText =
-      "intent: " & bot.goal.goalLabel() & "\n" &
-      "status: " & (if connected: "connected" else: "reconnecting") & "\n" &
-      "clock: " & bot.clockText() & " minutes=" & $bot.minutes & "\n" &
-      "map: " & bot.mapKind.mapKindName() &
-        " current house=" & $(bot.currentHouse + 1) &
-        " home=" & $(bot.homeIndex + 1) & "\n" &
-      "bot: " & bot.logName() &
-        " slot=" & $bot.slot &
-        " plan=" & bot.socialPlanName() &
-        " food=" & $bot.inventoryTotal() &
-        " host until=" & $bot.hostUntilMinutes & "\n" &
-      "party house=" & $(bot.partyHouse + 1) &
-        " search house=" & $(bot.searchHouse + 1) &
-        " committed=" & $bot.hostCommitted & "\n" &
-      "camera: (" & $bot.cameraX & ", " & $bot.cameraY & ")\n" &
-      "player: (" & $bot.selfX & ", " & $bot.selfY & ")" &
-        " foot=(" & $bot.playerFootX() & ", " &
-        $bot.playerFootY() & ")" &
-        " localized=" & $bot.localized & "\n" &
-      "goal: " & bot.goal.goalLabel() &
-        " pos=(" & $bot.goal.x & ", " & $bot.goal.y & ")" &
-        " reached=" & $bot.goalReached(bot.goal) & "\n" &
-      "path nodes: " & $bot.path.len & " target=" & target & "\n" &
-      "input desired: " & inputMaskSummary(bot.desiredMask) &
-        " last sent: " & inputMaskSummary(bot.lastMask) & "\n" &
-      "stuck ticks: " & $bot.stuckTicks &
-        " attack cooldown=" & $bot.attackCooldown & "\n" &
-      "gardens marked=" & $bot.markedGardenCount() &
-        " checked=" & $bot.checkedGardenCount() &
-        "/" & $bot.gardenChecked.len &
-        " current=" & $bot.currentGarden & "\n" &
-      "sprites: " & $bot.sprites.len &
-        " objects: " & $bot.objects.len &
-        " frame tick: " & $bot.frameTick & "\n" &
-      "url: " & url
-  discard sk.drawText("Default", infoText, infoPos, ViewerText,
-    infoSize.x, infoSize.y)
-  sk.endUi()
-  viewer.window.swapBuffers()
+    let
+      target =
+        if bot.hasTarget:
+          "(" & $bot.target.x & ", " & $bot.target.y & ")"
+        else:
+          "none"
+      infoText =
+        "intent: " & bot.goal.goalLabel() & "\n" &
+        "status: " & (if connected: "connected" else: "reconnecting") & "\n" &
+        "clock: " & bot.clockText() & " minutes=" & $bot.minutes & "\n" &
+        "map: " & bot.mapKind.mapKindName() &
+          " current house=" & $(bot.currentHouse + 1) &
+          " home=" & $(bot.homeIndex + 1) & "\n" &
+        "bot: " & bot.logName() &
+          " slot=" & $bot.slot &
+          " plan=" & bot.socialPlanName() &
+          " food=" & $bot.inventoryTotal() &
+          " host until=" & $bot.hostUntilMinutes & "\n" &
+        "party house=" & $(bot.partyHouse + 1) &
+          " search house=" & $(bot.searchHouse + 1) &
+          " committed=" & $bot.hostCommitted & "\n" &
+        "camera: (" & $bot.cameraX & ", " & $bot.cameraY & ")\n" &
+        "player: (" & $bot.selfX & ", " & $bot.selfY & ")" &
+          " foot=(" & $bot.playerFootX() & ", " &
+          $bot.playerFootY() & ")" &
+          " localized=" & $bot.localized & "\n" &
+        "goal: " & bot.goal.goalLabel() &
+          " pos=(" & $bot.goal.x & ", " & $bot.goal.y & ")" &
+          " reached=" & $bot.goalReached(bot.goal) & "\n" &
+        "path nodes: " & $bot.path.len & " target=" & target & "\n" &
+        "input desired: " & inputMaskSummary(bot.desiredMask) &
+          " last sent: " & inputMaskSummary(bot.lastMask) & "\n" &
+        "stuck ticks: " & $bot.stuckTicks &
+          " attack cooldown=" & $bot.attackCooldown & "\n" &
+        "gardens marked=" & $bot.markedGardenCount() &
+          " checked=" & $bot.checkedGardenCount() &
+          "/" & $bot.gardenChecked.len &
+          " current=" & $bot.currentGarden & "\n" &
+        "sprites: " & $bot.sprites.len &
+          " objects: " & $bot.objects.len &
+          " frame tick: " & $bot.frameTick & "\n" &
+        "url: " & url
+    discard sk.drawText("Default", infoText, infoPos, ViewerText,
+      infoSize.x, infoSize.y)
+    sk.endUi()
+    viewer.window.swapBuffers()
 
 proc queryEscape(value: string): string =
   ## Escapes a query string component.
@@ -4286,14 +4321,19 @@ proc runBot(
       url
     else:
       playerUrl(host, port, name, token, slot)
-  var bot = initBot(name, slot, gui)
+  let useGui =
+    when defined(gui):
+      gui
+    else:
+      false
+  var bot = initBot(name, slot, useGui)
   try:
     requireBedrockConfig()
   except TalkingVillagerError as e:
     echo "talking_villager fatal: ", e.msg
     quit(1)
   let viewer =
-    if gui:
+    if useGui:
       initViewerApp()
     else:
       nil
@@ -4305,8 +4345,8 @@ proc runBot(
       connected = true
       bot.lastMask = 0xff'u8
       while viewer.viewerOpen():
-        if not ws.receiveUpdates(bot, gui):
-          if gui:
+        if not ws.receiveUpdates(bot, useGui):
+          if useGui:
             viewer.pumpViewer(bot, connected, connectUrl)
             if not viewer.viewerOpen():
               ws.close()
@@ -4318,7 +4358,7 @@ proc runBot(
         if nextMask != bot.lastMask:
           ws.send(blobFromMask(nextMask), BinaryMessage)
           bot.lastMask = nextMask
-        if gui:
+        if useGui:
           viewer.pumpViewer(bot, connected, connectUrl)
           if not viewer.viewerOpen():
             ws.close()
@@ -4329,7 +4369,7 @@ proc runBot(
     except CatchableError as e:
       connected = false
       echo "talking_villager reconnecting: ", e.msg
-      if gui:
+      if useGui:
         for i in 0 ..< 25:
           if not viewer.viewerOpen():
             break

@@ -3,6 +3,7 @@ import os
 const RootDir = thisDir()
 
 switch("path", RootDir / "src")
+switch("path", RootDir / ".." / "bitworld" / "src")
 switch("outdir", RootDir / "out")
 switch("threads", "on")
 switch("mm", "orc")

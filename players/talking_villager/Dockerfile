@@ -6,13 +6,7 @@ RUN apt-get update && \
     build-essential \
     ca-certificates \
     curl \
-    git \
-    libgl-dev \
-    libx11-dev \
-    libxcursor-dev \
-    libxi-dev \
-    libxinerama-dev \
-    libxrandr-dev && \
+    git && \
   rm -rf /var/lib/apt/lists/*
 
 RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
@@ -50,13 +44,7 @@ RUN apt-get update && \
   apt-get install -y --no-install-recommends \
     ca-certificates \
     libcurl4 \
-    libgl1 \
-    libssl3 \
-    libx11-6 \
-    libxcursor1 \
-    libxi6 \
-    libxinerama1 \
-    libxrandr2 && \
+    libssl3 && \
   rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/heartleaf
