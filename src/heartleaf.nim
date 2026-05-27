@@ -2,7 +2,7 @@ import
   std/[json, locks, math, monotimes, os, parseopt, random, strutils,
     tables, times],
   mummy, pixie, supersnappy,
-  bitworld/client as bitworldClient, bitworld/cogame_runtime,
+  bitworld/client as bitworldClient, bitworld/runtime,
   heartleaf/aseprite, heartleaf/pixelfonts, heartleaf/protocol,
   heartleaf/resources
 
@@ -387,53 +387,36 @@ proc dataDir(): string =
     return sourceData
   currentSourcePath().parentDir() / "data"
 
-proc cogamePath(value, source: string): string =
-  ## Converts one COGAME file URI or path into a local path.
-  if value.len == 0:
-    return ""
-  const FilePrefix = "file://"
-  if value.startsWith(FilePrefix):
-    result = value[FilePrefix.len .. ^1]
-    if result.len == 0:
-      raise newException(HeartleafError, "Empty file URI from " & source & ".")
-    return
-  if value.contains("://"):
-    raise newException(
-      HeartleafError,
-      "Unsupported URI from " & source & ": " & value
-    )
-  value
-
 proc resultsPathFromEnv(): string =
   ## Reads one scores path from the current and legacy env vars.
   result = getEnv("COGAME_SAVE_RESULTS_PATH")
   if result.len == 0:
     result = getEnv("COGAME_RESULTS_PATH")
   if result.len == 0:
-    result = cogamePath(getEnv("COGAME_RESULTS_URI"), "COGAME_RESULTS_URI")
+    result = outputPathFromCogameEnv(CogameResultsUriEnv, "scores.json")
 
 proc hasCoworldResultsEnv(): bool =
   ## Returns true when a Coworld result target is configured.
   getEnv("COGAME_SAVE_RESULTS_PATH").len > 0 or
     getEnv("COGAME_RESULTS_PATH").len > 0 or
-    getEnv("COGAME_RESULTS_URI").len > 0
+    getEnv(CogameResultsUriEnv).len > 0
 
 proc replayPathFromEnv(): string =
   ## Reads one replay path from the current Coworld env vars.
   result = getEnv("COGAME_SAVE_REPLAY_PATH")
   if result.len == 0:
-    result = cogamePath(
-      getEnv("COGAME_SAVE_REPLAY_URI"),
-      "COGAME_SAVE_REPLAY_URI"
+    result = outputPathFromCogameEnv(
+      CogameSaveReplayUriEnv,
+      "replay.bitreplay"
     )
 
 proc replayServerFromEnv(): bool =
   ## Returns true when this process should serve replay mode.
-  getEnv("COGAME_REPLAY_SERVER") == "1"
+  getEnv(CogameReplayServerEnv) == "1"
 
 proc configPathFromEnv(): string =
   ## Reads one config path from the current Coworld env vars.
-  cogamePath(getEnv("COGAME_CONFIG_URI"), "COGAME_CONFIG_URI")
+  pathFromCogameEnv(CogameConfigUriEnv)
 
 proc layerIndexByName(
   aseprite: AsepriteSprite,
@@ -3004,6 +2987,9 @@ proc saveDailyScores(path, jsonLine: string, append: bool) =
   ## Saves one daily score row to a configured results file.
   if path.len == 0:
     return
+  let dir = path.parentDir()
+  if dir.len > 0:
+    createDir(dir)
   if not append:
     writeFile(path, jsonLine & "\n")
     return
@@ -3030,6 +3016,9 @@ proc writeReplay(sim: SimServer, path: string) =
   ## Writes a tiny replay artifact for Coworld certification.
   if path.len == 0:
     return
+  let dir = path.parentDir()
+  if dir.len > 0:
+    createDir(dir)
   let replay = %*{
     "format": "heartleaf-replay-v1",
     "latestResults": parseJson(sim.dailyResultsJson())
@@ -3045,6 +3034,18 @@ proc writeArtifacts(
   ## Writes result and replay artifacts for the current day.
   sim.writeDailyScores(saveScoresPath, appendScores)
   sim.writeReplay(saveReplayPath)
+  writeCogameFileEnv(
+    CogameResultsUriEnv,
+    saveScoresPath,
+    "application/json",
+    CogameResultsMethodEnv
+  )
+  writeCogameFileEnv(
+    CogameSaveReplayUriEnv,
+    saveReplayPath,
+    "application/octet-stream",
+    CogameSaveReplayMethodEnv
+  )
 
 proc buildReplayPacket(): seq[uint8] =
   ## Builds a minimal sprite-protocol replay frame.
