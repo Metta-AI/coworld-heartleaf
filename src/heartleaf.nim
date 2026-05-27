@@ -2,7 +2,7 @@ import
   std/[json, locks, math, monotimes, os, parseopt, random, strutils,
     tables, times],
   mummy, pixie, supersnappy,
-  bitworld/client as bitworldClient,
+  bitworld/client as bitworldClient, bitworld/cogame_runtime,
   heartleaf/aseprite, heartleaf/pixelfonts, heartleaf/protocol,
   heartleaf/resources
 
@@ -3298,8 +3298,8 @@ proc update(config: var RunConfig, jsonText: string) =
 when isMainModule:
   var
     config = RunConfig(
-      address: DefaultHost,
-      port: DefaultPort,
+      address: cogameHost(DefaultHost),
+      port: cogamePort(DefaultPort),
       seed: DefaultSeed,
       maxTicks: DefaultMaxTicks,
       maxGames: DefaultMaxGames,
