@@ -388,27 +388,16 @@ proc dataDir(): string =
   currentSourcePath().parentDir() / "data"
 
 proc resultsPathFromEnv(): string =
-  ## Reads one scores path from the current and legacy env vars.
-  result = getEnv("COGAME_SAVE_RESULTS_PATH")
-  if result.len == 0:
-    result = getEnv("COGAME_RESULTS_PATH")
-  if result.len == 0:
-    result = outputPathFromCogameEnv(CogameResultsUriEnv, "scores.json")
+  ## Reads one scores path from the Coworld result URI.
+  outputPathFromCogameEnv(CogameResultsUriEnv, "scores.json")
 
 proc hasCoworldResultsEnv(): bool =
   ## Returns true when a Coworld result target is configured.
-  getEnv("COGAME_SAVE_RESULTS_PATH").len > 0 or
-    getEnv("COGAME_RESULTS_PATH").len > 0 or
-    getEnv(CogameResultsUriEnv).len > 0
+  getEnv(CogameResultsUriEnv).len > 0
 
 proc replayPathFromEnv(): string =
   ## Reads one replay path from the current Coworld env vars.
-  result = getEnv("COGAME_SAVE_REPLAY_PATH")
-  if result.len == 0:
-    result = outputPathFromCogameEnv(
-      CogameSaveReplayUriEnv,
-      "replay.bitreplay"
-    )
+  outputPathFromCogameEnv(CogameSaveReplayUriEnv, "replay.bitreplay")
 
 proc replayServerFromEnv(): bool =
   ## Returns true when this process should serve replay mode.
