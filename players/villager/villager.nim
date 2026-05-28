@@ -1,8 +1,7 @@
 import
   std/[algorithm, heapqueue, options, os, parseopt, strutils],
-  supersnappy, whisky,
-  bitworld/protocol,
-  heartleaf/resources
+  bitworld/[protocol, resources],
+  supersnappy, whisky
 
 when defined(gui):
   import

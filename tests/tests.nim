@@ -1,7 +1,7 @@
 import
   std/[os, strutils],
   bitworld/client as bitworldClient,
-  heartleaf/resources,
+  bitworld/resources,
   ../players/talking_villager/decisions
 
 echo "Testing assets"

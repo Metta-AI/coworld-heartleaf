@@ -3,8 +3,9 @@ import
     tables, times],
   jsony, mummy, pixie, supersnappy,
   bitworld/aseprite, bitworld/client as bitworldClient,
-  bitworld/pixelfonts, bitworld/protocol, bitworld/runtime,
-  heartleaf/resources, heartleaf/sprites
+  bitworld/pixelfonts, bitworld/protocol, bitworld/resources,
+  bitworld/runtime,
+  heartleaf/sprites
 
 const
   DefaultSeed = 0x484541
