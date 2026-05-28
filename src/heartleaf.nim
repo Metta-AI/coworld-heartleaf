@@ -61,20 +61,7 @@ const
   HealthzPath = "/healthz"
   WebSocketPath = "/player"
   GlobalWebSocketPath = "/global"
-  PlayerClientRoute = "/client/player"
-  GlobalClientRoute = "/client/global"
-  PlayerClientHtmlRoute = "/client/player.html"
-  GlobalClientHtmlRoute = "/client/global.html"
-  PlayerClientLegacyHtmlRoute = "/client/player_client.html"
-  GlobalClientLegacyHtmlRoute = "/client/global_client.html"
-  CoworldPlayerClientRoute = "/clients/player"
-  CoworldGlobalClientRoute = "/clients/global"
   ReplayWebSocketPath = "/replay"
-  ReplayClientRoute = "/client/replay"
-  CoworldReplayClientRoute = "/clients/replay"
-  SnappyClientRoute = "/snappyjs.min.js"
-  SnappyClientPath = "/client/snappyjs.min.js"
-  CoworldSnappyClientRoute = "/clients/snappyjs.min.js"
   MapLayerId = 0
   UiLayerId = 1
   ClockLayerId = 2
@@ -2781,32 +2768,6 @@ proc serveHealthz(request: Request): bool =
   request.respondPlain(200, "healthy")
   true
 
-proc serveClientFile(request: Request, route: string): bool =
-  ## Serves one shared sprite client static file.
-  if request.httpMethod != "GET":
-    return false
-  var headers: HttpHeaders
-  headers["Cache-Control"] = "no-cache"
-  var body = ""
-  case route
-  of PlayerClientRoute, PlayerClientHtmlRoute, PlayerClientLegacyHtmlRoute,
-      CoworldPlayerClientRoute, GlobalClientRoute, GlobalClientHtmlRoute,
-      GlobalClientLegacyHtmlRoute, CoworldGlobalClientRoute,
-      ReplayClientRoute, CoworldReplayClientRoute:
-    body = bitworldClient.EmbeddedGlobalClientHtml
-    headers["Content-Type"] = "text/html; charset=utf-8"
-  of SnappyClientRoute, SnappyClientPath, CoworldSnappyClientRoute:
-    body = bitworldClient.EmbeddedSnappyClientJs
-    headers["Content-Type"] = "application/javascript; charset=utf-8"
-  else:
-    return false
-  request.respond(200, headers, body)
-  true
-
-proc serveSpriteStatic(request: Request): bool =
-  ## Serves shared sprite client routes.
-  request.serveClientFile(request.path)
-
 proc playerSlot(request: Request): int =
   ## Returns the requested zero-based slot or -1 for automatic assignment.
   let text = request.queryParams.getOrDefault("slot", "").strip()
@@ -2849,10 +2810,18 @@ proc httpHandler(request: Request) =
     request.respondPlain(426, "websocket required\n")
   elif request.path == GlobalWebSocketPath and request.httpMethod == "GET" and
       not request.isWebSocketUpgrade():
-    discard request.serveClientFile(GlobalClientRoute)
+    discard bitworldClient.serveClientFile(
+      request,
+      bitworldClient.GlobalClientRoute,
+      bitworldClient.GlobalClientRoute
+    )
   elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
       not request.isWebSocketUpgrade():
-    discard request.serveClientFile(ReplayClientRoute)
+    discard bitworldClient.serveClientFile(
+      request,
+      bitworldClient.ReplayClientRoute,
+      bitworldClient.GlobalClientRoute
+    )
   elif request.path == WebSocketPath and request.httpMethod == "GET" and
       request.isWebSocketUpgrade():
     let
@@ -2889,7 +2858,10 @@ proc httpHandler(request: Request) =
     {.gcsafe.}:
       withLock appState.lock:
         appState.replayViewers[websocket] = true
-  elif request.serveSpriteStatic():
+  elif bitworldClient.serveClientRoute(
+    request,
+    bitworldClient.GlobalClientRoute
+  ):
     discard
   else:
     request.respondPlain(200, "Heartleaf sprite protocol server")
