@@ -1,7 +1,7 @@
 import
   std/[os, strutils],
   pixie,
-  heartleaf/aseprite
+  bitworld/aseprite
 
 proc colorFromCel(
   aseprite: AsepriteSprite,

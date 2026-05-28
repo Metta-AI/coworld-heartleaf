@@ -2,9 +2,9 @@ import
   std/[json, locks, math, monotimes, os, random, strutils,
     tables, times],
   jsony, mummy, pixie, supersnappy,
-  bitworld/client as bitworldClient, bitworld/runtime,
-  heartleaf/aseprite, heartleaf/pixelfonts, heartleaf/protocol,
-  heartleaf/resources
+  bitworld/aseprite, bitworld/client as bitworldClient,
+  bitworld/pixelfonts, bitworld/protocol, bitworld/runtime,
+  heartleaf/resources, heartleaf/sprites
 
 const
   DefaultSeed = 0x484541
