@@ -62,6 +62,7 @@ const
   WebSocketPath = "/player"
   GlobalWebSocketPath = "/global"
   ReplayWebSocketPath = "/replay"
+  MaxWebSocketFrameBytes = 900_000
   MapLayerId = 0
   UiLayerId = 1
   ClockLayerId = 2
@@ -742,6 +743,69 @@ proc addObject(
 proc addClearObjects(packet: var seq[uint8]) =
   ## Appends one sprite protocol clear objects message.
   packet.addU8(0x04'u8)
+
+proc readPacketU16(packet: openArray[uint8], offset: int): int =
+  ## Reads one little endian unsigned 16 bit packet value.
+  int(packet[offset]) or (int(packet[offset + 1]) shl 8)
+
+proc readPacketU32(packet: openArray[uint8], offset: int): int =
+  ## Reads one little endian unsigned 32 bit packet value.
+  result = 0
+  for i in 0 ..< 4:
+    result = result or (int(packet[offset + i]) shl (i * 8))
+
+proc spriteMessageBytes(packet: openArray[uint8], offset: int): int =
+  ## Returns the byte size of one sprite protocol message.
+  if offset >= packet.len:
+    return 0
+  case packet[offset]
+  of 0x01'u8:
+    if offset + 11 > packet.len:
+      return packet.len - offset
+    let
+      compressedLen = packet.readPacketU32(offset + 7)
+      labelOffset = offset + 11 + compressedLen
+    if labelOffset + 2 > packet.len:
+      return packet.len - offset
+    let labelLen = packet.readPacketU16(labelOffset)
+    min(packet.len - offset, 13 + compressedLen + labelLen)
+  of 0x02'u8:
+    min(packet.len - offset, 12)
+  of 0x04'u8:
+    1
+  of 0x05'u8:
+    min(packet.len - offset, 6)
+  of 0x06'u8:
+    min(packet.len - offset, 4)
+  else:
+    packet.len - offset
+
+proc sendSpritePacket(websocket: WebSocket, packet: seq[uint8]) =
+  ## Sends sprite protocol messages in certification-sized frames.
+  var start = 0
+  while start < packet.len:
+    var stop = start
+    while stop < packet.len:
+      let messageBytes = packet.spriteMessageBytes(stop)
+      if messageBytes <= 0:
+        stop = packet.len
+        break
+      if stop > start and
+          stop + messageBytes - start > MaxWebSocketFrameBytes:
+        break
+      stop += messageBytes
+      if stop - start >= MaxWebSocketFrameBytes:
+        break
+    if stop == start:
+      let messageBytes = packet.spriteMessageBytes(start)
+      stop =
+        if messageBytes > 0:
+          start + messageBytes
+        else:
+          packet.len
+    websocket.send(blobFromBytes(packet.toOpenArray(start, stop - 1)),
+      BinaryMessage)
+    start = stop
 
 proc rectVisible(
   x,
@@ -3082,7 +3146,7 @@ proc runServerLoop*(
         nextState
       )
       try:
-        sockets[i].send(blobFromBytes(packet), BinaryMessage)
+        sockets[i].sendSpritePacket(packet)
         {.gcsafe.}:
           withLock appState.lock:
             if sockets[i] in appState.playerViewers:
@@ -3096,7 +3160,7 @@ proc runServerLoop*(
       var nextState: PlayerViewerState
       let packet = sim.buildGlobalPacket(globalStates[i], nextState)
       try:
-        globalSockets[i].send(blobFromBytes(packet), BinaryMessage)
+        globalSockets[i].sendSpritePacket(packet)
         {.gcsafe.}:
           withLock appState.lock:
             if globalSockets[i] in appState.globalViewers:

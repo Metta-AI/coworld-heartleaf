@@ -3196,7 +3196,8 @@ proc runBot(
   token: string,
   slot: int,
   url: string,
-  gui: bool
+  gui: bool,
+  exitOnDisconnect: bool
 ) =
   ## Connects the Villager bot to a Heartleaf sprite player endpoint.
   let connectUrl =
@@ -3215,12 +3216,15 @@ proc runBot(
       initViewerApp()
     else:
       nil
-  var connected = false
+  var
+    connected = false
+    hadConnection = false
   while viewer.viewerOpen():
     try:
       let ws = newWebSocket(connectUrl)
       echo "villager connected to ", connectUrl
       connected = true
+      hadConnection = true
       bot.lastMask = 0xff'u8
       while viewer.viewerOpen():
         if not ws.receiveUpdates(bot, useGui):
@@ -3243,6 +3247,8 @@ proc runBot(
     except CatchableError as e:
       connected = false
       echo "villager reconnecting: ", e.msg
+      if not useGui and exitOnDisconnect and hadConnection:
+        break
       if useGui:
         for i in 0 ..< 25:
           if not viewer.viewerOpen():
@@ -3285,4 +3291,14 @@ when isMainModule:
       discard
   if slot < 0 and url.len > 0:
     slot = url.slotFromUrl()
-  runBot(address, port, name, token, slot, url, gui)
+  let exitOnDisconnect = url.len > 0
+  runBot(
+    address,
+    port,
+    name,
+    token,
+    slot,
+    url,
+    gui,
+    exitOnDisconnect
+  )
