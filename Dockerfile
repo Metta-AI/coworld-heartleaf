@@ -40,6 +40,10 @@ RUN nim c \
 # Run Docker.
 FROM debian:bookworm-slim
 
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends ca-certificates libcurl4 && \
+  rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace/heartleaf
 COPY --from=build /workspace/heartleaf/heartleaf /bin/heartleaf
 COPY --from=build /workspace/heartleaf/data ./data
