@@ -4,8 +4,7 @@ import
   jsony, mummy, pixie,
   bitworld/aseprite, bitworld/client as bitworldClient,
   bitworld/pixelfonts, bitworld/spriteprotocol, bitworld/resources,
-  bitworld/runtime,
-  heartleaf/sprites
+  bitworld/runtime, bitworld/sprites
 
 const
   DefaultSeed = 0x484541
