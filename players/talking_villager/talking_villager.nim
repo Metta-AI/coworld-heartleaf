@@ -1,6 +1,6 @@
 import
   std/[algorithm, heapqueue, json, options, os, parseopt, strutils],
-  bitworld/[protocol, resources],
+  bitworld/[spriteprotocol, resources],
   curly, supersnappy, whisky,
   decisions
 

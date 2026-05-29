@@ -1,6 +1,6 @@
 import
   std/[algorithm, heapqueue, options, os, parseopt, strutils],
-  bitworld/[protocol, resources],
+  bitworld/[spriteprotocol, resources],
   supersnappy, whisky
 
 when defined(gui):
