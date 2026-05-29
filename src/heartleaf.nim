@@ -1,9 +1,9 @@
 import
   std/[json, locks, math, monotimes, os, random, strutils,
     tables, times],
-  jsony, mummy, pixie, supersnappy,
+  jsony, mummy, pixie,
   bitworld/aseprite, bitworld/client as bitworldClient,
-  bitworld/pixelfonts, bitworld/protocol, bitworld/resources,
+  bitworld/pixelfonts, bitworld/spriteprotocol, bitworld/resources,
   bitworld/runtime,
   heartleaf/sprites
 
@@ -630,66 +630,6 @@ proc initSimServer(seed = DefaultSeed): SimServer =
     true
   )
 
-proc addU8(packet: var seq[uint8], value: uint8) =
-  ## Appends one unsigned byte.
-  packet.add(value)
-
-proc addU16(packet: var seq[uint8], value: int) =
-  ## Appends one little endian unsigned 16 bit value.
-  let v = uint16(value)
-  packet.add(uint8(v and 0xff'u16))
-  packet.add(uint8(v shr 8))
-
-proc addU32(packet: var seq[uint8], value: int) =
-  ## Appends one little endian unsigned 32 bit value.
-  let v = uint32(value)
-  for shift in countup(0, 24, 8):
-    packet.add(uint8((v shr shift) and 0xff'u32))
-
-proc addI16(packet: var seq[uint8], value: int) =
-  ## Appends one little endian signed 16 bit value.
-  let v = cast[uint16](int16(value))
-  packet.add(uint8(v and 0xff'u16))
-  packet.add(uint8(v shr 8))
-
-proc addViewport(packet: var seq[uint8], layer, width, height: int) =
-  ## Appends one sprite protocol viewport message.
-  packet.addU8(0x05'u8)
-  packet.addU8(uint8(layer))
-  packet.addU16(width)
-  packet.addU16(height)
-
-proc addLayer(packet: var seq[uint8], layer, layerKind, flags: int) =
-  ## Appends one sprite protocol layer definition message.
-  packet.addU8(0x06'u8)
-  packet.addU8(uint8(layer))
-  packet.addU8(uint8(layerKind))
-  packet.addU8(uint8(flags))
-
-proc addSprite(
-  packet: var seq[uint8],
-  spriteId, width, height: int,
-  pixels: openArray[uint8],
-  label: string
-) =
-  ## Appends one compressed RGBA sprite definition message.
-  packet.addU8(0x01'u8)
-  packet.addU16(spriteId)
-  packet.addU16(width)
-  packet.addU16(height)
-
-  var raw = newSeq[uint8](pixels.len)
-  for i in 0 ..< pixels.len:
-    raw[i] = pixels[i]
-  let compressed = supersnappy.compress(raw)
-  packet.addU32(compressed.len)
-  for byte in compressed:
-    packet.addU8(byte)
-
-  packet.addU16(label.len)
-  for ch in label:
-    packet.addU8(uint8(ord(ch)))
-
 proc addRgbaSprite(
   packet: var seq[uint8],
   spriteId: int,
@@ -727,59 +667,6 @@ proc addRgbaSpriteCached(
     height: sprite.height,
     pixels: sprite.pixels.copyPixels()
   ))
-
-proc addObject(
-  packet: var seq[uint8],
-  objectId, x, y, z, layer, spriteId: int
-) =
-  ## Appends one sprite protocol object definition message.
-  packet.addU8(0x02'u8)
-  packet.addU16(objectId)
-  packet.addI16(x)
-  packet.addI16(y)
-  packet.addI16(z)
-  packet.addU8(uint8(layer))
-  packet.addU16(spriteId)
-
-proc addClearObjects(packet: var seq[uint8]) =
-  ## Appends one sprite protocol clear objects message.
-  packet.addU8(0x04'u8)
-
-proc readPacketU16(packet: openArray[uint8], offset: int): int =
-  ## Reads one little endian unsigned 16 bit packet value.
-  int(packet[offset]) or (int(packet[offset + 1]) shl 8)
-
-proc readPacketU32(packet: openArray[uint8], offset: int): int =
-  ## Reads one little endian unsigned 32 bit packet value.
-  result = 0
-  for i in 0 ..< 4:
-    result = result or (int(packet[offset + i]) shl (i * 8))
-
-proc spriteMessageBytes(packet: openArray[uint8], offset: int): int =
-  ## Returns the byte size of one sprite protocol message.
-  if offset >= packet.len:
-    return 0
-  case packet[offset]
-  of 0x01'u8:
-    if offset + 11 > packet.len:
-      return packet.len - offset
-    let
-      compressedLen = packet.readPacketU32(offset + 7)
-      labelOffset = offset + 11 + compressedLen
-    if labelOffset + 2 > packet.len:
-      return packet.len - offset
-    let labelLen = packet.readPacketU16(labelOffset)
-    min(packet.len - offset, 13 + compressedLen + labelLen)
-  of 0x02'u8:
-    min(packet.len - offset, 12)
-  of 0x04'u8:
-    1
-  of 0x05'u8:
-    min(packet.len - offset, 6)
-  of 0x06'u8:
-    min(packet.len - offset, 4)
-  else:
-    packet.len - offset
 
 proc sendSpritePacket(websocket: WebSocket, packet: seq[uint8]) =
   ## Sends sprite protocol messages in certification-sized frames.
@@ -2677,42 +2564,28 @@ proc initAppState() =
   appState.closedSockets = @[]
   appState.tokens = @[]
 
-proc readI16(blob: string, offset: int): int =
-  ## Reads one little-endian signed 16-bit value from a string.
-  let value = uint16(blob[offset].uint8) or
-    (uint16(blob[offset + 1].uint8) shl 8)
-  int(cast[int16](value))
-
 proc globalPanelClickedPlayer(message: Message): int =
   ## Returns the clicked global score-panel player index or -1.
   result = -1
   if message.kind != BinaryMessage:
     return
   var
-    offset = 0
     x = 0
     y = 0
     layer = -1
-  let blob = message.data
-  while offset < blob.len:
-    let messageType = blob[offset].uint8
-    inc offset
-    case messageType
-    of 0x82:
-      if offset + 5 > blob.len:
-        return -1
-      x = blob.readI16(offset)
-      y = blob.readI16(offset + 2)
-      layer = int(blob[offset + 4].uint8)
-      offset += 5
-    of 0x83:
-      if offset + 2 > blob.len:
-        return -1
-      let
-        button = blob[offset].uint8
-        down = blob[offset + 1].uint8 != 0
-      offset += 2
-      if layer != GlobalPanelLayerId or button != 1'u8 or not down:
+  for item in message.data.parseSpriteClientMessages():
+    case item.kind
+    of SpriteClientMouseMoveMessage:
+      x = item.x
+      y = item.y
+      layer =
+        if item.hasLayer:
+          item.layer
+        else:
+          -1
+    of SpriteClientMouseButtonMessage:
+      if layer != GlobalPanelLayerId or item.button != 1'u8 or
+          not item.down:
         continue
       if x < GlobalPanelNameX or x >= GlobalPanelWidth:
         continue
@@ -2721,46 +2594,8 @@ proc globalPanelClickedPlayer(message: Message): int =
       let row = (y - GlobalPanelPad) div GlobalPanelRowHeight
       if row >= 0 and row < HouseCount:
         return row
-    else:
-      return -1
-
-proc readSpriteInputText(message: string): string =
-  ## Reads printable text from sprite player input messages.
-  var offset = 0
-  while offset < message.len:
-    let messageType = message[offset].uint8
-    inc offset
-    case messageType
-    of 0x81:
-      if offset + 2 > message.len:
-        return
-      let length = int(uint16(message[offset].uint8) or
-        (uint16(message[offset + 1].uint8) shl 8))
-      offset += 2
-      if offset + length > message.len:
-        return
-      for i in 0 ..< length:
-        let value = message[offset + i].uint8
-        if value >= 32'u8 and value < 127'u8:
-          result.add(message[offset + i])
-      offset += length
-    of 0x82:
-      if offset + 4 > message.len:
-        return
-      offset += 4
-      if offset < message.len and message[offset].uint8 notin
-          {0x81'u8, 0x82'u8, 0x83'u8, 0x84'u8}:
-        inc offset
-    of 0x83:
-      if offset + 2 > message.len:
-        return
-      offset += 2
-    of 0x84:
-      if offset + 1 > message.len:
-        return
-      inc offset
-    else:
-      return
+    of SpriteClientChatMessage, SpriteClientInputMessage:
+      discard
 
 proc playerChatFromMessage(message: Message): string =
   ## Reads player chat from text or binary websocket messages.
