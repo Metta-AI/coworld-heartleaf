@@ -187,7 +187,7 @@
       "name": "BitWorld Score Grader",
       "type": "grader",
       "description": "Generic BitWorld grader that scores episode interest from score spread and game-specific activity signals.",
-      "source_url": "https://github.com/Metta-AI/graders/tree/main/graders/bitworld_score/bitworld_score_grader",
+      "source_url": "https://github.com/Metta-AI/graders/tree/41831abe4b651ae9379243081d219de2083e91c8/graders/bitworld_score/bitworld_score_grader",
       "image": "ghcr.io/metta-ai/graders-bitworld-score:latest"
     }
   ],
