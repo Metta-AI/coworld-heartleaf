@@ -27,9 +27,11 @@ ENV PATH="/root/.nimby/nim/bin:$PATH"
 
 WORKDIR /workspace/heartleaf
 COPY nimby.lock .
-RUN nimby --global sync nimby.lock
+RUN nimby sync nimby.lock -g
 
 COPY . .
+RUN nimby sync nimby.lock -g
+
 ARG NimFlags="-d:release -d:useMalloc --opt:speed --stackTrace:on"
 RUN nim c \
   $NimFlags \
