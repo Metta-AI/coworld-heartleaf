@@ -234,6 +234,8 @@ type
     gardenChecked: seq[bool]
     greetedNames: seq[string]
     lastGreetingTick: int
+    chatHistory: seq[ConversationMessage]
+    heardChats: seq[string]
     currentGarden: int
     partyHouse: int
     searchHouse: int
@@ -384,8 +386,12 @@ proc permanentBedrockError(answer: BedrockResult): bool =
 
 proc bedrockUrl(): string =
   ## Builds the Bedrock Runtime InvokeModel URL.
-  "https://bedrock-runtime." & bedrockRegion() &
-    ".amazonaws.com/model/" & bedrockModel() & "/invoke"
+  var endpoint = getEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME").strip()
+  while endpoint.len > 0 and endpoint[^1] == '/':
+    endpoint.setLen(endpoint.len - 1)
+  if endpoint.len == 0:
+    endpoint = "https://bedrock-runtime." & bedrockRegion() & ".amazonaws.com"
+  endpoint & "/model/" & bedrockModel() & "/invoke"
 
 proc bedrockHeaders(): HttpHeaders =
   ## Builds one Bedrock HTTP header set.
@@ -398,12 +404,25 @@ proc bedrockHeaders(): HttpHeaders =
 
 proc bedrockBody(messages: openArray[ConversationMessage]): string =
   ## Builds one Anthropic Messages request body for Bedrock.
+  ## Consecutive same-role messages are joined because the Anthropic
+  ## Messages API requires user and assistant turns to alternate.
   var
     systemPrompt = ""
     chatMessages = newJArray()
   for message in messages:
     if message.role == "system":
       systemPrompt = message.content
+      continue
+    if chatMessages.elems.len == 0 and message.role == "assistant":
+      chatMessages.add(%*{
+        "role": "user",
+        "content": "(The day begins.)"
+      })
+    if chatMessages.elems.len > 0 and
+        chatMessages.elems[^1]["role"].getStr() == message.role:
+      chatMessages.elems[^1]["content"] = %(
+        chatMessages.elems[^1]["content"].getStr() & "\n" & message.content
+      )
     else:
       chatMessages.add(%*{
         "role": message.role,
@@ -471,29 +490,66 @@ proc repoDir(): string =
   ## Returns the Heartleaf repository directory.
   currentSourcePath().parentDir().parentDir().parentDir()
 
+const DefaultSoulMarkdown = """
+Your name is {name}. You are a Heartleaf gnome player.
+
+Response format:
+Return only one JSON object and no prose. Allowed actions are
+keep_gathering_plants, find_person, find_house, go_home,
+stand_at_house_garden, stand_next_to_person, say_to_person, and
+go_to_party. Fields are action, targetName, houseIndex, message,
+commitParty, and reason. houseIndex is 1 to 9. Only use numeric
+houseIndex values in JSON fields.
+
+Conversation memory:
+The conversation before the final state report is the full chat
+transcript of this game: user turns are lines you heard, formatted as
+Name: text, and your own earlier turns are what you said out loud.
+Remember it. Follow up on invitations you gave or received, answer
+questions people asked you, do not repeat greetings to the same person,
+and keep your promises. Even with a long transcript, always respond
+with only one JSON object.
+
+General strategy:
+Gather as much food as possible early. If food is high by 3pm, stand at
+your house to greet people. At 4pm, invite people to your house if you
+have food. After 5pm, stop gathering and switch to social party
+planning. After 6pm, go to a party or your own house even if food is
+low. If food is low, seek a party. If food is high, invite people to
+your party using say_to_person.
+
+Chat rules:
+Say short friendly phrases to nearby players so they are more likely to
+cooperate. Prefer messages under 12 words. In chat messages, never call
+houses by number. Use my house, your house, or the owner's name, like
+Anton's house. If you agree to attend a party, set commitParty true,
+set houseIndex to that owner's house, and say a short confirmation. Do
+not confirm attendance if you are already committed somewhere else or
+hosting your own party. Choose who to visit, who to invite, and exactly
+what to say. Honor party agreements unless nobody else is there.
+"""
+
 var soulTemplate = ""
 
 proc setSoulTemplate*(soul: string) =
-  ## Sets the soul markdown shared by every player name.
+  ## Sets the soul markdown used as the full LLM system prompt.
   soulTemplate = soul.strip()
 
-proc defaultSoulInstructions(name: string): string =
-  ## Returns fallback soul instructions for unknown player names.
-  "You are " & name & ". Speak in short friendly phrases. " &
-    "Gather food early, invite when you have food, attend parties when low."
-
 proc loadSoulInstructions(name: string): string =
-  ## Builds the soul instructions for one player name.
+  ## Builds the full system prompt for one player name.
   let cleanName =
     if name.strip().len > 0:
       name.strip()
     else:
       "a Heartleaf gnome"
-  if soulTemplate.len == 0:
-    return defaultSoulInstructions(cleanName)
-  if soulTemplate.contains("{name}"):
-    return soulTemplate.replace("{name}", cleanName)
-  "Your name is " & cleanName & ".\n\n" & soulTemplate
+  let soul =
+    if soulTemplate.len > 0:
+      soulTemplate
+    else:
+      DefaultSoulMarkdown.strip()
+  if soul.contains("{name}"):
+    return soul.replace("{name}", cleanName)
+  "Your name is " & cleanName & ".\n\n" & soul
 
 when defined(gui):
   proc atlasPath(): string =
@@ -707,6 +763,44 @@ proc visibleChatText(bot: Bot, playerIndex: int): string =
   if sprite == nil or not sprite.label.startsWith("chat "):
     return
   sprite.label["chat ".len .. ^1]
+
+proc recordChatLine(bot: Bot, role, speaker, text: string) =
+  ## Appends one heard or spoken chat line to the conversation history.
+  bot.chatHistory.add(ConversationMessage(
+    role: role,
+    content: speaker & ": " & text
+  ))
+
+proc recordOwnChat(bot: Bot, text: string) =
+  ## Records one chat message this bot said out loud.
+  let speaker =
+    if bot.playerName.len > 0:
+      bot.playerName
+    else:
+      bot.name
+  bot.recordChatLine("assistant", speaker, text)
+
+proc scanHeardChats(bot: Bot) =
+  ## Records newly visible chat bubbles from other players.
+  for objectId, objectState in bot.objects:
+    if objectId < ChatObjectBase or objectId >= GardenObjectBase:
+      continue
+    let playerIndex = objectId - ChatObjectBase
+    while playerIndex >= bot.heardChats.len:
+      bot.heardChats.add("")
+    if not objectState.present:
+      bot.heardChats[playerIndex] = ""
+      continue
+    let text = bot.visibleChatText(playerIndex)
+    if text == bot.heardChats[playerIndex]:
+      continue
+    bot.heardChats[playerIndex] = text
+    if text.len == 0 or playerIndex == bot.selfIndex:
+      continue
+    let speaker = bot.visiblePlayerName(playerIndex)
+    if speaker.len == 0 or speaker == bot.playerName:
+      continue
+    bot.recordChatLine("user", speaker, text)
 
 proc hasGreeted(bot: Bot, name: string): bool =
   ## Returns true when this bot has greeted a name today.
@@ -1480,6 +1574,7 @@ proc maybeGreetNearby(bot: Bot, ws: WebSocket): bool =
     bot.greetedNames.add(name)
     bot.lastGreetingTick = bot.frameTick
     ws.send(blobFromChat(message), BinaryMessage)
+    bot.recordOwnChat(message)
     bot.log("chat " & message)
     return true
   false
@@ -2292,31 +2387,6 @@ proc decisionStateSignature(bot: Bot): string =
     "|commit=" & $bot.committedPartyHouse &
     "|commitCompany=" & $bot.commitmentHasCompany()
 
-proc llmSystemPrompt(): string =
-  ## Returns the stable system prompt for the social player.
-  "You are a Heartleaf gnome player. " &
-    "Return only one JSON object and no prose. " &
-    "Allowed actions are keep_gathering_plants, find_person, find_house, " &
-    "go_home, stand_at_house_garden, stand_next_to_person, say_to_person, " &
-    "and go_to_party. Fields are action, targetName, houseIndex, message, " &
-    "commitParty, and reason. houseIndex is 1 to 9. " &
-    "Gather as much food as possible early. If food is high by 3pm, " &
-    "stand at your house to greet people. At 4pm, invite people to " &
-    "your house if you have food. After 5pm, stop gathering and switch " &
-    "to social party planning. After 6pm, go to a party or your own " &
-    "house even if food is low. If food is low, seek a party. If food " &
-    "is high, invite people to your party using say_to_person. Say " &
-    "short friendly phrases to nearby players so " &
-    "they are more likely to cooperate. Prefer messages under 12 words. " &
-    "In chat messages, never call houses by number. Use my house, your " &
-    "house, or the owner's name, like Anton's house. Only use numeric " &
-    "houseIndex values in JSON fields. If you agree to attend a party, " &
-    "set commitParty true, set houseIndex to that owner's house, and say " &
-    "a short confirmation. Do not confirm attendance if you are already " &
-    "committed somewhere else or hosting your own party. " &
-    "Choose who to visit, who to invite, and exactly what to say. " &
-    "Honor party agreements unless nobody else is there."
-
 proc llmUserPrompt(bot: Bot): string =
   ## Builds one current-state prompt for the LLM.
   let commitment =
@@ -2350,7 +2420,6 @@ proc llmUserPrompt(bot: Bot): string =
     "foodTotal=" & $bot.inventoryTotal() & "\n" &
     "partyCommitment=" & commitment & "\n" &
     "partyCommitmentHouseIndex=" & commitmentIndex & "\n" &
-    "agentSoul:\n" & bot.soulInstructions & "\n" &
     "strategyFoodLowAt=" & $LowHostFood & "\n" &
     "strategyFoodHighAt=" & $HighFoodForInvites & "\n" &
     "clock=" & bot.minutes.clockName() & "\n" &
@@ -2598,10 +2667,14 @@ proc startLlmDecision(bot: Bot): bool =
     return false
   inc bot.llmSerial
   bot.llmTag = "decision-" & $bot.llmSerial
-  let messages = @[
-    ConversationMessage(role: "system", content: llmSystemPrompt()),
-    ConversationMessage(role: "user", content: bot.llmUserPrompt())
+  var messages = @[
+    ConversationMessage(role: "system", content: bot.soulInstructions)
   ]
+  for message in bot.chatHistory:
+    messages.add(message)
+  messages.add(
+    ConversationMessage(role: "user", content: bot.llmUserPrompt())
+  )
   var started = false
   try:
     started = startTalkToBedrock(messages, bot.llmTag)
@@ -2869,6 +2942,7 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
       not bot.visiblePlayerNear(bot.decision.targetName):
     return
   ws.send(blobFromChat(bot.decision.message), BinaryMessage)
+  bot.recordOwnChat(bot.decision.message)
   bot.decisionChatSent = true
   bot.log("chat " & bot.decision.message)
 
@@ -3002,6 +3076,7 @@ proc firstMovingPathTarget(bot: Bot, goal: Goal): Point =
 proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
   ## Chooses the next input mask for one game frame.
   bot.analyze()
+  bot.scanHeardChats()
   if not bot.localized:
     bot.desiredMask = 0
     bot.hasTarget = false
