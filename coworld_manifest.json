@@ -232,7 +232,7 @@
       "name": "Default Reporter",
       "type": "reporter",
       "description": "Default Coworld reporter for generic episode artifacts.",
-      "image": "public.ecr.aws/q5f4m8t9/cogames@sha256:396e56a9ba1576aecc5b9868a85fa309ea98fdbbf8d656c94ec021906197ea52"
+      "image": "{{REPORTER_IMAGE}}"
     }
   ],
   "grader": [
