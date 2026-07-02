@@ -162,13 +162,43 @@
       ]
     },
     {
-      "id": "talking_villager",
-      "name": "Talking Villager",
+      "id": "shy_villager",
+      "name": "Shy Villager",
       "type": "player",
-      "description": "LLM-guided Heartleaf bot that gathers food, talks to players, invites guests, and honors party commitments.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/talking-villager:latest",
+      "description": "Shy LLM-guided Heartleaf gnome that gathers quietly, speaks softly, and honors party invitations.",
+      "image": "public.ecr.aws/s3j4p9s7/treeform/players/shy-villager:latest",
       "run": [
-        "/bin/talking_villager"
+        "/bin/shy_villager"
+      ]
+    },
+    {
+      "id": "chatty_villager",
+      "name": "Chatty Villager",
+      "type": "player",
+      "description": "Chatty LLM-guided Heartleaf gnome that greets everyone, talks constantly, and spreads party invitations.",
+      "image": "public.ecr.aws/s3j4p9s7/treeform/players/chatty-villager:latest",
+      "run": [
+        "/bin/chatty_villager"
+      ]
+    },
+    {
+      "id": "friendly_villager",
+      "name": "Friendly Villager",
+      "type": "player",
+      "description": "Friendly LLM-guided Heartleaf gnome that welcomes everyone, shares food, and hosts warm dinners.",
+      "image": "public.ecr.aws/s3j4p9s7/treeform/players/friendly-villager:latest",
+      "run": [
+        "/bin/friendly_villager"
+      ]
+    },
+    {
+      "id": "fatherly_villager",
+      "name": "Fatherly Villager",
+      "type": "player",
+      "description": "Fatherly LLM-guided Heartleaf gnome that checks on others, shares food, and makes sure nobody dines alone.",
+      "image": "public.ecr.aws/s3j4p9s7/treeform/players/fatherly-villager:latest",
+      "run": [
+        "/bin/fatherly_villager"
       ]
     }
   ],

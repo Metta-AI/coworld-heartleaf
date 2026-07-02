@@ -35,9 +35,9 @@ RUN nimby sync nimby.lock -g
 ARG NimFlags="-d:release -d:useMalloc --opt:speed --stackTrace:on"
 RUN nim c \
   $NimFlags \
-  --nimcache:/tmp/heartleaf-talking-villager-nimcache \
-  --out:talking_villager \
-  players/talking_villager/talking_villager.nim
+  --nimcache:/tmp/heartleaf-fatherly_villager-nimcache \
+  --out:fatherly_villager \
+  players/fatherly_villager/fatherly_villager.nim
 
 # Run Docker.
 FROM debian:bookworm-slim
@@ -50,9 +50,7 @@ RUN apt-get update && \
   rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/heartleaf
-COPY --from=build /workspace/heartleaf/talking_villager /bin/talking_villager
+COPY --from=build /workspace/heartleaf/fatherly_villager /bin/fatherly_villager
 COPY --from=build /workspace/heartleaf/data ./data
-COPY --from=build /workspace/heartleaf/players/talking_villager/souls \
-  ./players/talking_villager/souls
 
-CMD ["/bin/talking_villager"]
+CMD ["/bin/fatherly_villager"]
