@@ -10,6 +10,7 @@ const
   FoodSpriteSize* = 32
   FoodVeggieSlots* = 24
   HouseCount* = 9
+  InteractionRadius* = 40
   PlayerBoxWidth* = 14
   PlayerBoxHeight* = 8
   PlayerBoxOffsetX* = 9

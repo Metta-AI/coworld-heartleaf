@@ -5,7 +5,7 @@ import
   bitworld/aseprite, bitworld/client as bitworldClient,
   bitworld/pixelfonts, bitworld/spriteprotocol, bitworld/resources,
   bitworld/runtime, bitworld/sprites,
-  heartleaf/common
+  heartleaf/common, heartleaf/protocol
 
 const
   DefaultSeed = 0x484541
@@ -21,7 +21,6 @@ const
   FoodMarkerCellX = 7
   FoodMarkerCellY = 7
   GardenStartFoodCount = 1
-  InteractionRadius = 40
   MotionScale = 256
   Accel = 76
   FrictionNum = 144
@@ -116,16 +115,6 @@ const
   GlobalPanelSelectSpriteId = 8102
   GlobalPanelScoreSpriteBase = 8200
   GlobalPanelNameSpriteBase = 8300
-  BottomObjectId = 1
-  OverhangObjectId = 2
-  PlayerObjectBase = 1000
-  NameObjectBase = 2000
-  ChatObjectBase = 3000
-  GardenObjectBase = 4000
-  InventoryObjectBase = 5000
-  InventoryCountObjectBase = 6000
-  ClockObjectBase = 7000
-  ScoreObjectBase = 7100
   GlobalPanelBackObjectId = 20_000
   GlobalPanelTitleObjectId = 20_001
   GlobalPanelSelectObjectId = 20_002
@@ -137,7 +126,6 @@ const
   NameZ = 30_000
   ChatZ = 30_001
   ScoreZ = 30_002
-  ChatMaxChars = 48
   NameMaxChars = 14
   ChatLifetimeTicks = 5 * 24
   ChatPad = 3
@@ -153,22 +141,10 @@ const
     "0123456789: " &
     "abcdefghijklmnopqrstuvwxyz" &
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-  WeekdayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
   TintHueTargets = [0.80, 0.78, 0.75, 0.70, 0.64]
   TintHueMixes = [0.18, 0.30, 0.43, 0.57, 0.72]
   TintSaturationScales = [1.05, 1.12, 1.20, 1.30, 1.38]
   TintValueScales = [0.86, 0.70, 0.54, 0.39, 0.25]
-  PlayerNames = [
-    "Ivan",
-    "Anton",
-    "Yura",
-    "Sasha",
-    "Maxim",
-    "Nikita",
-    "Vova",
-    "Dima",
-    "Egor"
-  ]
   FoodNames = [
     "Lettuce",
     "Carrot",
@@ -373,24 +349,9 @@ proc requiredLayerIndex(
       "Map aseprite needs a " & label & " layer."
     )
 
-proc rectName(rect: ResourceRect): string =
-  ## Returns one normalized resource rectangle name.
-  rect.name.strip().toLowerAscii()
-
 proc houseIndex(rect: ResourceRect): int =
   ## Returns the zero-based house index for one resource rectangle.
-  let name = rect.rectName()
-  if not name.startsWith("house"):
-    return -1
-  if name.len <= "house".len:
-    return -1
-  let suffix = name["house".len ..< name.len]
-  try:
-    result = parseInt(suffix) - 1
-  except ValueError:
-    return -1
-  if result < 0 or result >= HouseCount:
-    return -1
+  rect.rectName().houseIndexFromName()
 
 proc loadHouses(rects: openArray[ResourceRect]): array[HouseCount, House] =
   ## Loads numbered house rectangles from parsed resource data.
@@ -1004,7 +965,7 @@ proc addNameTag(
     viewportHeight
   ):
     return y
-  packet.addRgbaSpriteCached(cache, spriteId, tag, "name " & player.playerName)
+  packet.addRgbaSpriteCached(cache, spriteId, tag, NameLabelPrefix & player.playerName)
   packet.addObject(
     NameObjectBase + playerIndex,
     x,
@@ -1044,7 +1005,7 @@ proc addSpeechBubble(
     viewportHeight
   ):
     return
-  packet.addRgbaSpriteCached(cache, spriteId, bubble, "chat " & player.message)
+  packet.addRgbaSpriteCached(cache, spriteId, bubble, ChatLabelPrefix & player.message)
   packet.addObject(
     ChatObjectBase + playerIndex,
     x,
@@ -1118,12 +1079,6 @@ proc foodName(foodIndex: int): string =
     return FoodNames[foodIndex]
   return "food " & $foodIndex
 
-proc playerNameForHouse(houseIndex: int): string =
-  ## Returns the fixed in-game player name for one house.
-  if houseIndex >= 0 and houseIndex < PlayerNames.len:
-    return PlayerNames[houseIndex]
-  return "Player"
-
 proc dailyResultsJson*(sim: SimServer): string =
   ## Returns one daily player score result as JSON.
   var
@@ -1190,30 +1145,9 @@ proc currentDayMinutes(sim: SimServer): int =
   let step = min(DayStepCount, sim.dayTick * DayStepCount div DayTicks)
   return DayStartMinutes + step * DayStepMinutes
 
-proc twoDigits(value: int): string =
-  ## Formats one integer as two decimal digits.
-  if value < 10:
-    return "0" & $value
-  return $value
-
 proc clockText(sim: SimServer): string =
   ## Returns the current weekday and game clock as 12-hour text.
-  let
-    minutes = sim.currentDayMinutes()
-    weekday = WeekdayNames[(sim.dayNumber - 1) mod WeekdayNames.len]
-    hour24 = minutes div 60
-    minute = minutes mod 60
-    suffix =
-      if hour24 < 12:
-        "am"
-      else:
-        "pm"
-    hour12 =
-      if hour24 mod 12 == 0:
-        12
-      else:
-        hour24 mod 12
-  return weekday & " " & $hour12 & ":" & minute.twoDigits() & suffix
+  sim.dayNumber.weekdayName() & " " & sim.currentDayMinutes().clockName()
 
 proc dayTintIndex(sim: SimServer): int =
   ## Returns the active dusk tint index, or -1 during full daylight.
@@ -1255,74 +1189,74 @@ proc addSpriteProtocolInit(
   packet.addRgbaSprite(
     BottomSpriteId,
     sim.mainMap.bottomSprite,
-    "heartleaf bottom"
+    MainBottomLabelPrefix
   )
   packet.addRgbaSprite(
     OverhangSpriteId,
     sim.mainMap.overhangSprite,
-    "heartleaf overhang"
+    MainOverhangLabelPrefix
   )
   for i in 0 ..< DayTintCount:
     packet.addRgbaSprite(
       mainBottomSpriteId(i),
       sim.mainMap.bottomTints[i],
-      "heartleaf bottom tint " & $i
+      MainBottomLabelPrefix & " tint " & $i
     )
     packet.addRgbaSprite(
       mainOverhangSpriteId(i),
       sim.mainMap.overhangTints[i],
-      "heartleaf overhang tint " & $i
+      MainOverhangLabelPrefix & " tint " & $i
     )
   packet.addRgbaSprite(
     HomeBottomSpriteId,
     sim.homeMaps[0].bottomSprite,
-    "heartleaf home bottom"
+    HomeBottomLabelPrefix
   )
   packet.addRgbaSprite(
     HomeOverhangSpriteId,
     sim.homeMaps[0].overhangSprite,
-    "heartleaf home overhang"
+    HomeOverhangLabelPrefix
   )
   for i in 0 ..< DayTintCount:
     packet.addRgbaSprite(
       homeBottomSpriteId(i),
       sim.homeMaps[0].bottomTints[i],
-      "heartleaf home bottom tint " & $i
+      HomeBottomLabelPrefix & " tint " & $i
     )
     packet.addRgbaSprite(
       homeOverhangSpriteId(i),
       sim.homeMaps[0].overhangTints[i],
-      "heartleaf home overhang tint " & $i
+      HomeOverhangLabelPrefix & " tint " & $i
     )
   for ch in ClockGlyphs:
     packet.addRgbaSprite(
       ch.clockGlyphSpriteId(),
       sim.clockGlyphSprite(ch),
-      "clock " & $ch
+      ClockLabelPrefix & $ch
     )
   for foodIndex, icon in sim.foods.icons:
     packet.addRgbaSprite(foodSpriteId(foodIndex), icon, foodIndex.foodName())
   packet.addRgbaSprite(
     FoodMarkerSpriteId,
     sim.foods.marker,
-    "garden marker"
+    GardenMarkerLabel
   )
   packet.addRgbaSprite(
     MainWalkSpriteId,
     sim.mainMap.walkabilitySprite(),
-    "heartleaf main walkability"
+    MainWalkabilityLabel
   )
   packet.addRgbaSprite(
     HomeWalkSpriteId,
     sim.homeMaps[0].walkabilitySprite(),
-    "heartleaf home walkability"
+    HomeWalkabilityLabel
   )
   for gnomeIndex, gnome in sim.gnomes:
     for direction in Direction:
       packet.addRgbaSprite(
         playerSpriteId(gnomeIndex, direction),
         gnome.frames[direction],
-        "gnome " & $gnomeIndex & " " & direction.directionLabel()
+        GnomeLabelPrefix & $gnomeIndex & " " & direction.directionLabel()
       )
 
 proc worldClampPixel(value, maxValue: int): int =
@@ -1680,10 +1614,10 @@ proc addScreenOverlay(
     label = ""
   if player.dinnerTicks > 0 and player.dinnerRecord != nil:
     overlay = sim.dinnerOverlaySprite(player.dinnerRecord)
-    label = "dinner " & $playerIndex
+    label = DinnerLabelPrefix & $playerIndex
   elif sim.scoreTicks > 0:
     overlay = sim.scoreOverlaySprite()
-    label = "score " & $playerIndex
+    label = ScoreLabelPrefix & $playerIndex
   else:
     return
 

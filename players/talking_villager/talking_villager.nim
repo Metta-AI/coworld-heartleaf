@@ -2,7 +2,7 @@ import
   std/[algorithm, json, options, os, parseopt, strutils],
   bitworld/[spriteprotocol, resources],
   curly, pathy, supersnappy, whisky,
-  decisions, heartleaf/common
+  decisions, heartleaf/[common, protocol]
 
 const
 
@@ -15,7 +15,7 @@ const
 
 
 
-  CollectActionRadius = 32
+  CollectActionRadius = InteractionRadius - 8
   PersonStandRadius = 30
   NavStep = 2
   PathArrivePixels = 3
@@ -47,27 +47,7 @@ const
   HouseGatherMaxRadius = 96
   MorningIdentityUntilMinutes = 9 * 60
   MorningIdentityRadius = 140
-  BottomObjectId = 1
-  PlayerObjectBase = 1000
-  NameObjectBase = 2000
-  ChatObjectBase = 3000
-  GardenObjectBase = 4000
-  InventoryObjectBase = 5000
-  InventoryCountObjectBase = 6000
-  ClockObjectBase = 7000
-  ScoreObjectBase = 7100
 
-  PlayerNames = [
-    "Ivan",
-    "Anton",
-    "Yura",
-    "Sasha",
-    "Maxim",
-    "Nikita",
-    "Vova",
-    "Dima",
-    "Egor"
-  ]
 
   UnstuckMasks = [
     ButtonUp,
@@ -446,34 +426,6 @@ proc loadSoulInstructions(bot: Bot, name: string): string =
     return bot.soulTemplate.replace("{name}", cleanName)
   "Your name is " & cleanName & ".\n\n" & bot.soulTemplate
 
-proc rectName(rect: ResourceRect): string =
-  ## Returns the normalized resource rectangle name.
-  rect.name.strip().toLowerAscii()
-
-proc houseIndex(name: string): int =
-  ## Returns the zero-based house index in one resource name.
-  if not name.startsWith("house"):
-    return -1
-  try:
-    result = parseInt(name["house".len .. ^1]) - 1
-  except ValueError:
-    result = -1
-  if result < 0 or result >= 9:
-    return -1
-
-proc playerNameForHouse(houseIndex: int): string =
-  ## Returns the fixed in-game player name for one house.
-  if houseIndex >= 0 and houseIndex < PlayerNames.len:
-    return PlayerNames[houseIndex]
-  ""
-
-proc houseIndexForPlayerName(name: string): int =
-  ## Returns the fixed house index for one in-game player name.
-  for i, playerName in PlayerNames:
-    if playerName == name:
-      return i
-  return -1
-
 proc loadBotResources(): Resources =
   ## Loads house, garden, and home-exit resource rectangles.
   result = Resources()
@@ -483,7 +435,7 @@ proc loadBotResources(): Resources =
     if name == "garden":
       result.gardens.add(rect.toRect())
     else:
-      let index = name.houseIndex()
+      let index = name.houseIndexFromName()
       if index >= 0:
         result.houses[index] = rect.toRect()
         result.houseValid[index] = true
@@ -542,9 +494,9 @@ proc visiblePlayerName(bot: Bot, playerIndex: int): string =
   if not objectState.present:
     return
   let sprite = bot.spriteInfo(objectState.spriteId)
-  if sprite == nil or not sprite.label.startsWith("name "):
+  if sprite == nil or not sprite.label.startsWith(NameLabelPrefix):
     return
-  sprite.label["name ".len .. ^1]
+  sprite.label[NameLabelPrefix.len .. ^1]
 
 proc visiblePlayerIndexByName(bot: Bot, name: string): int =
   ## Returns the visible player index for one fixed player name.
@@ -570,9 +522,9 @@ proc visibleChatText(bot: Bot, playerIndex: int): string =
   if not objectState.present:
     return
   let sprite = bot.spriteInfo(objectState.spriteId)
-  if sprite == nil or not sprite.label.startsWith("chat "):
+  if sprite == nil or not sprite.label.startsWith(ChatLabelPrefix):
     return
-  sprite.label["chat ".len .. ^1]
+  sprite.label[ChatLabelPrefix.len .. ^1]
 
 proc recordChatLine(bot: Bot, role, speaker, text: string) =
   ## Appends one heard or spoken chat line to the conversation history.
@@ -650,29 +602,29 @@ proc classifySprite(label: string): tuple[kind: SpriteKind, glyph: char] =
   ## Classifies one Heartleaf sprite protocol label.
   let lower = label.toLowerAscii()
   result = (kind: SpriteUnknown, glyph: '\0')
-  if lower == "heartleaf main walkability":
+  if lower == MainWalkabilityLabel:
     result.kind = SpriteMainWalk
-  elif lower == "heartleaf home walkability":
+  elif lower == HomeWalkabilityLabel:
     result.kind = SpriteHomeWalk
-  elif lower.startsWith("heartleaf home bottom"):
+  elif lower.startsWith(HomeBottomLabelPrefix):
     result.kind = SpriteHomeBottom
-  elif lower.startsWith("heartleaf bottom"):
+  elif lower.startsWith(MainBottomLabelPrefix):
     result.kind = SpriteMainBottom
-  elif lower == "garden marker":
+  elif lower == GardenMarkerLabel:
     result.kind = SpriteGarden
-  elif lower.startsWith("gnome "):
+  elif lower.startsWith(GnomeLabelPrefix):
     result.kind = SpriteGnome
-  elif lower.startsWith("name "):
+  elif lower.startsWith(NameLabelPrefix):
     result.kind = SpriteName
-  elif lower.startsWith("chat "):
+  elif lower.startsWith(ChatLabelPrefix):
     result.kind = SpriteChat
-  elif lower.startsWith("clock "):
+  elif lower.startsWith(ClockLabelPrefix):
     result.kind = SpriteClock
-    if label.len > "clock ".len:
-      result.glyph = label["clock ".len]
+    if label.len > ClockLabelPrefix.len:
+      result.glyph = label[ClockLabelPrefix.len]
     else:
       result.glyph = ' '
-  elif lower.startsWith("score ") or lower.startsWith("dinner "):
+  elif lower.startsWith(ScoreLabelPrefix) or lower.startsWith(DinnerLabelPrefix):
     result.kind = SpriteOverlay
 
 proc needsPixels(kind: SpriteKind): bool =
@@ -1003,51 +955,6 @@ proc log(bot: Bot, text: string) =
   ## Writes one bot activity log line.
   echo bot.logName(), ": ", text, " (", bot.clockText(), ")"
 
-proc parseClockMinutes(text: string): int =
-  ## Parses one Heartleaf AM/PM clock string into day minutes.
-  result = -1
-  let parts = strutils.splitWhitespace(text)
-  if parts.len == 0:
-    return
-  let token = parts[^1]
-  if token.len < 4:
-    return
-  let suffix = token[^2 .. ^1].toLowerAscii()
-  if suffix != "am" and suffix != "pm":
-    return
-  let timeParts = token[0 .. ^3].split(':')
-  if timeParts.len != 2:
-    return
-  try:
-    var hour = parseInt(timeParts[0])
-    let minute = parseInt(timeParts[1])
-    if suffix == "pm" and hour < 12:
-      hour += 12
-    elif suffix == "am" and hour == 12:
-      hour = 0
-    result = hour * 60 + minute
-  except ValueError:
-    result = -1
-
-proc clockName(minutes: int): string =
-  ## Formats day minutes as one AM/PM clock string.
-  let wrapped = ((minutes mod (24 * 60)) + (24 * 60)) mod (24 * 60)
-  var hour = wrapped div 60
-  let minute = wrapped mod 60
-  let suffix =
-    if hour >= 12:
-      "pm"
-    else:
-      "am"
-  hour = hour mod 12
-  if hour == 0:
-    hour = 12
-  let minuteText =
-    if minute < 10:
-      "0" & $minute
-    else:
-      $minute
-  $hour & ":" & minuteText & suffix
 
 proc clockAnnouncement(minutes: int): string =
   ## Returns one hourly clock line for the conversation history.
@@ -1145,7 +1052,7 @@ proc findSelfIndexByName(bot: Bot): int =
   result = -1
   if bot.playerName.len == 0:
     return
-  let expected = "name " & bot.playerName
+  let expected = NameLabelPrefix & bot.playerName
   for objectId, objectState in bot.objects:
     if not objectState.present:
       continue
