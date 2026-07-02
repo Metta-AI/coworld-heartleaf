@@ -4,33 +4,33 @@ import
   curly, pathy, supersnappy, whisky,
   decisions
 
-when defined(gui):
-  import
-    pixie, silky, vmath, windy
-
 const
+
   BedrockVersion = "bedrock-2023-05-31"
   DefaultBedrockRegion = "us-east-1"
   DefaultBedrockModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
   DefaultBedrockTimeoutSeconds = 30
   DefaultBedrockMaxTokens = 192
   BedrockTemperature = 0.2
+
   ViewportWidth = 320
   ViewportHeight = 200
-  GnomeSpriteSize = 32
   FoodSpriteSize = 32
   FoodVeggieSlots = 24
+
   PlayerBoxWidth = 14
   PlayerBoxHeight = 8
   PlayerBoxOffsetX = 9
   PlayerBoxOffsetY = 22
   NavPointOffsetX = PlayerBoxOffsetX + PlayerBoxWidth div 2
   NavPointOffsetY = PlayerBoxOffsetY + PlayerBoxHeight div 2
+
   CollectActionRadius = 32
   PersonStandRadius = 30
   NavStep = 2
   PathArrivePixels = 3
   PathRejoinPixels = 8
+
   MoveDeadZonePixels = 1
   PathDensifyPixels = 4
   SteerLookaheadPoints = 12
@@ -70,6 +70,7 @@ const
   InventoryCountObjectBase = 6000
   ClockObjectBase = 7000
   ScoreObjectBase = 7100
+
   PlayerNames = [
     "Ivan",
     "Anton",
@@ -81,6 +82,7 @@ const
     "Dima",
     "Egor"
   ]
+
   UnstuckMasks = [
     ButtonUp,
     ButtonRight,
@@ -92,40 +94,12 @@ const
     ButtonUp or ButtonLeft
   ]
 
-when defined(gui):
-  const
-    ViewerWindowWidth = 1480
-    ViewerWindowHeight = 900
-    ViewerMargin = 16.0'f
-    ViewerFrameScale = 2.0'f
-    ViewerMapWidth = 720.0'f
-    ViewerMapHeight = 480.0'f
-    ViewerBackground = rgbx(17, 20, 24, 255)
-    ViewerPanel = rgbx(31, 35, 42, 255)
-    ViewerPanelAlt = rgbx(24, 28, 34, 255)
-    ViewerText = rgbx(232, 237, 226, 255)
-    ViewerMutedText = rgbx(152, 164, 150, 255)
-    ViewerWall = rgbx(78, 58, 70, 255)
-    ViewerWalk = rgbx(48, 72, 57, 255)
-    ViewerViewport = rgbx(143, 197, 255, 190)
-    ViewerPath = rgbx(117, 219, 255, 235)
-    ViewerGoal = rgbx(255, 121, 104, 255)
-    ViewerTarget = rgbx(255, 221, 102, 255)
-    ViewerGarden = rgbx(108, 214, 117, 255)
-    ViewerHouse = rgbx(214, 173, 93, 255)
-    ViewerPlayer = rgbx(120, 255, 176, 255)
-    ViewerOther = rgbx(105, 169, 255, 255)
-    ViewerExit = rgbx(205, 130, 255, 255)
-    ViewerInventoryHeight = 64.0'f
-    ViewerInventoryGap = 8.0'f
-    ViewerInventoryScale = 1.0'f
-
 type
-  MapKind = enum
-    MapUnknown
-    MapMain
-    MapHome
-    MapOverlay
+  ScreenKind = enum
+    UnknownScreen
+    MainMap
+    HomeMap
+    OverlayScreen
 
   SpriteKind = enum
     SpriteUnknown
@@ -157,7 +131,7 @@ type
 
   Goal = object
     kind: GoalKind
-    mapKind: MapKind
+    screenKind: ScreenKind
     x, y: int
     houseIndex: int
     gardenIndex: int
@@ -204,6 +178,7 @@ type
   Bot = ref object
     name: string
     playerName: string
+    soulTemplate: string
     soulInstructions: string
     slot: int
     homeIndex: int
@@ -212,8 +187,8 @@ type
     resources: Resources
     mainNav: JumpPointSpace
     homeNav: JumpPointSpace
-    mapKind: MapKind
-    previousMapKind: MapKind
+    screenKind: ScreenKind
+    previousScreenKind: ScreenKind
     currentHouse: int
     pendingHouse: int
     cameraX, cameraY: int
@@ -246,7 +221,6 @@ type
     desiredMask: uint8
     target: Point
     hasTarget: bool
-    decodeVisualSprites: bool
     decision: LlmDecision
     hasDecision: bool
     decisionChatSent: bool
@@ -262,15 +236,6 @@ type
     lastLlmError: string
     committedPartyHouse: int
 
-when defined(gui):
-  type
-    ViewerApp = ref object
-      window: Window
-      silky: Silky
-      contentScale: float32
-else:
-  type
-    ViewerApp = ref object
 
 var bedrockCurl = newCurly(1)
 
@@ -459,7 +424,7 @@ proc startTalkToBedrock(
     bedrockTimeoutSeconds(),
     tag
   )
-  true
+  return true
 
 proc pollTalkToBedrock(): BedrockResult =
   ## Polls for one completed Bedrock response.
@@ -490,70 +455,16 @@ proc repoDir(): string =
   ## Returns the Heartleaf repository directory.
   currentSourcePath().parentDir().parentDir().parentDir()
 
-var soulTemplate = ""
-
-proc setSoulTemplate*(soul: string) =
-  ## Sets the soul markdown used as the full LLM system prompt.
-  soulTemplate = soul.strip()
-
-proc requireSoul() =
-  ## Raises when no soul markdown was provided.
-  if soulTemplate.len == 0:
-    raise newException(
-      TalkingVillagerError,
-      "No soul markdown was provided. " &
-        "Pass a complete soul to talkingVillagerMain."
-    )
-
-proc loadSoulInstructions(name: string): string =
+proc loadSoulInstructions(bot: Bot, name: string): string =
   ## Builds the full system prompt for one player name.
   let cleanName =
     if name.strip().len > 0:
       name.strip()
     else:
       "a Heartleaf gnome"
-  if soulTemplate.contains("{name}"):
-    return soulTemplate.replace("{name}", cleanName)
-  "Your name is " & cleanName & ".\n\n" & soulTemplate
-
-when defined(gui):
-  proc atlasPath(): string =
-    ## Returns the Silky atlas path used by the debug viewer.
-    let localPath = repoDir() / "dist" / "atlas.png"
-    if fileExists(localPath):
-      return localPath
-    repoDir() / ".." / "bitworld" / "clients" / "dist" / "atlas.png"
-
-  proc displayScale(window: Window): float32 =
-    ## Returns a safe content scale for the window's current display.
-    result = window.contentScale
-    if result <= 0.0'f:
-      result = 1.0'f
-
-  proc scaledWindowSize(size: IVec2, scale: float32): IVec2 =
-    ## Converts a logical window size to physical pixels.
-    (size.vec2 * scale).ivec2
-else:
-  proc initViewerApp(): ViewerApp =
-    ## Returns an empty viewer for headless builds.
-    nil
-
-  proc viewerOpen(viewer: ViewerApp): bool =
-    ## Returns true for headless builds without a viewer.
-    discard viewer
-    true
-
-  proc pumpViewer(
-    viewer: ViewerApp,
-    bot: Bot,
-    connected: bool,
-    url: string
-  ) =
-    ## Skips viewer updates in headless builds.
-    discard viewer
-    discard bot
-    discard connected
-    discard url
+  if bot.soulTemplate.contains("{name}"):
+    return bot.soulTemplate.replace("{name}", cleanName)
+  "Your name is " & cleanName & ".\n\n" & bot.soulTemplate
 
 proc toRect(rect: ResourceRect): Rect =
   ## Converts one resource rectangle to the bot rectangle type.
@@ -585,7 +496,7 @@ proc houseIndexForPlayerName(name: string): int =
   for i, playerName in PlayerNames:
     if playerName == name:
       return i
-  -1
+  return -1
 
 proc loadBotResources(): Resources =
   ## Loads house, garden, and home-exit resource rectangles.
@@ -792,7 +703,7 @@ proc readI16(blob: string, offset: int): int =
   ## Reads one little-endian signed 16-bit value.
   let value = uint16(blob[offset].uint8) or
     (uint16(blob[offset + 1].uint8) shl 8)
-  int(cast[int16](value))
+  return int(cast[int16](value))
 
 proc readU32(blob: string, offset: int): int =
   ## Reads one little-endian unsigned 32-bit value.
@@ -833,10 +744,6 @@ proc classifySprite(label: string): tuple[kind: SpriteKind, glyph: char] =
 proc needsPixels(kind: SpriteKind): bool =
   ## Returns true when the bot needs sprite pixels for navigation.
   kind in {SpriteMainWalk, SpriteHomeWalk}
-
-proc shouldDecodePixels(bot: Bot, kind: SpriteKind): bool =
-  ## Returns true when a sprite packet should retain decoded RGBA pixels.
-  bot.decodeVisualSprites or kind.needsPixels()
 
 proc buildNavSpace(sprite: SpriteInfo): JumpPointSpace =
   ## Builds a pathy JPS+ space from one walkability sprite.
@@ -1007,7 +914,7 @@ proc pathNear(
 proc sameGoal(a, b: Goal): bool =
   ## Returns true when two goals are the same navigation target.
   a.kind == b.kind and
-    a.mapKind == b.mapKind and
+    a.screenKind == b.screenKind and
     a.x == b.x and
     a.y == b.y and
     a.houseIndex == b.houseIndex and
@@ -1016,10 +923,10 @@ proc sameGoal(a, b: Goal): bool =
 
 proc navForCurrentMap(bot: Bot): JumpPointSpace =
   ## Returns the navigation space for the current observed map.
-  case bot.mapKind
-  of MapMain:
+  case bot.screenKind
+  of MainMap:
     bot.mainNav
-  of MapHome:
+  of HomeMap:
     bot.homeNav
   else:
     nil
@@ -1069,7 +976,7 @@ proc applySpritePacket(bot: Bot, packet: string): bool =
       offset += labelLen
       let classified = classifySprite(label)
       var pixels: seq[uint8]
-      if bot.shouldDecodePixels(classified.kind):
+      if classified.kind.needsPixels():
         let compressed =
           if compressedLen > 0:
             packet.substr(compressedStart, compressedStart + compressedLen - 1)
@@ -1258,7 +1165,7 @@ proc resetGardenPlan(bot: Bot) =
   bot.lastLlmError = ""
   bot.committedPartyHouse = UnknownHouse
   bot.path.setLen(0)
-  bot.goal = Goal(kind: GoalIdle, mapKind: MapUnknown)
+  bot.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
 
 proc updateClock(bot: Bot) =
   ## Updates the bot's current day clock from the UI glyphs.
@@ -1268,10 +1175,10 @@ proc updateClock(bot: Bot) =
       bot.resetGardenPlan()
     bot.minutes = minutes
 
-proc updateMapKind(bot: Bot) =
-  ## Updates the visible map kind and camera offset.
-  bot.previousMapKind = bot.mapKind
-  bot.mapKind = MapOverlay
+proc updateScreenKind(bot: Bot) =
+  ## Updates the visible screen kind and camera offset.
+  bot.previousScreenKind = bot.screenKind
+  bot.screenKind = OverlayScreen
   bot.cameraX = 0
   bot.cameraY = 0
   if BottomObjectId >= bot.objects.len:
@@ -1284,19 +1191,19 @@ proc updateMapKind(bot: Bot) =
     return
   case sprite.kind
   of SpriteMainBottom:
-    bot.mapKind = MapMain
+    bot.screenKind = MainMap
   of SpriteHomeBottom:
-    bot.mapKind = MapHome
+    bot.screenKind = HomeMap
   else:
-    bot.mapKind = MapUnknown
+    bot.screenKind = UnknownScreen
   bot.cameraX = -bottom.x
   bot.cameraY = -bottom.y
-  if bot.mapKind != bot.previousMapKind:
+  if bot.screenKind != bot.previousScreenKind:
     bot.path.setLen(0)
-    if bot.mapKind == MapHome and bot.pendingHouse >= 0:
+    if bot.screenKind == HomeMap and bot.pendingHouse >= 0:
       bot.currentHouse = bot.pendingHouse
       bot.pendingHouse = UnknownHouse
-    elif bot.mapKind == MapMain:
+    elif bot.screenKind == MainMap:
       bot.currentHouse = UnknownHouse
 
 proc findSelfIndexByName(bot: Bot): int =
@@ -1341,10 +1248,10 @@ proc adoptHomeIdentity(bot: Bot, homeIndex: int) =
     return
   let name = homeIndex.playerNameForHouse()
   bot.playerName = name
-  bot.soulInstructions = name.loadSoulInstructions()
+  bot.soulInstructions = bot.loadSoulInstructions(name)
   bot.homeIndex = homeIndex
   bot.currentHouse =
-    if bot.mapKind == MapHome:
+    if bot.screenKind == HomeMap:
       homeIndex
     else:
       UnknownHouse
@@ -1355,12 +1262,12 @@ proc adoptHomeIdentity(bot: Bot, homeIndex: int) =
   bot.hasDecision = false
   bot.currentGarden = -1
   bot.path.setLen(0)
-  bot.goal = Goal(kind: GoalIdle, mapKind: MapUnknown)
+  bot.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
 
 proc nearestMorningHome(bot: Bot): int =
   ## Returns the nearest home inferred from the morning world spawn.
   result = UnknownHouse
-  if bot.mapKind != MapMain or bot.minutes > MorningIdentityUntilMinutes:
+  if bot.screenKind != MainMap or bot.minutes > MorningIdentityUntilMinutes:
     return
   var bestDistance = MorningIdentityRadius * MorningIdentityRadius + 1
   for i, house in bot.resources.houses:
@@ -1474,7 +1381,7 @@ proc anyGardenMarkers(bot: Bot): bool =
 proc nearbyMarkedGarden(bot: Bot): int =
   ## Returns a close marked garden that can be picked up now.
   result = -1
-  if bot.mapKind != MapMain:
+  if bot.screenKind != MainMap:
     return
   var bestDistance = CollectActionRadius * CollectActionRadius + 1
   for i, rect in bot.resources.gardens:
@@ -1532,9 +1439,9 @@ proc shouldGather(bot: Bot): bool =
 proc analyze(bot: Bot) =
   ## Rebuilds high-level bot state from decoded objects.
   bot.updateClock()
-  bot.updateMapKind()
+  bot.updateScreenKind()
   bot.updateSelf()
-  if bot.mapKind == MapHome and bot.currentHouse == UnknownHouse and
+  if bot.screenKind == HomeMap and bot.currentHouse == UnknownHouse and
       bot.playerName.len > 0:
     bot.currentHouse = bot.homeIndex
 
@@ -1550,10 +1457,10 @@ proc homeIndexFromName(name: string): int =
   except ValueError:
     result = 0
 
-proc initBot(name: string, slot: int, decodeVisualSprites = false): Bot =
+proc initBot(name: string, slot: int, soul: string): Bot =
   ## Builds a new talking Villager bot state.
   result = Bot()
-  result.decodeVisualSprites = decodeVisualSprites
+  result.soulTemplate = soul.strip()
   result.name =
     if name.len > 0:
       name
@@ -1572,9 +1479,9 @@ proc initBot(name: string, slot: int, decodeVisualSprites = false): Bot =
       ""
   result.soulInstructions =
     if result.playerName.len > 0:
-      result.playerName.loadSoulInstructions()
+      result.loadSoulInstructions(result.playerName)
     else:
-      DefaultName.loadSoulInstructions()
+      result.loadSoulInstructions(DefaultName)
   result.resources = loadBotResources()
   result.currentHouse =
     if result.playerName.len > 0:
@@ -1584,7 +1491,7 @@ proc initBot(name: string, slot: int, decodeVisualSprites = false): Bot =
   result.pendingHouse = UnknownHouse
   result.minutes = DayStartMinutes
   result.selfIndex = -1
-  result.goal = Goal(kind: GoalIdle, mapKind: MapUnknown)
+  result.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
   result.currentGarden = -1
   result.partyHouse = UnknownHouse
   result.searchHouse = UnknownHouse
@@ -1600,8 +1507,8 @@ proc initBot(name: string, slot: int, decodeVisualSprites = false): Bot =
 
 proc gardenGoal(bot: Bot): Goal =
   ## Returns a goal for the nearest garden that may still have food.
-  result = Goal(kind: GoalIdle, mapKind: MapMain)
-  if bot.mapKind != MapMain or bot.mainNav == nil:
+  result = Goal(kind: GoalIdle, screenKind: MainMap)
+  if bot.screenKind != MainMap or bot.mainNav == nil:
     return
   if bot.gardenChecked.len != bot.resources.gardens.len:
     bot.resetGardenPlan()
@@ -1612,7 +1519,7 @@ proc gardenGoal(bot: Bot): Goal =
     bot.currentGarden = nearbyGarden
     return Goal(
       kind: GoalCollect,
-      mapKind: MapMain,
+      screenKind: MainMap,
       x: target.x,
       y: target.y,
       gardenIndex: nearbyGarden,
@@ -1631,7 +1538,7 @@ proc gardenGoal(bot: Bot): Goal =
       let target = rect.center()
       return Goal(
         kind: GoalCollect,
-        mapKind: MapMain,
+        screenKind: MainMap,
         x: target.x,
         y: target.y,
         gardenIndex: bot.currentGarden,
@@ -1651,7 +1558,7 @@ proc gardenGoal(bot: Bot): Goal =
     let target = rect.center()
     return Goal(
         kind: GoalCollect,
-        mapKind: MapMain,
+        screenKind: MainMap,
         x: target.x,
         y: target.y,
         gardenIndex: bot.currentGarden,
@@ -1699,7 +1606,7 @@ proc gardenGoal(bot: Bot): Goal =
   let target = bot.resources.gardens[bestIndex].center()
   result = Goal(
     kind: GoalCollect,
-    mapKind: MapMain,
+    screenKind: MainMap,
     x: target.x,
     y: target.y,
     gardenIndex: bestIndex,
@@ -1719,7 +1626,7 @@ proc goalForRect(
     target = nav.nearestPointInside(rect, target.x, target.y)
   Goal(
     kind: kind,
-    mapKind: bot.mapKind,
+    screenKind: bot.screenKind,
     x: target.x,
     y: target.y,
     houseIndex: houseIndex,
@@ -1729,14 +1636,14 @@ proc goalForRect(
 proc exitGoal(bot: Bot): Goal =
   ## Returns a goal for leaving the current home map.
   if not bot.resources.hasExit:
-    return Goal(kind: GoalIdle, mapKind: bot.mapKind)
+    return Goal(kind: GoalIdle, screenKind: bot.screenKind)
   bot.goalForRect(GoalExitHouse, bot.resources.exit, UnknownHouse)
 
 proc enterHouseGoal(bot: Bot, houseIndex: int): Goal =
   ## Returns a goal for entering one main-map house.
   if houseIndex < 0 or houseIndex >= bot.resources.houseValid.len or
       not bot.resources.houseValid[houseIndex]:
-    return Goal(kind: GoalIdle, mapKind: bot.mapKind)
+    return Goal(kind: GoalIdle, screenKind: bot.screenKind)
   bot.goalForRect(GoalEnterHouse, bot.resources.houses[houseIndex], houseIndex)
 
 proc playerNearHouse(
@@ -1821,7 +1728,7 @@ proc socialRandom(bot: Bot, salt, limit: int): int =
   value = value * 1103515245'u32 + uint32(bot.dayIndex + 1)
   value = value xor (uint32(max(0, salt)) * 2654435761'u32)
   value = value xor (value shr 16)
-  int(value mod uint32(limit))
+  return int(value mod uint32(limit))
 
 proc hostWaitDuration(bot: Bot): int =
   ## Returns how long this bot should try hosting today.
@@ -1843,7 +1750,7 @@ proc hostWaitDuration(bot: Bot): int =
   else:
     base = 40
     jitter = 45
-  min(MaxHostWaitMinutes, base + bot.socialRandom(31 + food, jitter + 1))
+  return min(MaxHostWaitMinutes, base + bot.socialRandom(31 + food, jitter + 1))
 
 proc ensureHostWait(bot: Bot) =
   ## Initializes this day's host patience window.
@@ -1875,7 +1782,7 @@ proc shouldHostOwnHouse(bot: Bot): bool =
   if bot.minutes < bot.hostUntilMinutes:
     bot.partyHouse = bot.homeIndex
     return true
-  false
+  return false
 
 proc requiredPartyCrowd(bot: Bot): int =
   ## Returns the crowd size this bot prefers before joining a party.
@@ -1934,7 +1841,7 @@ proc acceptsPartyCrowd(bot: Bot, houseIndex, crowd: int): bool =
     chance -= 10
   chance = chance.clamp(0, 100)
   let salt = 1000 + houseIndex * 17 + bot.minutes div 15
-  bot.socialRandom(salt, 100) < chance
+  return bot.socialRandom(salt, 100) < chance
 
 proc visiblePartyScore(bot: Bot, houseIndex, crowd: int): int =
   ## Returns a score for a visible candidate dinner house.
@@ -1973,7 +1880,6 @@ proc scoutingHouseIndex(bot: Bot): int =
     if bot.resources.houseValid[houseIndex]:
       result = houseIndex
       break
-  bot.searchHouse = result
 
 proc partyHouseIndex(bot: Bot): int =
   ## Returns the house this bot currently wants for dinner.
@@ -1991,7 +1897,7 @@ proc desiredHouseGatherPoint(bot: Bot, house: Rect): Point =
   let
     slot = bot.homeIndex mod DoorGatherSlots
     offset = (slot - DoorGatherSlots div 2) * DoorGatherSpacing
-  Point(
+  return Point(
     x: house.x + house.w div 2 + offset,
     y: house.y + house.h + 4
   )
@@ -2017,14 +1923,14 @@ proc houseGatherPoint(bot: Bot, houseIndex: int): Point =
 
 proc gatherAtHouseGoal(bot: Bot, houseIndex: int): Goal =
   ## Returns a goal that keeps the bot visible outside one house.
-  if bot.mapKind == MapHome:
+  if bot.screenKind == HomeMap:
     return bot.exitGoal()
-  if bot.mapKind != MapMain:
-    return Goal(kind: GoalIdle, mapKind: bot.mapKind)
+  if bot.screenKind != MainMap:
+    return Goal(kind: GoalIdle, screenKind: bot.screenKind)
   let point = bot.houseGatherPoint(houseIndex)
   Goal(
     kind: GoalGatherHouse,
-    mapKind: MapMain,
+    screenKind: MainMap,
     x: point.x,
     y: point.y,
     houseIndex: houseIndex,
@@ -2037,10 +1943,10 @@ proc gatherOwnHouseGoal(bot: Bot): Goal =
 
 proc dinnerGatherGoal(bot: Bot): Goal =
   ## Returns the outside-house goal for pre-dinner social planning.
-  if bot.mapKind == MapHome:
+  if bot.screenKind == HomeMap:
     return bot.exitGoal()
-  if bot.mapKind != MapMain:
-    return Goal(kind: GoalIdle, mapKind: bot.mapKind)
+  if bot.screenKind != MainMap:
+    return Goal(kind: GoalIdle, screenKind: bot.screenKind)
   if bot.shouldHostOwnHouse():
     return bot.gatherOwnHouseGoal()
   let partyHouse = bot.bestVisiblePartyHouse()
@@ -2056,7 +1962,7 @@ proc firstDinerGoal(bot: Bot): Goal =
   ## Returns a small idle movement goal away from the home exit.
   Goal(
     kind: GoalMove,
-    mapKind: bot.mapKind,
+    screenKind: bot.screenKind,
     x: bot.playerFootX(),
     y: bot.playerFootY(),
     houseIndex: bot.currentHouse,
@@ -2066,23 +1972,23 @@ proc firstDinerGoal(bot: Bot): Goal =
 proc partyGoal(bot: Bot): Goal =
   ## Returns the goal that gets the bot to the shared dinner house.
   let houseIndex = bot.partyHouseIndex()
-  if bot.mapKind == MapHome:
+  if bot.screenKind == HomeMap:
     if bot.currentHouse == houseIndex:
       return bot.firstDinerGoal()
     return bot.exitGoal()
-  if bot.mapKind == MapMain:
+  if bot.screenKind == MainMap:
     return bot.enterHouseGoal(houseIndex)
-  Goal(kind: GoalIdle, mapKind: bot.mapKind)
+  Goal(kind: GoalIdle, screenKind: bot.screenKind)
 
 proc ownHomeGoal(bot: Bot): Goal =
   ## Returns the goal that gets the bot into its own house.
-  if bot.mapKind == MapHome:
+  if bot.screenKind == HomeMap:
     if bot.currentHouse == bot.homeIndex:
       return bot.firstDinerGoal()
     return bot.exitGoal()
-  if bot.mapKind == MapMain:
+  if bot.screenKind == MainMap:
     return bot.enterHouseGoal(bot.homeIndex)
-  Goal(kind: GoalIdle, mapKind: bot.mapKind)
+  Goal(kind: GoalIdle, screenKind: bot.screenKind)
 
 proc visibleOtherPlayerCount(bot: Bot): int =
   ## Returns how many other player sprites are visible now.
@@ -2119,20 +2025,20 @@ proc standNextToPersonGoal(bot: Bot, name: string): Goal =
     let objectState = bot.objects[PlayerObjectBase + playerIndex]
     return Goal(
       kind: GoalStandPerson,
-      mapKind: bot.mapKind,
+      screenKind: bot.screenKind,
       x: bot.objectFootX(objectState),
       y: bot.objectFootY(objectState),
       houseIndex: bot.visiblePlayerHome(playerIndex),
       gardenIndex: -1,
       targetName: name
     )
-  if bot.mapKind == MapHome:
+  if bot.screenKind == HomeMap:
     return bot.exitGoal()
-  if bot.mapKind == MapMain:
+  if bot.screenKind == MainMap:
     let houseIndex = name.houseIndexForPlayerName()
     if houseIndex >= 0:
       return bot.gatherAtHouseGoal(houseIndex)
-  Goal(kind: GoalIdle, mapKind: bot.mapKind)
+  Goal(kind: GoalIdle, screenKind: bot.screenKind)
 
 proc decisionHouse(bot: Bot, decision: LlmDecision): int =
   ## Returns the best house target for one LLM decision.
@@ -2214,7 +2120,7 @@ proc timePhase(bot: Bot): int =
     return 4
   if bot.minutes < DayEndMinutes:
     return 5
-  6
+  return 6
 
 proc foodBand(bot: Bot): int =
   ## Returns a coarse inventory band for interrupt detection.
@@ -2223,7 +2129,7 @@ proc foodBand(bot: Bot): int =
     return 0
   if food >= HighFoodForInvites:
     return 2
-  1
+  return 1
 
 proc commitmentHasCompany(bot: Bot): bool =
   ## Returns true while a party commitment should still be honored.
@@ -2232,20 +2138,20 @@ proc commitmentHasCompany(bot: Bot): bool =
     return false
   if bot.hostCommitted and houseIndex == bot.homeIndex:
     return true
-  if bot.mapKind == MapHome and bot.currentHouse == houseIndex:
+  if bot.screenKind == HomeMap and bot.currentHouse == houseIndex:
     return bot.visibleOtherPlayerCount() > 0
-  true
+  return true
 
-proc mapNameForPrompt(kind: MapKind): string =
-  ## Returns a readable map name for the LLM prompt.
+proc screenNameForPrompt(kind: ScreenKind): string =
+  ## Returns a readable screen name for the LLM prompt.
   case kind
-  of MapUnknown:
+  of UnknownScreen:
     "unknown"
-  of MapMain:
+  of MainMap:
     "world"
-  of MapHome:
+  of HomeMap:
     "home"
-  of MapOverlay:
+  of OverlayScreen:
     "overlay"
 
 proc visiblePlayersText(bot: Bot): string =
@@ -2370,7 +2276,7 @@ proc llmUserPrompt(bot: Bot): string =
   result =
     "Current Heartleaf state:\n" &
     "timeMinutes=" & $bot.minutes & "\n" &
-    "map=" & bot.mapKind.mapNameForPrompt() & "\n" &
+    "map=" & bot.screenKind.screenNameForPrompt() & "\n" &
     "homeOwner=" & bot.homeIndex.playerNameForHouse() & "\n" &
     "homeHouseIndex=" & $(bot.homeIndex + 1) & "\n" &
     "currentHouseOwner=" & currentHouseOwner & "\n" &
@@ -2600,7 +2506,7 @@ proc applyDecision(bot: Bot, decision: LlmDecision) =
   bot.decisionChatSignature = bot.visibleChatsSignature()
   bot.decisionCrowdSignature = bot.houseCrowdsSignature()
   bot.path.setLen(0)
-  bot.goal = Goal(kind: GoalIdle, mapKind: MapUnknown)
+  bot.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
   bot.log(
     "llm action " & nextDecision.action.actionName() &
     " house=" & $(nextDecision.houseIndex + 1) &
@@ -2666,7 +2572,7 @@ proc startLlmDecision(bot: Bot): bool =
     " region=" & bedrockRegion() &
     " latency=" & latencyName
   )
-  true
+  return true
 
 proc pollLlmDecision(bot: Bot): bool =
   ## Polls and applies a completed LLM request.
@@ -2696,7 +2602,7 @@ proc pollLlmDecision(bot: Bot): bool =
         TalkingVillagerError,
         "Unknown Bedrock request failed: " & answer.error
       )
-  true
+  return true
 
 proc decisionGoal(bot: Bot, decision: LlmDecision): Goal =
   ## Converts one LLM decision into a deterministic navigation goal.
@@ -2706,19 +2612,19 @@ proc decisionGoal(bot: Bot, decision: LlmDecision): Goal =
       return bot.partyGoal()
     if bot.minutes >= HouseEnterMinutes:
       return bot.dinnerGatherGoal()
-    if bot.mapKind == MapHome:
+    if bot.screenKind == HomeMap:
       return bot.exitGoal()
-    if bot.mapKind == MapMain:
+    if bot.screenKind == MainMap:
       let garden = bot.gardenGoal()
       if garden.kind != GoalIdle:
         return garden
-    Goal(kind: GoalIdle, mapKind: bot.mapKind)
+    Goal(kind: GoalIdle, screenKind: bot.screenKind)
   of LlmFindPerson, LlmStandNextToPerson, LlmSayToPerson:
     bot.standNextToPersonGoal(decision.targetName)
   of LlmFindHouse, LlmStandAtHouseGarden:
     let houseIndex = bot.decisionHouse(decision)
     if houseIndex < 0:
-      return Goal(kind: GoalIdle, mapKind: bot.mapKind)
+      return Goal(kind: GoalIdle, screenKind: bot.screenKind)
     bot.gatherAtHouseGoal(houseIndex)
   of LlmGoHome:
     bot.ownHomeGoal()
@@ -2726,24 +2632,24 @@ proc decisionGoal(bot: Bot, decision: LlmDecision): Goal =
     let houseIndex = bot.decisionHouse(decision)
     if houseIndex < 0:
       return bot.ownHomeGoal()
-    if bot.mapKind == MapHome:
+    if bot.screenKind == HomeMap:
       if bot.currentHouse == houseIndex:
         return bot.firstDinerGoal()
       return bot.exitGoal()
-    if bot.mapKind == MapMain:
+    if bot.screenKind == MainMap:
       return bot.enterHouseGoal(houseIndex)
-    Goal(kind: GoalIdle, mapKind: bot.mapKind)
+    Goal(kind: GoalIdle, screenKind: bot.screenKind)
   of LlmInvalid:
-    Goal(kind: GoalIdle, mapKind: bot.mapKind)
+    Goal(kind: GoalIdle, screenKind: bot.screenKind)
 
 proc chooseGoal(bot: Bot): Goal =
   ## Chooses the current LLM-backed Heartleaf goal.
   if not bot.localized or bot.navForCurrentMap() == nil:
-    return Goal(kind: GoalIdle, mapKind: bot.mapKind)
-  if bot.mapKind == MapOverlay:
-    return Goal(kind: GoalIdle, mapKind: bot.mapKind)
+    return Goal(kind: GoalIdle, screenKind: bot.screenKind)
+  if bot.screenKind == OverlayScreen:
+    return Goal(kind: GoalIdle, screenKind: bot.screenKind)
   if not bot.hasDecision:
-    return Goal(kind: GoalIdle, mapKind: bot.mapKind)
+    return Goal(kind: GoalIdle, screenKind: bot.screenKind)
   bot.decisionGoal(bot.decision)
 
 proc goalReached(bot: Bot, goal: Goal): bool =
@@ -2810,7 +2716,7 @@ proc interactionMask(bot: Bot, goal: Goal): uint8 =
     return 0
   if not bot.goalReached(goal):
     return 0
-  case goal.kind
+  return case goal.kind
   of GoalCollect:
     bot.attackCooldown = 8
     bot.lastCollectTick = bot.frameTick
@@ -2835,7 +2741,7 @@ proc decisionComplete(bot: Bot): bool =
   ## Returns true when the current LLM action has completed.
   if not bot.hasDecision:
     return true
-  case bot.decision.action
+  return case bot.decision.action
   of LlmKeepGatheringPlants:
     if not bot.shouldGather():
       return true
@@ -2847,10 +2753,10 @@ proc decisionComplete(bot: Bot): bool =
   of LlmFindHouse, LlmStandAtHouseGarden:
     bot.goal.kind == GoalGatherHouse and bot.goalReached(bot.goal)
   of LlmGoHome:
-    bot.mapKind == MapHome and bot.currentHouse == bot.homeIndex
+    bot.screenKind == HomeMap and bot.currentHouse == bot.homeIndex
   of LlmGoToParty:
     let houseIndex = bot.decisionHouse(bot.decision)
-    bot.mapKind == MapHome and bot.currentHouse == houseIndex
+    bot.screenKind == HomeMap and bot.currentHouse == houseIndex
   of LlmInvalid:
     true
 
@@ -2877,7 +2783,7 @@ proc decisionInterrupted(bot: Bot): bool =
     return false
   if bot.decision.action == LlmKeepGatheringPlants:
     return bot.minutes >= LatePartySearchMinutes and crowdSignature != "none"
-  true
+  return true
 
 proc needsFreshDecision(bot: Bot): bool =
   ## Returns true when the bot should ask the LLM again.
@@ -3119,16 +3025,16 @@ proc inputMaskSummary(mask: uint8): string =
     return "none"
   parts.join("+")
 
-proc mapKindName(kind: MapKind): string =
-  ## Returns a readable map-kind label.
+proc screenKindName(kind: ScreenKind): string =
+  ## Returns a readable screen-kind label.
   case kind
-  of MapUnknown:
+  of UnknownScreen:
     "unknown"
-  of MapMain:
+  of MainMap:
     "world"
-  of MapHome:
+  of HomeMap:
     "home"
-  of MapOverlay:
+  of OverlayScreen:
     "overlay"
 
 proc socialPlanName(bot: Bot): string =
@@ -3158,697 +3064,6 @@ proc markedGardenCount(bot: Bot): int =
   for i in 0 ..< bot.resources.gardens.len:
     if bot.gardenHasMarker(i):
       inc result
-
-when defined(gui):
-  proc drawOutline(
-    sk: Silky,
-    pos,
-    size: Vec2,
-    color: ColorRGBX,
-    thickness = 1.0'f
-  ) =
-    ## Draws an unfilled rectangle.
-    sk.drawRect(pos, vec2(size.x, thickness), color)
-    sk.drawRect(
-      vec2(pos.x, pos.y + size.y - thickness),
-      vec2(size.x, thickness),
-      color
-    )
-    sk.drawRect(pos, vec2(thickness, size.y), color)
-    sk.drawRect(
-      vec2(pos.x + size.x - thickness, pos.y),
-      vec2(thickness, size.y),
-      color
-    )
-
-  proc drawLine(sk: Silky, a, b: Vec2, color: ColorRGBX) =
-    ## Draws a simple pixel-like debug line.
-    let
-      dx = b.x - a.x
-      dy = b.y - a.y
-      steps = max(1, int(max(abs(dx), abs(dy)) / 4.0'f))
-    for i in 0 .. steps:
-      let t = i.float32 / steps.float32
-      sk.drawRect(
-        vec2(a.x + dx * t - 1.0'f, a.y + dy * t - 1.0'f),
-        vec2(3, 3),
-        color
-      )
-
-  proc colorFromSpritePixel(sprite: SpriteInfo, offset: int): ColorRGBX =
-    ## Converts one decoded RGBA sprite pixel to a viewer color.
-    rgbx(
-      sprite.pixels[offset],
-      sprite.pixels[offset + 1],
-      sprite.pixels[offset + 2],
-      sprite.pixels[offset + 3]
-    )
-
-  proc compareDrawItems(a, b: DrawItem): int =
-    ## Orders sprite protocol objects by render layer and stable id.
-    result = cmp(a.layer, b.layer)
-    if result != 0:
-      return
-    result = cmp(a.z, b.z)
-    if result != 0:
-      return
-    result = cmp(a.y, b.y)
-    if result != 0:
-      return
-    result = cmp(a.id, b.id)
-
-  proc drawSpriteAt(
-    sk: Silky,
-    sprite: SpriteInfo,
-    pos: Vec2,
-    scale: float32
-  ) =
-    ## Draws one decoded sprite at an explicit viewer position.
-    if sprite == nil or sprite.pixels.len != sprite.width * sprite.height * 4:
-      return
-    for py in 0 ..< sprite.height:
-      for px in 0 ..< sprite.width:
-        let offset = (py * sprite.width + px) * 4
-        if sprite.pixels[offset + 3] == 0:
-          continue
-        sk.drawRect(
-          vec2(
-            pos.x + px.float32 * scale,
-            pos.y + py.float32 * scale
-          ),
-          vec2(scale, scale),
-          sprite.colorFromSpritePixel(offset)
-        )
-
-  proc drawSpriteObject(
-    sk: Silky,
-    sprite: SpriteInfo,
-    objectState: ObjectState,
-    origin: Vec2,
-    scale: float32
-  ) =
-    ## Draws one decoded sprite protocol object into the frame panel.
-    if sprite == nil or sprite.pixels.len != sprite.width * sprite.height * 4:
-      return
-    let
-      startX = max(0, -objectState.x)
-      startY = max(0, -objectState.y)
-      stopX = min(sprite.width, ViewportWidth - objectState.x)
-      stopY = min(sprite.height, ViewportHeight - objectState.y)
-    if startX >= stopX or startY >= stopY:
-      return
-    for py in startY ..< stopY:
-      for px in startX ..< stopX:
-        let offset = (py * sprite.width + px) * 4
-        if sprite.pixels[offset + 3] == 0:
-          continue
-        sk.drawRect(
-          vec2(
-            origin.x + (objectState.x + px).float32 * scale,
-            origin.y + (objectState.y + py).float32 * scale
-          ),
-          vec2(scale, scale),
-          sprite.colorFromSpritePixel(offset)
-        )
-
-  proc drawInventoryPanel(
-    sk: Silky,
-    bot: Bot,
-    pos,
-    size: Vec2
-  ) =
-    ## Draws the visible bot inventory along the viewer bottom edge.
-    sk.drawRect(pos, size, ViewerPanel)
-    var
-      x = pos.x + ViewerInventoryGap
-      drewAny = false
-    let y = pos.y + (size.y - FoodSpriteSize.float32) / 2.0'f
-    for foodIndex in 0 ..< FoodVeggieSlots:
-      let objectId = InventoryObjectBase + foodIndex
-      if objectId >= bot.objects.len:
-        continue
-      let objectState = bot.objects[objectId]
-      if not objectState.present:
-        continue
-      let icon = bot.spriteInfo(objectState.spriteId)
-      if icon == nil or icon.pixels.len == 0:
-        continue
-      if x + FoodSpriteSize.float32 > pos.x + size.x - ViewerInventoryGap:
-        break
-      let iconPos = vec2(x, y)
-      sk.drawSpriteAt(icon, iconPos, ViewerInventoryScale)
-      let countObjectId = InventoryCountObjectBase + foodIndex
-      if countObjectId < bot.objects.len:
-        let countObject = bot.objects[countObjectId]
-        if countObject.present:
-          let countSprite = bot.spriteInfo(countObject.spriteId)
-          if countSprite != nil and countSprite.pixels.len > 0:
-            sk.drawSpriteAt(
-              countSprite,
-              vec2(
-                iconPos.x + FoodSpriteSize.float32 - countSprite.width.float32,
-                iconPos.y + FoodSpriteSize.float32 - countSprite.height.float32
-              ),
-              ViewerInventoryScale
-            )
-      drewAny = true
-      x += FoodSpriteSize.float32 + ViewerInventoryGap
-    if not drewAny:
-      discard sk.drawText(
-        "Default",
-        "inventory empty",
-        pos + vec2(ViewerInventoryGap, ViewerInventoryGap),
-        ViewerMutedText
-      )
-
-  proc drawSpriteObjects(
-    sk: Silky,
-    bot: Bot,
-    origin: Vec2,
-    scale: float32
-  ) =
-    ## Draws decoded non-inventory sprite protocol objects in visible order.
-    var drawItems: seq[DrawItem]
-    for objectId, objectState in bot.objects:
-      if not objectState.present:
-        continue
-      if objectId >= InventoryObjectBase and objectId < ClockObjectBase:
-        continue
-      let sprite = bot.spriteInfo(objectState.spriteId)
-      if sprite == nil or sprite.pixels.len == 0:
-        continue
-      drawItems.add(DrawItem(
-        layer: objectState.layer,
-        z: objectState.z,
-        y: objectState.y,
-        id: objectId
-      ))
-    drawItems.sort(compareDrawItems)
-    for item in drawItems:
-      let objectState = bot.objects[item.id]
-      sk.drawSpriteObject(
-        bot.spriteInfo(objectState.spriteId),
-        objectState,
-        origin,
-        scale
-      )
-
-  proc rectVisible(rect: Rect): bool =
-    ## Returns true when a world rectangle overlaps the current viewport.
-    rect.x + rect.w >= 0 and rect.y + rect.h >= 0 and
-      rect.x < ViewportWidth and rect.y < ViewportHeight
-
-  proc screenRect(bot: Bot, rect: Rect): Rect =
-    ## Converts a world rectangle to current screen coordinates.
-    Rect(
-      x: rect.x - bot.cameraX,
-      y: rect.y - bot.cameraY,
-      w: rect.w,
-      h: rect.h
-    )
-
-  proc drawScreenRect(
-    sk: Silky,
-    rect: Rect,
-    origin: Vec2,
-    scale: float32,
-    color: ColorRGBX,
-    thickness = 1.0'f
-  ) =
-    ## Draws one screen-space rectangle if it overlaps the viewport.
-    if not rect.rectVisible():
-      return
-    sk.drawOutline(
-      vec2(
-        origin.x + rect.x.float32 * scale,
-        origin.y + rect.y.float32 * scale
-      ),
-      vec2(rect.w.float32 * scale, rect.h.float32 * scale),
-      color,
-      thickness
-    )
-
-  proc drawFramePath(sk: Silky, bot: Bot, origin: Vec2, scale: float32) =
-    ## Draws the current path over the semantic screen view.
-    if not bot.localized or bot.path.len == 0:
-      return
-    var previous = vec2(
-      origin.x + (bot.playerFootX() - bot.cameraX).float32 * scale,
-      origin.y + (bot.playerFootY() - bot.cameraY).float32 * scale
-    )
-    for i in countup(0, bot.path.high, 4):
-      let current = vec2(
-        origin.x + (bot.path[i].x - bot.cameraX).float32 * scale,
-        origin.y + (bot.path[i].y - bot.cameraY).float32 * scale
-      )
-      sk.drawLine(previous, current, ViewerPath)
-      previous = current
-
-  proc drawFrameView(sk: Silky, bot: Bot, x, y: float32) =
-    ## Draws a semantic 320x200 view from the latest sprite state.
-    let
-      scale = ViewerFrameScale
-      origin = vec2(x, y)
-    sk.drawRect(
-      origin,
-      vec2(ViewportWidth.float32 * scale, ViewportHeight.float32 * scale),
-      ViewerPanelAlt
-    )
-    sk.drawSpriteObjects(bot, origin, scale)
-    if bot.mapKind == MapMain:
-      for rect in bot.resources.gardens:
-        sk.drawScreenRect(
-          bot.screenRect(rect),
-          origin,
-          scale,
-          ViewerGarden
-        )
-      for i, rect in bot.resources.houses:
-        if bot.resources.houseValid[i]:
-          sk.drawScreenRect(
-            bot.screenRect(rect),
-            origin,
-            scale,
-            ViewerHouse
-          )
-    elif bot.mapKind == MapHome and bot.resources.hasExit:
-      sk.drawScreenRect(
-        bot.screenRect(bot.resources.exit),
-        origin,
-        scale,
-        ViewerExit
-      )
-
-    sk.drawFramePath(bot, origin, scale)
-    if bot.goal.kind != GoalIdle:
-      sk.drawScreenRect(
-        bot.screenRect(Rect(x: bot.goal.x - 3, y: bot.goal.y - 3, w: 6, h: 6)),
-        origin,
-        scale,
-        ViewerGoal,
-        2
-      )
-    if bot.hasTarget:
-      sk.drawScreenRect(
-        bot.screenRect(
-          Rect(x: bot.target.x - 2, y: bot.target.y - 2, w: 5, h: 5)
-        ),
-        origin,
-        scale,
-        ViewerTarget,
-        2
-      )
-
-    for objectId, objectState in bot.objects:
-      if not objectState.present:
-        continue
-      if objectId >= PlayerObjectBase and objectId < NameObjectBase:
-        let
-          playerIndex = objectId - PlayerObjectBase
-          color =
-            if playerIndex == bot.selfIndex:
-              ViewerPlayer
-            else:
-              ViewerOther
-        sk.drawOutline(
-          vec2(
-            origin.x + objectState.x.float32 * scale,
-            origin.y + objectState.y.float32 * scale
-          ),
-          vec2(GnomeSpriteSize.float32 * scale, GnomeSpriteSize.float32 * scale),
-          color,
-          2
-        )
-        sk.drawRect(
-          vec2(
-            origin.x + (objectState.x + NavPointOffsetX).float32 * scale - 2,
-            origin.y + (objectState.y + NavPointOffsetY).float32 * scale - 2
-          ),
-          vec2(5, 5),
-          color
-        )
-      elif objectId >= GardenObjectBase and objectId < InventoryObjectBase:
-        sk.drawRect(
-          vec2(
-            origin.x + objectState.x.float32 * scale - 3,
-            origin.y + objectState.y.float32 * scale - 3
-          ),
-          vec2(7, 7),
-          ViewerTarget
-        )
-
-  proc activeNav(bot: Bot): JumpPointSpace =
-    ## Returns the navigation space currently being debugged.
-    case bot.mapKind
-    of MapMain:
-      bot.mainNav
-    of MapHome:
-      bot.homeNav
-    else:
-      if bot.mainNav != nil:
-        bot.mainNav
-      else:
-        bot.homeNav
-
-  proc navScale(nav: JumpPointSpace): float32 =
-    ## Returns a map scale that fits the viewer map panel.
-    if nav == nil or nav.path.width <= 0 or nav.path.height <= 0:
-      return 1.0'f
-    min(
-      ViewerMapWidth / nav.path.width.float32,
-      ViewerMapHeight / nav.path.height.float32
-    )
-
-  proc navSampleStep(scale: float32): int =
-    ## Returns a walkability sampling step for the map panel.
-    if scale < 0.25'f:
-      8
-    elif scale < 0.5'f:
-      4
-    elif scale < 1.0'f:
-      2
-    else:
-      1
-
-  proc drawMapRect(
-    sk: Silky,
-    rect: Rect,
-    origin: Vec2,
-    scale: float32,
-    color: ColorRGBX,
-    thickness = 1.0'f
-  ) =
-    ## Draws one map-space rectangle.
-    sk.drawOutline(
-      vec2(origin.x + rect.x.float32 * scale, origin.y + rect.y.float32 * scale),
-      vec2(rect.w.float32 * scale, rect.h.float32 * scale),
-      color,
-      thickness
-    )
-
-  proc drawMapSquare(
-    sk: Silky,
-    rect: Rect,
-    origin: Vec2,
-    scale: float32,
-    color: ColorRGBX,
-    filled: bool
-  ) =
-    ## Draws one square marker centered on a map-space rectangle.
-    let
-      size = max(6.0'f, 8.0'f * scale)
-      cx = origin.x + (rect.x + rect.w div 2).float32 * scale
-      cy = origin.y + (rect.y + rect.h div 2).float32 * scale
-      pos = vec2(cx - size / 2.0'f, cy - size / 2.0'f)
-      square = vec2(size, size)
-    if filled:
-      sk.drawRect(pos, square, color)
-    else:
-      sk.drawOutline(pos, square, color)
-
-  proc drawMapPath(sk: Silky, bot: Bot, origin: Vec2, scale: float32) =
-    ## Draws the current A-star path over the map panel.
-    if not bot.localized or bot.path.len == 0:
-      return
-    var previous = vec2(
-      origin.x + bot.playerFootX().float32 * scale,
-      origin.y + bot.playerFootY().float32 * scale
-    )
-    for i in countup(0, bot.path.high, 4):
-      let current = vec2(
-        origin.x + bot.path[i].x.float32 * scale,
-        origin.y + bot.path[i].y.float32 * scale
-      )
-      sk.drawLine(previous, current, ViewerPath)
-      previous = current
-    if bot.goal.kind != GoalIdle:
-      sk.drawLine(
-        previous,
-        vec2(
-          origin.x + bot.goal.x.float32 * scale,
-          origin.y + bot.goal.y.float32 * scale
-        ),
-        ViewerPath
-      )
-
-  proc drawMapView(sk: Silky, bot: Bot, x, y: float32) =
-    ## Draws walkability, resources, actors, viewport, and path state.
-    let
-      nav = bot.activeNav()
-      scale = nav.navScale()
-      origin = vec2(x, y)
-    sk.drawRect(origin, vec2(ViewerMapWidth, ViewerMapHeight), ViewerPanelAlt)
-    if nav == nil:
-      discard sk.drawText("Default", "waiting for walkability", origin,
-        ViewerMutedText)
-      return
-
-    let step = navSampleStep(scale)
-    for my in countup(0, nav.path.height - 1, step):
-      for mx in countup(0, nav.path.width - 1, step):
-        let color =
-          if nav.path.passable(mx, my):
-            ViewerWalk
-          else:
-            ViewerWall
-        sk.drawRect(
-          vec2(origin.x + mx.float32 * scale, origin.y + my.float32 * scale),
-          vec2(
-            max(1.0'f, step.float32 * scale),
-            max(1.0'f, step.float32 * scale)
-          ),
-          color
-        )
-
-    if bot.mapKind == MapMain:
-      for i, rect in bot.resources.gardens:
-        let checked =
-          i < bot.gardenChecked.len and bot.gardenChecked[i]
-        sk.drawMapSquare(
-          rect,
-          origin,
-          scale,
-          ViewerGarden,
-          not checked
-        )
-      for i, rect in bot.resources.houses:
-        if bot.resources.houseValid[i]:
-          sk.drawMapRect(rect, origin, scale, ViewerHouse)
-    elif bot.mapKind == MapHome and bot.resources.hasExit:
-      sk.drawMapRect(bot.resources.exit, origin, scale, ViewerExit, 2)
-
-    if bot.localized:
-      sk.drawMapRect(
-        Rect(x: bot.cameraX, y: bot.cameraY, w: ViewportWidth, h: ViewportHeight),
-        origin,
-        scale,
-        ViewerViewport
-      )
-    sk.drawMapPath(bot, origin, scale)
-    if bot.goal.kind != GoalIdle:
-      sk.drawRect(
-        vec2(
-          origin.x + bot.goal.x.float32 * scale - 4,
-          origin.y + bot.goal.y.float32 * scale - 4
-        ),
-        vec2(9, 9),
-        ViewerGoal
-      )
-    if bot.hasTarget:
-      sk.drawRect(
-        vec2(
-          origin.x + bot.target.x.float32 * scale - 3,
-          origin.y + bot.target.y.float32 * scale - 3
-        ),
-        vec2(7, 7),
-        ViewerTarget
-      )
-
-    for objectId, objectState in bot.objects:
-      if not objectState.present:
-        continue
-      if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-        continue
-      let
-        playerIndex = objectId - PlayerObjectBase
-        color =
-          if playerIndex == bot.selfIndex:
-            ViewerPlayer
-          else:
-            ViewerOther
-        worldX = bot.objectFootX(objectState)
-        worldY = bot.objectFootY(objectState)
-      sk.drawRect(
-        vec2(
-          origin.x + worldX.float32 * scale - 3,
-          origin.y + worldY.float32 * scale - 3
-        ),
-        vec2(7, 7),
-        color
-      )
-      let playerName = bot.visiblePlayerName(playerIndex)
-      if playerName.len > 0:
-        discard sk.drawText(
-          "Default",
-          playerName,
-          vec2(
-            origin.x + worldX.float32 * scale + 5,
-            origin.y + worldY.float32 * scale - 8
-          ),
-          ViewerText
-        )
-
-  proc refreshDisplayScale(viewer: ViewerApp) =
-    ## Updates UI scaling after the viewer moves between displays.
-    if viewer.isNil:
-      return
-    let scale = viewer.window.displayScale()
-    if abs(scale - viewer.contentScale) <= 0.001'f:
-      return
-    viewer.contentScale = scale
-    viewer.silky.uiScale = scale
-    let logicalSize = (viewer.window.size.vec2 / scale).ivec2
-    viewer.window.size = logicalSize.scaledWindowSize(scale)
-
-  proc initViewerApp(): ViewerApp =
-    ## Opens the diagnostic viewer window.
-    result = ViewerApp()
-    result.window = newWindow(
-      title = "Heartleaf Talking Villager Viewer",
-      size = ivec2(ViewerWindowWidth, ViewerWindowHeight),
-      style = DecoratedResizable,
-      visible = true
-    )
-    makeContextCurrent(result.window)
-    when not defined(useDirectX):
-      loadExtensions()
-    result.silky = newSilky(result.window, atlasPath())
-    result.contentScale = result.window.displayScale()
-    result.silky.uiScale = result.contentScale
-    result.window.size =
-      ivec2(ViewerWindowWidth, ViewerWindowHeight).scaledWindowSize(
-        result.contentScale
-      )
-    result.window.style = Decorated
-    let viewer = result
-    result.window.onResize = proc() =
-      viewer.refreshDisplayScale()
-
-  proc viewerOpen(viewer: ViewerApp): bool =
-    ## Returns true while the optional viewer should keep running.
-    viewer.isNil or not viewer.window.closeRequested
-
-  proc pumpViewer(
-    viewer: ViewerApp,
-    bot: Bot,
-    connected: bool,
-    url: string
-  ) =
-    ## Pumps window events and draws one bot debugger frame.
-    if viewer.isNil:
-      return
-    pollEvents()
-    viewer.refreshDisplayScale()
-    if viewer.window.buttonPressed[KeyEscape]:
-      viewer.window.closeRequested = true
-    if viewer.window.closeRequested:
-      return
-
-    let
-      frameSize = viewer.window.size
-      logicalSize = frameSize.vec2 / viewer.silky.uiScale
-      framePos = vec2(ViewerMargin, ViewerMargin)
-      mapPos = vec2(
-        framePos.x + ViewportWidth.float32 * ViewerFrameScale + 24,
-        ViewerMargin
-      )
-      infoPos = vec2(
-        ViewerMargin,
-        framePos.y + ViewportHeight.float32 * ViewerFrameScale + 28
-      )
-      inventoryPos = vec2(
-        ViewerMargin,
-        max(
-          infoPos.y + 220.0'f,
-          logicalSize.y - ViewerMargin - ViewerInventoryHeight
-        )
-      )
-      inventorySize = vec2(
-        logicalSize.x - ViewerMargin * 2,
-        ViewerInventoryHeight
-      )
-      infoSize = vec2(
-        logicalSize.x - ViewerMargin * 2,
-        max(120.0'f, inventoryPos.y - infoPos.y - 16.0'f)
-      )
-      sk = viewer.silky
-
-    sk.beginUI(viewer.window, frameSize)
-    sk.clearScreen(ViewerBackground)
-    sk.drawRect(
-      framePos - vec2(8, 8),
-      vec2(
-        ViewportWidth.float32 * ViewerFrameScale + 16,
-        ViewportHeight.float32 * ViewerFrameScale + 16
-      ),
-      ViewerPanel
-    )
-    sk.drawRect(
-      mapPos - vec2(8, 8),
-      vec2(ViewerMapWidth + 16, ViewerMapHeight + 16),
-      ViewerPanel
-    )
-    sk.drawRect(infoPos - vec2(8, 8), infoSize + vec2(16, 16), ViewerPanel)
-    sk.drawFrameView(bot, framePos.x, framePos.y)
-    sk.drawMapView(bot, mapPos.x, mapPos.y)
-    sk.drawInventoryPanel(bot, inventoryPos, inventorySize)
-
-    let
-      target =
-        if bot.hasTarget:
-          "(" & $bot.target.x & ", " & $bot.target.y & ")"
-        else:
-          "none"
-      infoText =
-        "intent: " & bot.goal.goalLabel() & "\n" &
-        "status: " & (if connected: "connected" else: "reconnecting") & "\n" &
-        "clock: " & bot.clockText() & " minutes=" & $bot.minutes & "\n" &
-        "map: " & bot.mapKind.mapKindName() &
-          " current house=" & $(bot.currentHouse + 1) &
-          " home=" & $(bot.homeIndex + 1) & "\n" &
-        "bot: " & bot.logName() &
-          " slot=" & $bot.slot &
-          " plan=" & bot.socialPlanName() &
-          " food=" & $bot.inventoryTotal() &
-          " host until=" & $bot.hostUntilMinutes & "\n" &
-        "party house=" & $(bot.partyHouse + 1) &
-          " search house=" & $(bot.searchHouse + 1) &
-          " committed=" & $bot.hostCommitted & "\n" &
-        "camera: (" & $bot.cameraX & ", " & $bot.cameraY & ")\n" &
-        "player: (" & $bot.selfX & ", " & $bot.selfY & ")" &
-          " foot=(" & $bot.playerFootX() & ", " &
-          $bot.playerFootY() & ")" &
-          " localized=" & $bot.localized & "\n" &
-        "goal: " & bot.goal.goalLabel() &
-          " pos=(" & $bot.goal.x & ", " & $bot.goal.y & ")" &
-          " reached=" & $bot.goalReached(bot.goal) & "\n" &
-        "path nodes: " & $bot.path.len & " target=" & target & "\n" &
-        "input desired: " & inputMaskSummary(bot.desiredMask) &
-          " last sent: " & inputMaskSummary(bot.lastMask) & "\n" &
-        "stuck ticks: " & $bot.stuckTicks &
-          " attack cooldown=" & $bot.attackCooldown & "\n" &
-        "gardens marked=" & $bot.markedGardenCount() &
-          " checked=" & $bot.checkedGardenCount() &
-          "/" & $bot.gardenChecked.len &
-          " current=" & $bot.currentGarden & "\n" &
-        "sprites: " & $bot.sprites.len &
-          " objects: " & $bot.objects.len &
-          " frame tick: " & $bot.frameTick & "\n" &
-        "url: " & url
-    discard sk.drawText("Default", infoText, infoPos, ViewerText,
-      infoSize.x, infoSize.y)
-    sk.endUi()
-    viewer.window.swapBuffers()
 
 proc queryEscape(value: string): string =
   ## Escapes a query string component.
@@ -3925,9 +3140,9 @@ proc acceptServerMessage(ws: WebSocket, message: Message, bot: Bot): bool =
   of TextMessage, Pong:
     discard
 
-proc receiveUpdates(ws: WebSocket, bot: Bot, gui: bool): bool =
+proc receiveUpdates(ws: WebSocket, bot: Bot): bool =
   ## Receives and applies all currently queued sprite updates.
-  let firstMessage = ws.receiveMessage(if gui: 10 else: -1)
+  let firstMessage = ws.receiveMessage(-1)
   if firstMessage.isNone:
     return false
   if ws.acceptServerMessage(firstMessage.get(), bot):
@@ -3948,7 +3163,7 @@ proc runBot(
   token: string,
   slot: int,
   url: string,
-  gui: bool
+  soul: string
 ) =
   ## Connects the talking Villager bot to a Heartleaf sprite player endpoint.
   let connectUrl =
@@ -3956,66 +3171,34 @@ proc runBot(
       url
     else:
       playerUrl(host, port, name, token, slot)
-  let useGui =
-    when defined(gui):
-      gui
-    else:
-      false
-  var bot = initBot(name, slot, useGui)
+  var bot = initBot(name, slot, soul)
   try:
-    requireSoul()
     requireBedrockConfig()
   except TalkingVillagerError as e:
     echo bot.name, " fatal: ", e.msg
     quit(1)
-  let viewer =
-    if useGui:
-      initViewerApp()
-    else:
-      nil
-  var connected = false
-  while viewer.viewerOpen():
+  while true:
     try:
       let ws = newWebSocket(connectUrl)
       echo bot.name, " connected to ", connectUrl
-      connected = true
       bot.lastMask = 0xff'u8
-      while viewer.viewerOpen():
-        if not ws.receiveUpdates(bot, useGui):
-          if useGui:
-            viewer.pumpViewer(bot, connected, connectUrl)
-            if not viewer.viewerOpen():
-              ws.close()
-              break
+      while true:
+        if not ws.receiveUpdates(bot):
           continue
         let nextMask = bot.decideNextMask(ws)
         bot.maybeSendDecisionChat(ws)
         if nextMask != bot.lastMask:
           ws.send(blobFromMask(nextMask), BinaryMessage)
           bot.lastMask = nextMask
-        if useGui:
-          viewer.pumpViewer(bot, connected, connectUrl)
-          if not viewer.viewerOpen():
-            ws.close()
-            break
     except TalkingVillagerError as e:
       echo bot.name, " fatal: ", e.msg
       quit(1)
     except CatchableError as e:
-      connected = false
       echo bot.name, " reconnecting: ", e.msg
-      if useGui:
-        for i in 0 ..< 25:
-          if not viewer.viewerOpen():
-            break
-          viewer.pumpViewer(bot, connected, connectUrl)
-          sleep(10)
-      else:
-        sleep(250)
+      sleep(250)
 
-proc talkingVillagerMain*(defaultName = DefaultName, soul = "") =
+proc talkingVillagerMain*(defaultName = DefaultName, soul: string) =
   ## Parses bot CLI options and runs one talking Villager bot.
-  setSoulTemplate(soul)
   var
     address = DefaultHost
     port = DefaultPort
@@ -4023,7 +3206,6 @@ proc talkingVillagerMain*(defaultName = DefaultName, soul = "") =
     token = ""
     slot = -1
     url = getEnv("COGAMES_ENGINE_WS_URL")
-    gui = false
   for kind, key, val in getopt():
     case kind
     of cmdLongOption:
@@ -4040,15 +3222,10 @@ proc talkingVillagerMain*(defaultName = DefaultName, soul = "") =
         slot = parseInt(val)
       of "url":
         url = val
-      of "gui":
-        gui = true
       else:
         discard
     else:
       discard
   if slot < 0 and url.len > 0:
     slot = url.slotFromUrl()
-  runBot(address, port, name, token, slot, url, gui)
-
-when isMainModule:
-  talkingVillagerMain()
+  runBot(address, port, name, token, slot, url, soul)
