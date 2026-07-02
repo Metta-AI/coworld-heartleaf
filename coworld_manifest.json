@@ -247,6 +247,16 @@
   ],
   "variants": [
     {
+      "id": "league",
+      "name": "League",
+      "game_config": {
+        "seed": 4731713,
+        "maxTicks": 1200,
+        "maxGames": 1
+      },
+      "description": "Bounded single-game Heartleaf day used for hosted league rounds."
+    },
+    {
       "id": "freeplay",
       "name": "Freeplay",
       "game_config": {
