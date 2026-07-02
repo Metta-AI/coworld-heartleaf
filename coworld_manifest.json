@@ -58,6 +58,13 @@
           "type": "integer",
           "minimum": 0,
           "default": 0
+        },
+        "num_agents": {
+          "description": "Player seat count used by hosted league seating.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9,
+          "default": 9
         }
       }
     },
@@ -251,10 +258,11 @@
       "name": "League",
       "game_config": {
         "seed": 4731713,
-        "maxTicks": 1200,
-        "maxGames": 1
+        "maxTicks": 4560,
+        "maxGames": 1,
+        "num_agents": 9
       },
-      "description": "Bounded single-game Heartleaf day used for hosted league rounds."
+      "description": "One full Heartleaf day with the end-of-day score screen, used for hosted league rounds."
     },
     {
       "id": "freeplay",
