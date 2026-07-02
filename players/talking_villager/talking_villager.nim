@@ -27,7 +27,6 @@ const
   NavPointOffsetX = PlayerBoxOffsetX + PlayerBoxWidth div 2
   NavPointOffsetY = PlayerBoxOffsetY + PlayerBoxHeight div 2
   CollectActionRadius = 32
-  GreetingRadius = 180
   PersonStandRadius = 30
   NavStep = 2
   PathArrivePixels = 3
@@ -232,8 +231,7 @@ type
     goal: Goal
     path: seq[Point]
     gardenChecked: seq[bool]
-    greetedNames: seq[string]
-    lastGreetingTick: int
+    lastClockHour: int
     chatHistory: seq[ConversationMessage]
     heardChats: seq[string]
     currentGarden: int
@@ -505,28 +503,43 @@ Conversation memory:
 The conversation before the final state report is the full chat
 transcript of this game: user turns are lines you heard, formatted as
 Name: text, and your own earlier turns are what you said out loud.
-Remember it. Follow up on invitations you gave or received, answer
-questions people asked you, do not repeat greetings to the same person,
-and keep your promises. Even with a long transcript, always respond
-with only one JSON object.
+The Clock speaks once every hour, like Clock: It is 10:00am (8 hours
+till dinner). Use it to pace your day and your plans. Remember the
+transcript: follow up on invitations you gave or received, answer
+questions people asked you, and keep your promises. Even with a long
+transcript, always respond with only one JSON object.
+
+Talking rules:
+Greet each gnome at most once per day. Never repeat hi or hello to
+someone you already greeted; every message should say something new.
+Talk about real topics: the weather, the forest growth, the water
+levels in the creeks, the wildlife, your garden hauls, who is hosting
+dinner tonight, and stories from past days. Ask questions and answer
+the questions people ask you.
+
+Dinner plans:
+Dinner is at 6pm and it is the heart of the day. If your food is high,
+invite gnomes to dinner by name, like Sasha, come to my house for
+dinner at 6. If someone invites you and you are free, promise clearly:
+I will come to your house at 6. Set commitParty true when you promise,
+with houseIndex set to that owner's house. Do not promise two dinners.
+As dinner nears, remind your guests or your host of the plan. During
+dinner, keep talking at the table: thank the host, compliment the
+food, recap the day, and share stories.
 
 General strategy:
 Gather as much food as possible early. If food is high by 3pm, stand at
-your house to greet people. At 4pm, invite people to your house if you
-have food. After 5pm, stop gathering and switch to social party
-planning. After 6pm, go to a party or your own house even if food is
-low. If food is low, seek a party. If food is high, invite people to
-your party using say_to_person.
+your house to greet arriving guests. At 4pm, invite people to your
+house if you have food. After 5pm, stop gathering and switch to social
+party planning. After 6pm, go to a party or your own house even if food
+is low. If food is low, seek a dinner to join.
 
 Chat rules:
-Say short friendly phrases to nearby players so they are more likely to
-cooperate. Prefer messages under 12 words. In chat messages, never call
-houses by number. Use my house, your house, or the owner's name, like
-Anton's house. If you agree to attend a party, set commitParty true,
-set houseIndex to that owner's house, and say a short confirmation. Do
-not confirm attendance if you are already committed somewhere else or
-hosting your own party. Choose who to visit, who to invite, and exactly
-what to say. Honor party agreements unless nobody else is there.
+Prefer messages under 12 words. In chat messages, never call houses by
+number. Use my house, your house, or the owner's name, like Anton's
+house. Do not confirm attendance if you are already committed somewhere
+else or hosting your own dinner. Honor dinner promises unless nobody
+else is there.
 """
 
 var soulTemplate = ""
@@ -801,16 +814,6 @@ proc scanHeardChats(bot: Bot) =
     if speaker.len == 0 or speaker == bot.playerName:
       continue
     bot.recordChatLine("user", speaker, text)
-
-proc hasGreeted(bot: Bot, name: string): bool =
-  ## Returns true when this bot has greeted a name today.
-  for greetedName in bot.greetedNames:
-    if greetedName == name:
-      return true
-
-proc greetingText(bot: Bot, name: string): string =
-  ## Returns one short greeting for a nearby player.
-  "Hi " & name
 
 proc logName(bot: Bot): string =
   ## Returns the username and fixed player name for bot logs.
@@ -1253,12 +1256,45 @@ proc clockName(minutes: int): string =
       $minute
   $hour & ":" & minuteText & suffix
 
+proc clockAnnouncement(minutes: int): string =
+  ## Returns one hourly clock line for the conversation history.
+  let clock = minutes.clockName()
+  if minutes < DinnerMinutes:
+    let hours = (DinnerMinutes - minutes) div 60
+    if hours <= 0:
+      "It is " & clock & ". Dinner starts within the hour!"
+    elif hours == 1:
+      "It is " & clock & " (1 hour till dinner)."
+    else:
+      "It is " & clock & " (" & $hours & " hours till dinner)."
+  elif minutes < DinnerMinutes + 60:
+    "It is " & clock & ". It is dinner time!"
+  elif minutes < DayEndMinutes:
+    let hours = (DayEndMinutes - minutes) div 60
+    if hours <= 1:
+      "It is " & clock & " (night falls within the hour)."
+    else:
+      "It is " & clock & " (" & $hours & " hours till night time)."
+  else:
+    "It is " & clock & ". It is night time."
+
+proc maybeRecordClock(bot: Bot) =
+  ## Records one clock line in the conversation every game hour.
+  if bot.minutes < 0:
+    return
+  let hour = bot.minutes div 60
+  if hour == bot.lastClockHour:
+    return
+  bot.lastClockHour = hour
+  bot.chatHistory.add(ConversationMessage(
+    role: "user",
+    content: "Clock: " & bot.minutes.clockAnnouncement()
+  ))
+
 proc resetGardenPlan(bot: Bot) =
-  ## Resets the static garden checklist and greetings for a new day.
+  ## Resets the static garden checklist for a new day.
   inc bot.dayIndex
   bot.gardenChecked = newSeq[bool](bot.resources.gardens.len)
-  bot.greetedNames.setLen(0)
-  bot.lastGreetingTick = -1
   bot.currentGarden = -1
   bot.partyHouse = UnknownHouse
   bot.searchHouse = UnknownHouse
@@ -1543,42 +1579,6 @@ proc analyze(bot: Bot) =
       bot.playerName.len > 0:
     bot.currentHouse = bot.homeIndex
 
-proc maybeGreetNearby(bot: Bot, ws: WebSocket): bool =
-  ## Greets newly seen nearby players once per day.
-  if not bot.localized or bot.mapKind == MapOverlay:
-    return false
-  let
-    selfX = bot.playerFootX()
-    selfY = bot.playerFootY()
-    radiusSquared = GreetingRadius * GreetingRadius
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    let playerIndex = objectId - PlayerObjectBase
-    if playerIndex == bot.selfIndex:
-      continue
-    let name = bot.visiblePlayerName(playerIndex)
-    if name.len == 0 or name == bot.playerName or bot.hasGreeted(name):
-      continue
-    let distance = distanceSquared(
-      selfX,
-      selfY,
-      bot.objectFootX(objectState),
-      bot.objectFootY(objectState)
-    )
-    if distance > radiusSquared:
-      continue
-    let message = bot.greetingText(name)
-    bot.greetedNames.add(name)
-    bot.lastGreetingTick = bot.frameTick
-    ws.send(blobFromChat(message), BinaryMessage)
-    bot.recordOwnChat(message)
-    bot.log("chat " & message)
-    return true
-  false
-
 proc homeIndexFromName(name: string): int =
   ## Guesses a zero-based home index from trailing name digits.
   var start = name.len
@@ -1637,8 +1637,7 @@ proc initBot(name: string, slot: int, decodeVisualSprites = false): Bot =
   result.committedPartyHouse = UnknownHouse
   result.dayIndex = 0
   result.gardenChecked = newSeq[bool](result.resources.gardens.len)
-  result.greetedNames = @[]
-  result.lastGreetingTick = -1
+  result.lastClockHour = -1
 
 proc gardenGoal(bot: Bot): Goal =
   ## Returns a goal for the nearest garden that may still have food.
@@ -3077,14 +3076,10 @@ proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
   ## Chooses the next input mask for one game frame.
   bot.analyze()
   bot.scanHeardChats()
+  bot.maybeRecordClock()
   if not bot.localized:
     bot.desiredMask = 0
     bot.hasTarget = false
-    return 0
-  if bot.maybeGreetNearby(ws):
-    bot.desiredMask = 0
-    bot.hasTarget = false
-    bot.updateStuck(0)
     return 0
   discard bot.pollLlmDecision()
   if bot.llmWaiting:
@@ -4008,8 +4003,7 @@ proc runBot(
               break
           continue
         let nextMask = bot.decideNextMask(ws)
-        if bot.lastGreetingTick != bot.frameTick:
-          bot.maybeSendDecisionChat(ws)
+        bot.maybeSendDecisionChat(ws)
         if nextMask != bot.lastMask:
           ws.send(blobFromMask(nextMask), BinaryMessage)
           bot.lastMask = nextMask
