@@ -171,7 +171,10 @@
       "image": "{{SHY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/shy_villager"
-      ]
+      ],
+      "env": {
+        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
+      }
     },
     {
       "id": "chatty_villager",
@@ -181,7 +184,10 @@
       "image": "{{CHATTY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/chatty_villager"
-      ]
+      ],
+      "env": {
+        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
+      }
     },
     {
       "id": "friendly_villager",
@@ -191,7 +197,10 @@
       "image": "{{FRIENDLY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/friendly_villager"
-      ]
+      ],
+      "env": {
+        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
+      }
     },
     {
       "id": "fatherly_villager",
@@ -201,7 +210,10 @@
       "image": "{{FATHERLY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/fatherly_villager"
-      ]
+      ],
+      "env": {
+        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
+      }
     }
   ],
   "commissioner": [
@@ -278,16 +290,16 @@
         "player_id": "villager"
       },
       {
-        "player_id": "villager"
+        "player_id": "shy_villager"
       },
       {
-        "player_id": "villager"
+        "player_id": "chatty_villager"
       },
       {
-        "player_id": "villager"
+        "player_id": "friendly_villager"
       },
       {
-        "player_id": "villager"
+        "player_id": "fatherly_villager"
       }
     ]
   }
