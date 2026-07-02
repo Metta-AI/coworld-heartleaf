@@ -3163,7 +3163,8 @@ proc runBot(
   token: string,
   slot: int,
   url: string,
-  soul: string
+  soul: string,
+  exitOnDisconnect: bool
 ) =
   ## Connects the talking Villager bot to a Heartleaf sprite player endpoint.
   let connectUrl =
@@ -3177,10 +3178,12 @@ proc runBot(
   except TalkingVillagerError as e:
     echo bot.name, " fatal: ", e.msg
     quit(1)
+  var hadConnection = false
   while true:
     try:
       let ws = newWebSocket(connectUrl)
       echo bot.name, " connected to ", connectUrl
+      hadConnection = true
       bot.lastMask = 0xff'u8
       while true:
         if not ws.receiveUpdates(bot):
@@ -3195,6 +3198,8 @@ proc runBot(
       quit(1)
     except CatchableError as e:
       echo bot.name, " reconnecting: ", e.msg
+      if exitOnDisconnect and hadConnection:
+        break
       sleep(250)
 
 proc talkingVillagerMain*(defaultName = DefaultName, soul: string) =
@@ -3228,4 +3233,4 @@ proc talkingVillagerMain*(defaultName = DefaultName, soul: string) =
       discard
   if slot < 0 and url.len > 0:
     slot = url.slotFromUrl()
-  runBot(address, port, name, token, slot, url, soul)
+  runBot(address, port, name, token, slot, url, soul, url.len > 0)
