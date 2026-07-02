@@ -1,8 +1,0 @@
-{
-  "author": "treeform@softmax.com",
-  "name": "talking_villager",
-  "image_uri": "public.ecr.aws/s3j4p9s7/treeform/players/talking-villager:latest",
-  "binary": "/bin/talking_villager",
-  "description": "LLM-guided Heartleaf bot that gathers food, talks to players, invites guests, and honors party commitments.",
-  "games": ["heartleaf"]
-}

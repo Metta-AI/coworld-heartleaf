@@ -70,8 +70,6 @@ const
   GlobalPanelRowHeight = 9
   GlobalPanelScoreX = 2
   GlobalPanelNameX = 22
-  GlobalPanelIconWidth = 5
-  GlobalPanelIconHeight = 7
   GlobalPanelTextR = 245'u8
   GlobalPanelTextG = 247'u8
   GlobalPanelTextB = 240'u8
@@ -110,14 +108,8 @@ const
   ScoreSpriteBase = 7100
   MainWalkSpriteId = 8000
   HomeWalkSpriteId = 8001
-  GlobalPanelBackSpriteId = 8100
-  GlobalPanelTitleSpriteId = 8101
-  GlobalPanelSelectSpriteId = 8102
   GlobalPanelScoreSpriteBase = 8200
   GlobalPanelNameSpriteBase = 8300
-  GlobalPanelBackObjectId = 20_000
-  GlobalPanelTitleObjectId = 20_001
-  GlobalPanelSelectObjectId = 20_002
   GlobalPanelScoreObjectBase = 20_100
   GlobalPanelNameObjectBase = 20_200
   BottomZ = int(low(int16))
@@ -621,10 +613,6 @@ proc rectVisible(
   ## Returns true when one rectangle overlaps one viewport size.
   x < viewportWidth and y < viewportHeight and x + w > 0 and y + h > 0
 
-proc screenRectVisible(x, y, w, h: int): bool =
-  ## Returns true when one screen-space rectangle overlaps the viewport.
-  rectVisible(x, y, w, h, ViewportWidth, ViewportHeight)
-
 proc chatTextWidth(sim: SimServer, text: string): int =
   ## Returns the rendered width of one chat line.
   sim.textFont.textWidth(text)
@@ -825,33 +813,6 @@ proc scoreOverlaySprite(sim: SimServer): RgbaSprite =
       y + GnomeSpriteSize + 2
     )
     sim.blitChatText(result, "Score: " & $player.score, x + 36, y + 12)
-
-proc globalPanelBackSprite(): RgbaSprite =
-  ## Builds the global viewer score panel background.
-  result = newRgbaSprite(GlobalPanelWidth, GlobalPanelHeight)
-  result.fillRect(
-    0,
-    0,
-    GlobalPanelWidth,
-    GlobalPanelHeight,
-    rgba(0, 0, 0, 210)
-  )
-  result.strokeRect(
-    0,
-    0,
-    GlobalPanelWidth,
-    GlobalPanelHeight,
-    rgba(255, 255, 255, 120)
-  )
-
-proc globalPanelSelectSprite(): RgbaSprite =
-  ## Builds the global viewer selected-player pointer icon.
-  result = newRgbaSprite(GlobalPanelIconWidth, GlobalPanelIconHeight)
-  let center = GlobalPanelIconHeight div 2
-  for y in 0 ..< GlobalPanelIconHeight:
-    let span = GlobalPanelIconHeight div 2 - abs(center - y)
-    for x in 0 .. span:
-      result.putPixel(x, y, rgba(255, 245, 140, 255))
 
 proc globalPanelTextSprite(
   sim: SimServer,

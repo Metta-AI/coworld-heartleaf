@@ -17,7 +17,7 @@ const
 
   CollectActionRadius = InteractionRadius - 8
   PersonStandRadius = 30
-  NavStep = 2
+  GoalArrivePixels = 2
   PathArrivePixels = 3
   PathRejoinPixels = 8
 
@@ -117,9 +117,6 @@ type
     houseValid: array[9, bool]
     exit: Rect
     hasExit: bool
-
-  DrawItem = object
-    layer, z, y, id: int
 
   ConversationMessage = object
     role: string
@@ -2528,7 +2525,7 @@ proc goalReached(bot: Bot, goal: Goal): bool =
       bot.playerFootY(),
       goal.x,
       goal.y
-    ) <= NavStep * NavStep
+    ) <= GoalArrivePixels * GoalArrivePixels
   of GoalIdle:
     true
 
@@ -2844,67 +2841,6 @@ proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
     result = UnstuckMasks[bot.unstuckMaskIndex]
   bot.desiredMask = result
   bot.updateStuck(result)
-
-proc inputMaskSummary(mask: uint8): string =
-  ## Returns a compact name for one input mask.
-  var parts: seq[string]
-  if (mask and ButtonUp) != 0:
-    parts.add("up")
-  if (mask and ButtonDown) != 0:
-    parts.add("down")
-  if (mask and ButtonLeft) != 0:
-    parts.add("left")
-  if (mask and ButtonRight) != 0:
-    parts.add("right")
-  if (mask and ButtonSelect) != 0:
-    parts.add("select")
-  if (mask and ButtonA) != 0:
-    parts.add("a")
-  if (mask and ButtonB) != 0:
-    parts.add("b")
-  if parts.len == 0:
-    return "none"
-  parts.join("+")
-
-proc screenKindName(kind: ScreenKind): string =
-  ## Returns a readable screen-kind label.
-  case kind
-  of UnknownScreen:
-    "unknown"
-  of MainMap:
-    "world"
-  of HomeMap:
-    "home"
-  of OverlayScreen:
-    "overlay"
-
-proc socialPlanName(bot: Bot): string =
-  ## Returns the bot's current social dinner plan.
-  if bot.shouldGather():
-    return "gather"
-  if bot.minutes >= HouseEnterMinutes and bot.minutes < PartyLeaveMinutes:
-    return "enter"
-  if bot.hostCommitted:
-    return "committed host"
-  if bot.partyHouse == bot.homeIndex:
-    return "host"
-  if bot.partyHouse >= 0:
-    return "guest"
-  if bot.searchHouse >= 0:
-    return "seek"
-  "plan"
-
-proc checkedGardenCount(bot: Bot): int =
-  ## Returns how many static gardens have been ruled out today.
-  for checked in bot.gardenChecked:
-    if checked:
-      inc result
-
-proc markedGardenCount(bot: Bot): int =
-  ## Returns how many visible gardens still show a pickup marker.
-  for i in 0 ..< bot.resources.gardens.len:
-    if bot.gardenHasMarker(i):
-      inc result
 
 proc queryEscape(value: string): string =
   ## Escapes a query string component.
