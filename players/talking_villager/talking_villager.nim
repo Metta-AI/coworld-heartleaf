@@ -1,7 +1,7 @@
 import
-  std/[algorithm, heapqueue, json, options, os, parseopt, strutils],
+  std/[algorithm, json, options, os, parseopt, strutils],
   bitworld/[spriteprotocol, resources],
-  curly, supersnappy, whisky,
+  curly, pathy, supersnappy, whisky,
   decisions
 
 when defined(gui):
@@ -37,9 +37,10 @@ const
   PathArrivePixels = 3
   PathRejoinPixels = 8
   MoveDeadZonePixels = 1
-  PathLookaheadPixels = 4
-  StuckLookaheadPixels = 10
-  StuckLookaheadTicks = 18
+  PathDensifyPixels = 4
+  SteerLookaheadPoints = 12
+  UnstuckAfterTicks = 30
+  UnstuckDurationTicks = 24
   RepathStuckTicks = 48
   MaxDrainMessages = 256
   DefaultName = "talking_villager"
@@ -84,6 +85,16 @@ const
     "Vova",
     "Dima",
     "Egor"
+  ]
+  UnstuckMasks = [
+    ButtonUp,
+    ButtonRight,
+    ButtonDown,
+    ButtonLeft,
+    ButtonUp or ButtonRight,
+    ButtonDown or ButtonRight,
+    ButtonDown or ButtonLeft,
+    ButtonUp or ButtonLeft
   ]
 
 when defined(gui):
@@ -173,9 +184,10 @@ type
 
   NavMap = ref object
     width, height: int
-    cols, rows: int
     walk: seq[bool]
-    canStand: seq[bool]
+    passable: seq[bool]
+    space: PathSpace
+    jps: JumpPointSpace
 
   Resources = ref object
     gardens: seq[Rect]
@@ -183,10 +195,6 @@ type
     houseValid: array[9, bool]
     exit: Rect
     hasExit: bool
-
-  PathNode = object
-    priority: int
-    index: int
 
   DrawItem = object
     layer, z, y, id: int
@@ -226,6 +234,8 @@ type
     selfX, selfY: int
     previousX, previousY: int
     stuckTicks: int
+    unstuckTicks: int
+    unstuckMaskIndex: int
     minutes: int
     lastMask: uint8
     attackCooldown: int
@@ -270,12 +280,6 @@ when defined(gui):
 else:
   type
     ViewerApp = ref object
-
-proc `<`(a, b: PathNode): bool =
-  ## Orders A-star queue nodes by priority and index.
-  if a.priority == b.priority:
-    return a.index < b.index
-  a.priority < b.priority
 
 var bedrockCurl = newCurly(1)
 
@@ -810,465 +814,152 @@ proc walkAt(nav: NavMap, x, y: int): bool =
     return false
   nav.walk[y * nav.width + x]
 
-proc canOccupy(nav: NavMap, x, y: int): bool =
-  ## Returns true when a foot-center position is walkable.
-  if nav == nil:
+proc passableAt(nav: NavMap, x, y: int): bool =
+  ## Returns true when the player box fits at one foot-center position.
+  if nav == nil or x < 0 or y < 0 or x >= nav.width or y >= nav.height:
     return false
-  let rect = collisionRectFromFoot(x, y)
-  if rect.x < 0 or rect.y < 0 or
-      rect.x + rect.w > nav.width or
-      rect.y + rect.h > nav.height:
-    return false
-  for py in rect.y ..< rect.y + rect.h:
-    for px in rect.x ..< rect.x + rect.w:
-      if not nav.walkAt(px, py):
-        return false
-  true
-
-proc cellIndex(nav: NavMap, col, row: int): int =
-  ## Returns one navigation cell index.
-  row * nav.cols + col
-
-proc pointForCell(nav: NavMap, index: int): Point =
-  ## Returns the foot-center point for one navigation cell.
-  let
-    col = index mod nav.cols
-    row = index div nav.cols
-  Point(x: FootMinX + col * NavStep, y: FootMinY + row * NavStep)
+  nav.passable[y * nav.width + x]
 
 proc buildNavMap(sprite: SpriteInfo): NavMap =
-  ## Builds a navigation grid from one walkability sprite.
+  ## Builds a collision-aware JPS+ pathfinding grid from one
+  ## walkability sprite.
   result = NavMap()
-  result.width = sprite.width
-  result.height = sprite.height
-  result.walk = newSeq[bool](sprite.width * sprite.height)
+  let
+    width = sprite.width
+    height = sprite.height
+  result.width = width
+  result.height = height
+  result.walk = newSeq[bool](width * height)
   for i in 0 ..< result.walk.len:
     result.walk[i] = sprite.pixels[i * 4 + 3] > 0
-  let
-    maxFootX = max(
-      FootMinX,
-      sprite.width - (PlayerBoxWidth - FootHalfWidth)
-    )
-    maxFootY = max(
-      FootMinY,
-      sprite.height - (PlayerBoxHeight - FootHalfHeight)
-    )
-  result.cols = max(1, (maxFootX - FootMinX) div NavStep + 1)
-  result.rows = max(1, (maxFootY - FootMinY) div NavStep + 1)
-  result.canStand = newSeq[bool](result.cols * result.rows)
-  for row in 0 ..< result.rows:
-    for col in 0 ..< result.cols:
-      let point = result.pointForCell(result.cellIndex(col, row))
-      result.canStand[result.cellIndex(col, row)] =
-        result.canOccupy(point.x, point.y)
+  # Summed-area table over walkable pixels so each foot-box check is
+  # four lookups instead of a full box sweep.
+  var sums = newSeq[int32]((width + 1) * (height + 1))
+  for y in 0 ..< height:
+    for x in 0 ..< width:
+      sums[(y + 1) * (width + 1) + x + 1] =
+        sums[y * (width + 1) + x + 1] +
+        sums[(y + 1) * (width + 1) + x] -
+        sums[y * (width + 1) + x] +
+        (if result.walk[y * width + x]: 1'i32 else: 0'i32)
+  result.passable = newSeq[bool](width * height)
+  for y in 0 ..< height:
+    for x in 0 ..< width:
+      let box = collisionRectFromFoot(x, y)
+      if box.x < 0 or box.y < 0 or
+          box.x + box.w > width or
+          box.y + box.h > height:
+        continue
+      let walkable =
+        sums[(box.y + box.h) * (width + 1) + box.x + box.w] -
+        sums[box.y * (width + 1) + box.x + box.w] -
+        sums[(box.y + box.h) * (width + 1) + box.x] +
+        sums[box.y * (width + 1) + box.x]
+      result.passable[y * width + x] = walkable == int32(box.w * box.h)
+  result.space = newPathSpace(result.passable, width, height, DiagonalPath)
+  result.jps = newJumpPointSpace(result.space)
 
-proc nearestCell(nav: NavMap, x, y: int): int =
-  ## Returns the nearest standable navigation cell to a foot point.
-  result = -1
+proc nearestPassablePoint(nav: NavMap, x, y: int): Point =
+  ## Returns the nearest foot-center point where the player box fits.
+  result = Point(
+    x: x.clamp(0, nav.width - 1),
+    y: y.clamp(0, nav.height - 1)
+  )
+  if nav.passableAt(result.x, result.y):
+    return
+  let step = nav.space.nearestPassable(
+    result.x,
+    result.y,
+    max(nav.width, nav.height)
+  )
+  if step.found:
+    result = Point(x: step.x, y: step.y)
+
+proc nearestPointInside(nav: NavMap, rect: Rect, x, y: int): Point =
+  ## Returns the nearest passable foot point inside one rectangle.
+  result = rect.center()
   if nav == nil:
     return
   var bestDistance = high(int)
-  for index, canStand in nav.canStand:
-    if not canStand:
-      continue
-    let point = nav.pointForCell(index)
-    let distance = distanceSquared(point.x, point.y, x, y)
-    if distance < bestDistance:
-      bestDistance = distance
-      result = index
+  for py in max(0, rect.y) ..< min(nav.height, rect.y + rect.h):
+    for px in max(0, rect.x) ..< min(nav.width, rect.x + rect.w):
+      if not nav.passable[py * nav.width + px]:
+        continue
+      let distance = distanceSquared(px, py, x, y)
+      if distance < bestDistance:
+        bestDistance = distance
+        result = Point(x: px, y: py)
 
-proc nearestCellInside(nav: NavMap, rect: Rect, x, y: int): int =
-  ## Returns the nearest standable cell with foot center in a rectangle.
-  result = -1
-  if nav == nil:
-    return
-  var bestDistance = high(int)
-  for index, canStand in nav.canStand:
-    if not canStand:
-      continue
-    let point = nav.pointForCell(index)
-    if not rect.contains(point.x, point.y):
-      continue
-    let distance = distanceSquared(point.x, point.y, x, y)
-    if distance < bestDistance:
-      bestDistance = distance
-      result = index
-
-proc nearestCellOutside(
+proc nearestPointOutside(
   nav: NavMap,
   rect: Rect,
   desired: Point,
   radius: int
-): int =
-  ## Returns the nearest standable cell near but outside a rectangle.
-  result = -1
+): tuple[found: bool, point: Point] =
+  ## Returns the nearest passable point near but outside one rectangle.
   if nav == nil:
     return
   var
     bestDistance = high(int)
-    bestHouseDistance = high(int)
-  for index, canStand in nav.canStand:
-    if not canStand:
+    bestRectDistance = high(int)
+  let
+    minX = max(0, rect.x - radius - PlayerBoxWidth)
+    maxX = min(nav.width - 1, rect.x + rect.w + radius + PlayerBoxWidth)
+    minY = max(0, rect.y - radius - PlayerBoxHeight)
+    maxY = min(nav.height - 1, rect.y + rect.h + radius + PlayerBoxHeight)
+  for py in minY .. maxY:
+    for px in minX .. maxX:
+      if rect.contains(px, py):
+        continue
+      if not nav.passable[py * nav.width + px]:
+        continue
+      let rectDistance =
+        collisionRectFromFoot(px, py).rectDistanceSquared(rect)
+      if rectDistance > radius * radius:
+        continue
+      let distance = distanceSquared(px, py, desired.x, desired.y)
+      if distance < bestDistance or
+          (distance == bestDistance and rectDistance < bestRectDistance):
+        bestDistance = distance
+        bestRectDistance = rectDistance
+        result = (found: true, point: Point(x: px, y: py))
+
+proc toDensePath(steps: openArray[PathStep]): seq[Point] =
+  ## Converts sparse jump-point steps into a dense followable path.
+  for step in steps:
+    let point = Point(x: step.x, y: step.y)
+    if result.len == 0:
+      result.add(point)
       continue
-    let point = nav.pointForCell(index)
-    if rect.contains(point.x, point.y):
-      continue
-    let houseDistance =
-      collisionRectFromFoot(point.x, point.y).rectDistanceSquared(rect)
-    if houseDistance > radius * radius:
-      continue
-    let distance = distanceSquared(point.x, point.y, desired.x, desired.y)
-    if distance < bestDistance or
-        (distance == bestDistance and houseDistance < bestHouseDistance):
-      bestDistance = distance
-      bestHouseDistance = houseDistance
-      result = index
-
-proc cellInside(nav: NavMap, index: int, rect: Rect): bool =
-  ## Returns true when a cell's foot center is inside one rectangle.
-  let point = nav.pointForCell(index)
-  rect.contains(point.x, point.y)
-
-proc cellCanReach(nav: NavMap, index: int, rect: Rect, radius: int): bool =
-  ## Returns true when a cell's foot box can interact with a rectangle.
-  let point = nav.pointForCell(index)
-  collisionRectFromFoot(point.x, point.y).rectDistanceSquared(rect) <=
-    radius * radius
-
-proc heuristic(nav: NavMap, a, b: int): int =
-  ## Returns a Manhattan A-star heuristic between two cells.
-  let
-    ax = a mod nav.cols
-    ay = a div nav.cols
-    bx = b mod nav.cols
-    by = b div nav.cols
-  (abs(ax - bx) + abs(ay - by)) * NavStep
-
-proc heuristic(nav: NavMap, index: int, rect: Rect): int =
-  ## Returns a Manhattan A-star heuristic between one cell and rectangle.
-  let point = nav.pointForCell(index)
-  let
-    x = point.x
-    y = point.y
-  var
-    dx = 0
-    dy = 0
-  if x < rect.x:
-    dx = rect.x - x
-  elif x >= rect.x + rect.w:
-    dx = x - (rect.x + rect.w - 1)
-  if y < rect.y:
-    dy = rect.y - y
-  elif y >= rect.y + rect.h:
-    dy = y - (rect.y + rect.h - 1)
-  dx + dy
-
-proc diagonalClear(nav: NavMap, current, next: int): bool =
-  ## Returns true when one diagonal move does not cut a blocked corner.
-  let
-    currentCol = current mod nav.cols
-    currentRow = current div nav.cols
-    nextCol = next mod nav.cols
-    nextRow = next div nav.cols
-    colOffset = nextCol - currentCol
-    rowOffset = nextRow - currentRow
-  if abs(colOffset) != 1 or abs(rowOffset) != 1:
-    return true
-  let
-    sideA = current + colOffset
-    sideB = current + rowOffset * nav.cols
-  sideA >= 0 and sideA < nav.canStand.len and
-    sideB >= 0 and sideB < nav.canStand.len and
-    nav.canStand[sideA] and nav.canStand[sideB]
-
-proc addNeighbor(
-  nav: NavMap,
-  queue: var HeapQueue[PathNode],
-  cameFrom,
-  costs: var seq[int],
-  current,
-  next,
-  goal,
-  stepCost: int
-) =
-  ## Adds one possible path neighbor to the A-star frontier.
-  if next < 0 or next >= nav.canStand.len or not nav.canStand[next]:
-    return
-  if not nav.diagonalClear(current, next):
-    return
-  let nextCost = costs[current] + stepCost
-  if nextCost >= costs[next]:
-    return
-  costs[next] = nextCost
-  cameFrom[next] = current
-  queue.push(PathNode(
-    priority: nextCost + nav.heuristic(next, goal),
-    index: next
-  ))
-
-proc addNeighbor(
-  nav: NavMap,
-  queue: var HeapQueue[PathNode],
-  cameFrom,
-  costs: var seq[int],
-  current,
-  next: int,
-  rect: Rect,
-  stepCost: int
-) =
-  ## Adds one possible path neighbor toward a target rectangle.
-  if next < 0 or next >= nav.canStand.len or not nav.canStand[next]:
-    return
-  if not nav.diagonalClear(current, next):
-    return
-  let nextCost = costs[current] + stepCost
-  if nextCost >= costs[next]:
-    return
-  costs[next] = nextCost
-  cameFrom[next] = current
-  queue.push(PathNode(
-    priority: nextCost + nav.heuristic(next, rect),
-    index: next
-  ))
-
-proc reconstructPath(
-  nav: NavMap,
-  cameFrom: openArray[int],
-  start,
-  goal: int
-): seq[Point] =
-  ## Reconstructs one cell path returned by A-star.
-  var
-    current = goal
-    reversed: seq[Point]
-  reversed.add(nav.pointForCell(current))
-  while current != start:
-    current = cameFrom[current]
-    if current < 0:
-      return @[]
-    reversed.add(nav.pointForCell(current))
-  for i in countdown(reversed.high, 0):
-    result.add(reversed[i])
+    let
+      previous = result[^1]
+      dx = point.x - previous.x
+      dy = point.y - previous.y
+      span = max(abs(dx), abs(dy))
+    var walked = PathDensifyPixels
+    while walked < span:
+      result.add(Point(
+        x: previous.x + dx * walked div span,
+        y: previous.y + dy * walked div span
+      ))
+      walked += PathDensifyPixels
+    result.add(point)
 
 proc findPath(nav: NavMap, startX, startY, goalX, goalY: int): seq[Point] =
-  ## Finds a grid path between two foot-center positions.
-  if nav == nil:
+  ## Finds a JPS+ path between two foot-center positions.
+  if nav == nil or nav.jps == nil:
     return
   let
-    start = nav.nearestCell(startX, startY)
-    goal = nav.nearestCell(goalX, goalY)
-  if start < 0 or goal < 0:
-    return
-  var
-    queue: HeapQueue[PathNode]
-    cameFrom = newSeq[int](nav.canStand.len)
-    costs = newSeq[int](nav.canStand.len)
-  for i in 0 ..< cameFrom.len:
-    cameFrom[i] = -1
-    costs[i] = high(int)
-  costs[start] = 0
-  queue.push(PathNode(priority: nav.heuristic(start, goal), index: start))
-  while queue.len > 0:
-    let current = queue.pop().index
-    if current == goal:
-      break
-    let
-      col = current mod nav.cols
-      row = current div nav.cols
-    if col > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - 1,
-        goal,
-        NavStep
-      )
-    if col + 1 < nav.cols:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + 1,
-        goal,
-        NavStep
-      )
-    if row > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - nav.cols,
-        goal,
-        NavStep
-      )
-    if row + 1 < nav.rows:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + nav.cols,
-        goal,
-        NavStep
-      )
-    if col > 0 and row > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - nav.cols - 1,
-        goal,
-        NavStep + 2
-      )
-    if col + 1 < nav.cols and row > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - nav.cols + 1,
-        goal,
-        NavStep + 2
-      )
-    if col > 0 and row + 1 < nav.rows:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + nav.cols - 1,
-        goal,
-        NavStep + 2
-      )
-    if col + 1 < nav.cols and row + 1 < nav.rows:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + nav.cols + 1,
-        goal,
-        NavStep + 2
-      )
-  if start != goal and cameFrom[goal] < 0:
-    return
-  nav.reconstructPath(cameFrom, start, goal)
+    start = nav.nearestPassablePoint(startX, startY)
+    goal = nav.nearestPassablePoint(goalX, goalY)
+  nav.jps.findPath(start.x, start.y, goal.x, goal.y).toDensePath()
 
 proc findPath(nav: NavMap, startX, startY: int, rect: Rect): seq[Point] =
-  ## Finds a grid path to any reachable cell inside one rectangle.
+  ## Finds a JPS+ path to a passable point inside one rectangle.
   if nav == nil:
     return
-  let start = nav.nearestCell(startX, startY)
-  if start < 0:
-    return
-  if nav.cellInside(start, rect):
-    return @[nav.pointForCell(start)]
-  var
-    queue: HeapQueue[PathNode]
-    cameFrom = newSeq[int](nav.canStand.len)
-    costs = newSeq[int](nav.canStand.len)
-    found = -1
-  for i in 0 ..< cameFrom.len:
-    cameFrom[i] = -1
-    costs[i] = high(int)
-  costs[start] = 0
-  queue.push(PathNode(priority: nav.heuristic(start, rect), index: start))
-  while queue.len > 0:
-    let current = queue.pop().index
-    if nav.cellInside(current, rect):
-      found = current
-      break
-    let
-      col = current mod nav.cols
-      row = current div nav.cols
-    if col > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - 1,
-        rect,
-        NavStep
-      )
-    if col + 1 < nav.cols:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + 1,
-        rect,
-        NavStep
-      )
-    if row > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - nav.cols,
-        rect,
-        NavStep
-      )
-    if row + 1 < nav.rows:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + nav.cols,
-        rect,
-        NavStep
-      )
-    if col > 0 and row > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - nav.cols - 1,
-        rect,
-        NavStep + 2
-      )
-    if col + 1 < nav.cols and row > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - nav.cols + 1,
-        rect,
-        NavStep + 2
-      )
-    if col > 0 and row + 1 < nav.rows:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + nav.cols - 1,
-        rect,
-        NavStep + 2
-      )
-    if col + 1 < nav.cols and row + 1 < nav.rows:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + nav.cols + 1,
-        rect,
-        NavStep + 2
-      )
-  if found < 0:
-    return
-  nav.reconstructPath(cameFrom, start, found)
+  let goal = nav.nearestPointInside(rect, startX, startY)
+  nav.findPath(startX, startY, goal.x, goal.y)
 
 proc findPathNear(
   nav: NavMap,
@@ -1277,115 +968,47 @@ proc findPathNear(
   rect: Rect,
   radius: int
 ): seq[Point] =
-  ## Finds a grid path to a cell that can interact with one rectangle.
-  if nav == nil:
+  ## Finds a JPS+ path to a point that can interact with one rectangle.
+  if nav == nil or nav.jps == nil:
     return
-  let start = nav.nearestCell(startX, startY)
-  if start < 0:
-    return
-  if nav.cellCanReach(start, rect, radius):
-    return @[nav.pointForCell(start)]
-  var
-    queue: HeapQueue[PathNode]
-    cameFrom = newSeq[int](nav.canStand.len)
-    costs = newSeq[int](nav.canStand.len)
-    found = -1
-  for i in 0 ..< cameFrom.len:
-    cameFrom[i] = -1
-    costs[i] = high(int)
-  costs[start] = 0
-  queue.push(PathNode(priority: nav.heuristic(start, rect), index: start))
-  while queue.len > 0:
-    let current = queue.pop().index
-    if nav.cellCanReach(current, rect, radius):
-      found = current
-      break
-    let
-      col = current mod nav.cols
-      row = current div nav.cols
-    if col > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - 1,
-        rect,
-        NavStep
-      )
-    if col + 1 < nav.cols:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + 1,
-        rect,
-        NavStep
-      )
-    if row > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - nav.cols,
-        rect,
-        NavStep
-      )
-    if row + 1 < nav.rows:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + nav.cols,
-        rect,
-        NavStep
-      )
-    if col > 0 and row > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - nav.cols - 1,
-        rect,
-        NavStep + 2
-      )
-    if col + 1 < nav.cols and row > 0:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current - nav.cols + 1,
-        rect,
-        NavStep + 2
-      )
-    if col > 0 and row + 1 < nav.rows:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + nav.cols - 1,
-        rect,
-        NavStep + 2
-      )
-    if col + 1 < nav.cols and row + 1 < nav.rows:
-      nav.addNeighbor(
-        queue,
-        cameFrom,
-        costs,
-        current,
-        current + nav.cols + 1,
-        rect,
-        NavStep + 2
-      )
-  if found < 0:
-    return
-  nav.reconstructPath(cameFrom, start, found)
+  if nav.passableAt(startX, startY) and
+      collisionRectFromFoot(startX, startY).rectDistanceSquared(rect) <=
+        radius * radius:
+    return @[Point(x: startX, y: startY)]
+  var candidates: seq[tuple[distance: int, point: Point]]
+  let
+    minX = max(0, rect.x - radius - PlayerBoxWidth)
+    maxX = min(nav.width - 1, rect.x + rect.w + radius + PlayerBoxWidth)
+    minY = max(0, rect.y - radius - PlayerBoxHeight)
+    maxY = min(nav.height - 1, rect.y + rect.h + radius + PlayerBoxHeight)
+  for py in countup(minY, maxY, 2):
+    for px in countup(minX, maxX, 2):
+      if not nav.passable[py * nav.width + px]:
+        continue
+      if collisionRectFromFoot(px, py).rectDistanceSquared(rect) >
+          radius * radius:
+        continue
+      candidates.add((
+        distance: distanceSquared(px, py, startX, startY),
+        point: Point(x: px, y: py)
+      ))
+  candidates.sort(proc(a, b: tuple[distance: int, point: Point]): int =
+    cmp(a.distance, b.distance))
+  # Nearby candidates are usually reachable; spread later attempts out
+  # across the sorted list in case the closest side is walled off.
+  var tried = 0
+  var index = 0
+  while index < candidates.len and tried < 8:
+    result = nav.findPath(
+      startX,
+      startY,
+      candidates[index].point.x,
+      candidates[index].point.y
+    )
+    if result.len > 0:
+      return
+    inc tried
+    index += max(1, candidates.len div 8)
 
 proc sameGoal(a, b: Goal): bool =
   ## Returns true when two goals are the same navigation target.
@@ -1766,7 +1389,7 @@ proc updateSelf(bot: Bot) =
   bot.localized = true
 
 proc updateStuck(bot: Bot, mask: uint8) =
-  ## Updates simple stuck detection from movement and position deltas.
+  ## Updates stuck detection and jitter recovery state.
   let moving = (mask and (
     ButtonUp or ButtonDown or ButtonLeft or ButtonRight
   )) != 0
@@ -1779,6 +1402,14 @@ proc updateStuck(bot: Bot, mask: uint8) =
     bot.stuckTicks = 0
   bot.previousX = footX
   bot.previousY = footY
+  if bot.unstuckTicks > 0:
+    dec bot.unstuckTicks
+  elif bot.stuckTicks >= UnstuckAfterTicks and
+      bot.stuckTicks mod UnstuckAfterTicks == 0:
+    bot.unstuckTicks = UnstuckDurationTicks
+    bot.unstuckMaskIndex = (bot.unstuckMaskIndex + 1) mod UnstuckMasks.len
+    bot.path.setLen(0)
+    bot.log("unstuck jitter " & $bot.unstuckMaskIndex)
 
 proc gardenHasMarker(bot: Bot, gardenIndex: int): bool =
   ## Returns true when the current view has a garden exclamation marker.
@@ -2080,9 +1711,8 @@ proc goalForRect(
   ## Returns a navigation goal for standing inside one rectangle.
   let nav = bot.navForCurrentMap()
   var target = rect.center()
-  let cell = nav.nearestCellInside(rect, target.x, target.y)
-  if cell >= 0:
-    target = nav.pointForCell(cell)
+  if nav != nil:
+    target = nav.nearestPointInside(rect, target.x, target.y)
   Goal(
     kind: kind,
     mapKind: bot.mapKind,
@@ -2373,13 +2003,13 @@ proc houseGatherPoint(bot: Bot, houseIndex: int): Point =
   let
     house = bot.resources.houses[houseIndex]
     desired = bot.desiredHouseGatherPoint(house)
-    cell = bot.mainNav.nearestCellOutside(
+    outside = bot.mainNav.nearestPointOutside(
       house,
       desired,
       HouseGatherMaxRadius
     )
-  if cell >= 0:
-    result = bot.mainNav.pointForCell(cell)
+  if outside.found:
+    result = outside.point
 
 proc gatherAtHouseGoal(bot: Bot, houseIndex: int): Goal =
   ## Returns a goal that keeps the bot visible outside one house.
@@ -3375,21 +3005,21 @@ proc pathTarget(bot: Bot, goal: Goal): Point =
       ) <= PathArrivePixels * PathArrivePixels:
     bot.path.delete(0)
   if bot.path.len > 0:
-    let lookahead =
-      if bot.stuckTicks >= StuckLookaheadTicks:
-        StuckLookaheadPixels
-      else:
-        PathLookaheadPixels
-    var
-      walked = 0
-      previous = Point(x: bot.playerFootX(), y: bot.playerFootY())
-    result = bot.path[^1]
-    for point in bot.path:
-      walked += max(abs(point.x - previous.x), abs(point.y - previous.y))
-      result = point
-      if walked >= lookahead:
-        break
-      previous = point
+    result = bot.path[0]
+    let nav = bot.navForCurrentMap()
+    if nav != nil and nav.space != nil:
+      # Steer toward the farthest waypoint with a clear line of sight,
+      # like notsus, so paths cut corners instead of hugging waypoints.
+      for i in 0 ..< min(bot.path.len, SteerLookaheadPoints):
+        if nav.space.linePassable(
+          bot.playerFootX(),
+          bot.playerFootY(),
+          bot.path[i].x,
+          bot.path[i].y
+        ):
+          result = bot.path[i]
+        else:
+          break
 
 proc needsMovement(bot: Bot, target: Point): bool =
   ## Returns true when a target is far enough to require button input.
@@ -3458,6 +3088,8 @@ proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
     target = bot.firstMovingPathTarget(goal)
     bot.target = target
     result = bot.movementMask(target)
+  if bot.unstuckTicks > 0 and result != 0:
+    result = UnstuckMasks[bot.unstuckMaskIndex]
   bot.desiredMask = result
   bot.updateStuck(result)
 
