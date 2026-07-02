@@ -162,16 +162,6 @@
       ]
     },
     {
-      "id": "talking_villager",
-      "name": "Talking Villager",
-      "type": "player",
-      "description": "LLM-guided Heartleaf bot that gathers food, talks to players, invites guests, and honors party commitments.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/talking-villager:latest",
-      "run": [
-        "/bin/talking_villager"
-      ]
-    },
-    {
       "id": "shy_villager",
       "name": "Shy Villager",
       "type": "player",
