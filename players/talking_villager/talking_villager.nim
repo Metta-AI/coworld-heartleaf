@@ -221,6 +221,8 @@ type
     selfIndex: int
     selfX, selfY: int
     previousX, previousY: int
+    previous2X, previous2Y: int
+    velEstX, velEstY: int
     stuckTicks: int
     unstuckTicks: int
     unstuckMaskIndex: int
@@ -1424,10 +1426,17 @@ proc updateStuck(bot: Bot, mask: uint8) =
   let
     footX = bot.playerFootX()
     footY = bot.playerFootY()
-  if moving and footX == bot.previousX and footY == bot.previousY:
+    blocked = footX == bot.previousX and footY == bot.previousY
+    wobbling = footX == bot.previous2X and footY == bot.previous2Y and
+      not blocked
+  if moving and (blocked or wobbling):
     inc bot.stuckTicks
   else:
     bot.stuckTicks = 0
+  bot.velEstX = footX - bot.previousX
+  bot.velEstY = footY - bot.previousY
+  bot.previous2X = bot.previousX
+  bot.previous2Y = bot.previousY
   bot.previousX = footX
   bot.previousY = footY
   if bot.unstuckTicks > 0:
@@ -2950,6 +2959,10 @@ proc ensurePath(bot: Bot, goal: Goal) =
 
 proc pathTarget(bot: Bot, goal: Goal): Point =
   ## Returns the current lookahead point along the path.
+  if goal.kind == GoalIdle:
+    # An idle goal has no coordinates; stand still instead of
+    # marching toward the map origin.
+    return Point(x: bot.playerFootX(), y: bot.playerFootY())
   result = Point(x: goal.x, y: goal.y)
   if bot.path.len > 1:
     var
@@ -2999,24 +3012,46 @@ proc needsMovement(bot: Bot, target: Point): bool =
   abs(target.x - bot.playerFootX()) > MoveDeadZonePixels or
     abs(target.y - bot.playerFootY()) > MoveDeadZonePixels
 
+proc coastPixels(speed: int): int =
+  ## Approximates how far crewrift friction coasts one speed estimate.
+  ## Friction 144/256 leaves a geometric tail of about 9/7 of one tick.
+  (abs(speed) * 9) div 7
+
+proc axisMask(delta, speed: int, negativeMask, positiveMask: uint8): uint8 =
+  ## Returns one axis input, coasting when momentum already arrives.
+  if abs(delta) <= MoveDeadZonePixels:
+    return 0
+  let towardSpeed =
+    if delta > 0:
+      speed
+    else:
+      -speed
+  if towardSpeed > 0 and coastPixels(towardSpeed) >= abs(delta):
+    return 0
+  if delta > 0:
+    positiveMask
+  else:
+    negativeMask
+
 proc movementMask(bot: Bot, target: Point): uint8 =
-  ## Builds a directional input mask toward one path target.
-  let
-    dx = target.x - bot.playerFootX()
-    dy = target.y - bot.playerFootY()
-  if abs(dx) > MoveDeadZonePixels:
-    if dx > 0:
-      result = result or ButtonRight
-    else:
-      result = result or ButtonLeft
-  if abs(dy) > MoveDeadZonePixels:
-    if dy > 0:
-      result = result or ButtonDown
-    else:
-      result = result or ButtonUp
+  ## Builds a directional input mask with arrival coasting so momentum
+  ## does not overshoot the target and wobble back and forth.
+  axisMask(
+    target.x - bot.playerFootX(),
+    bot.velEstX,
+    ButtonLeft,
+    ButtonRight
+  ) or axisMask(
+    target.y - bot.playerFootY(),
+    bot.velEstY,
+    ButtonUp,
+    ButtonDown
+  )
 
 proc firstMovingPathTarget(bot: Bot, goal: Goal): Point =
   ## Returns the first path point that can actually produce movement.
+  if goal.kind == GoalIdle:
+    return Point(x: bot.playerFootX(), y: bot.playerFootY())
   for point in bot.path:
     if bot.needsMovement(point):
       return point
