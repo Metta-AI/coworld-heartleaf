@@ -2,7 +2,7 @@ import
   std/[algorithm, json, options, os, parseopt, strutils],
   bitworld/[spriteprotocol, resources],
   curly, pathy, supersnappy, whisky,
-  decisions
+  bedrock_auth, decisions
 
 const
 
@@ -293,10 +293,12 @@ proc requireBedrockConfig() =
   ## Raises when live Bedrock cannot be called.
   if mockBedrockReply().len > 0:
     return
-  if bedrockToken().len == 0:
+  if bedrockToken().len == 0 and not hasAwsCredentialSignal():
     raise newException(
       TalkingVillagerError,
-      "AWS_BEARER_TOKEN_BEDROCK or BEDROCK_KEY is not set."
+      "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
+        "BEDROCK_KEY, or provide AWS credentials via env keys, the " &
+        "container endpoint, or IRSA web identity."
     )
 
 proc transientBedrockError(answer: BedrockResult): bool =
@@ -349,20 +351,35 @@ proc permanentBedrockError(answer: BedrockResult): bool =
       message.contains("invalid"):
     return true
 
+proc bedrockHost(): string =
+  ## Returns the Bedrock Runtime host for the selected Region.
+  "bedrock-runtime." & bedrockRegion() & ".amazonaws.com"
+
+proc bedrockPath(): string =
+  ## Returns the REST path for a Bedrock InvokeModel request.
+  "/model/" & bedrockModel().awsUriEncode() & "/invoke"
+
 proc bedrockUrl(): string =
   ## Builds the Bedrock Runtime InvokeModel URL.
-  var endpoint = getEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME").strip()
-  while endpoint.len > 0 and endpoint[^1] == '/':
-    endpoint.setLen(endpoint.len - 1)
-  if endpoint.len == 0:
-    endpoint = "https://bedrock-runtime." & bedrockRegion() & ".amazonaws.com"
-  endpoint & "/model/" & bedrockModel() & "/invoke"
+  let sidecar = sidecarEndpoint()
+  if sidecar.len > 0:
+    return sidecar.joinUrl(bedrockPath())
+  "https://" & bedrockHost() & bedrockPath()
 
-proc bedrockHeaders(): HttpHeaders =
-  ## Builds one Bedrock HTTP header set.
-  result["Authorization"] = "Bearer " & bedrockToken()
-  result["Accept"] = "application/json"
-  result["Content-Type"] = "application/json"
+proc bedrockHeaders(body: string): HttpHeaders =
+  ## Builds one Bedrock HTTP header set for the signed request body.
+  if hasSidecarEndpoint():
+    result["Accept"] = "application/json"
+    result["Content-Type"] = "application/json"
+  elif bedrockToken().len > 0:
+    result["Authorization"] = "Bearer " & bedrockToken()
+    result["Accept"] = "application/json"
+    result["Content-Type"] = "application/json"
+  else:
+    for (key, value) in signedBedrockHeaders(
+      body, bedrockHost(), bedrockPath(), bedrockRegion()
+    ):
+      result[key] = value
   let latency = bedrockPerformanceLatency()
   if latency.len > 0:
     result["X-Amzn-Bedrock-PerformanceConfig-Latency"] = latency
@@ -400,6 +417,8 @@ proc bedrockBody(messages: openArray[ConversationMessage]): string =
     "system": systemPrompt,
     "messages": chatMessages
   }
+  if not hasSidecarEndpoint():
+    body["requestMetadata"] = bedrockRequestMetadata("talking_villager")
   $body
 
 proc parseBedrockReply(body: string): string =
@@ -414,13 +433,14 @@ proc startTalkToBedrock(
   tag: string
 ): bool =
   ## Starts a non-blocking Bedrock request.
-  if bedrockToken().len == 0:
+  if bedrockToken().len == 0 and not hasAwsCredentialSignal():
     return false
+  let body = bedrockBody(messages)
   bedrockCurl.startRequest(
     "POST",
     bedrockUrl(),
-    bedrockHeaders(),
-    bedrockBody(messages),
+    bedrockHeaders(body),
+    body,
     bedrockTimeoutSeconds(),
     tag
   )
@@ -2556,7 +2576,9 @@ proc startLlmDecision(bot: Bot): bool =
   if not started:
     raise newException(
       TalkingVillagerError,
-      "AWS_BEARER_TOKEN_BEDROCK or BEDROCK_KEY is not set."
+      "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
+        "BEDROCK_KEY, or provide AWS credentials via env keys, the " &
+        "container endpoint, or IRSA web identity."
     )
   bot.llmWaiting = true
   bot.decisionStartedTick = bot.frameTick
