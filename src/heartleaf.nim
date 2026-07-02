@@ -52,6 +52,7 @@ const
   DayStartMinutes = 8 * 60
   DayEndMinutes = 22 * 60
   DinnerMinutes = 18 * 60
+  DinnerTallyMinutes = DinnerMinutes + 55
   DayStepMinutes = 5
   DayTotalMinutes = DayEndMinutes - DayStartMinutes
   DayStepCount = DayTotalMinutes div DayStepMinutes
@@ -2463,7 +2464,7 @@ proc step*(sim: SimServer, inputs: openArray[InputState]) =
     sim.moveAxis(sim.players[i], false)
   sim.updateMessages()
   inc sim.dayTick
-  if not sim.dinnerDone and sim.currentDayMinutes() >= DinnerMinutes:
+  if not sim.dinnerDone and sim.currentDayMinutes() >= DinnerTallyMinutes:
     sim.startDinnerParties()
   if sim.dayTick >= DayTicks:
     sim.startScoreScreen()

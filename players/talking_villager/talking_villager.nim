@@ -1141,13 +1141,18 @@ proc clockAnnouncement(minutes: int): string =
   if minutes < DinnerMinutes:
     let hours = (DinnerMinutes - minutes) div 60
     if hours <= 0:
-      "It is " & clock & ". Dinner starts within the hour!"
+      "It is " & clock & ". Dinner starts within the hour! Be INSIDE " &
+        "your dinner house before it is served at 6:55pm - if you are " &
+        "outside when it is served you miss dinner entirely."
     elif hours == 1:
-      "It is " & clock & " (1 hour till dinner)."
+      "It is " & clock & " (1 hour till dinner). Settle on a dinner " &
+        "house now; you must be inside it before 6:55pm."
     else:
       "It is " & clock & " (" & $hours & " hours till dinner)."
   elif minutes < DinnerMinutes + 60:
-    "It is " & clock & ". It is dinner time!"
+    "It is " & clock & ". It is dinner time! Dinner is served at " &
+      "6:55pm sharp. Get inside the dinner house NOW and STAY inside - " &
+      "anyone outside at 6:55pm misses dinner and scores nothing."
   elif minutes < DayEndMinutes:
     let hours = (DayEndMinutes - minutes) div 60
     if hours <= 1:
