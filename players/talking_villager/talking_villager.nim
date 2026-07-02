@@ -2,7 +2,7 @@ import
   std/[algorithm, json, options, os, parseopt, strutils],
   bitworld/[spriteprotocol, resources],
   curly, pathy, supersnappy, whisky,
-  decisions
+  decisions, heartleaf/common
 
 const
 
@@ -13,17 +13,7 @@ const
   DefaultBedrockMaxTokens = 192
   BedrockTemperature = 0.2
 
-  ViewportWidth = 320
-  ViewportHeight = 200
-  FoodSpriteSize = 32
-  FoodVeggieSlots = 24
 
-  PlayerBoxWidth = 14
-  PlayerBoxHeight = 8
-  PlayerBoxOffsetX = 9
-  PlayerBoxOffsetY = 22
-  NavPointOffsetX = PlayerBoxOffsetX + PlayerBoxWidth div 2
-  NavPointOffsetY = PlayerBoxOffsetY + PlayerBoxHeight div 2
 
   CollectActionRadius = 32
   PersonStandRadius = 30
@@ -40,19 +30,15 @@ const
   MaxDrainMessages = 256
   DefaultName = "talking_villager"
   UnknownHouse = -1
-  HouseCount = 9
   DecisionRetryTicks = 24
   DecisionStuckTicks = RepathStuckTicks * 2
   HighFoodForInvites = 6
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
-  DayStartMinutes = 8 * 60
   HostPrepMinutes = 15 * 60
   InviteStartMinutes = 16 * 60
   HouseEnterMinutes = 17 * 60
-  DinnerMinutes = 18 * 60
   PartyLeaveMinutes = 20 * 60
-  DayEndMinutes = 22 * 60
   LatePartySearchMinutes = 16 * 60
   MaxHostWaitMinutes = 90
   StrongHostFood = 12
@@ -122,12 +108,6 @@ type
     GoalExitHouse
     GoalStandPerson
     GoalMove
-
-  Rect = object
-    x, y, w, h: int
-
-  Point = object
-    x, y: int
 
   Goal = object
     kind: GoalKind
@@ -466,10 +446,6 @@ proc loadSoulInstructions(bot: Bot, name: string): string =
     return bot.soulTemplate.replace("{name}", cleanName)
   "Your name is " & cleanName & ".\n\n" & bot.soulTemplate
 
-proc toRect(rect: ResourceRect): Rect =
-  ## Converts one resource rectangle to the bot rectangle type.
-  Rect(x: rect.x, y: rect.y, w: rect.w, h: rect.h)
-
 proc rectName(rect: ResourceRect): string =
   ## Returns the normalized resource rectangle name.
   rect.name.strip().toLowerAscii()
@@ -516,67 +492,25 @@ proc loadBotResources(): Resources =
       result.exit = rect.toRect()
       result.hasExit = true
 
-proc contains(rect: Rect, x, y: int): bool =
-  ## Returns true when a point is inside one rectangle.
-  x >= rect.x and y >= rect.y and x < rect.x + rect.w and y < rect.y + rect.h
-
 proc screenRectVisible(x, y, w, h: int): bool =
   ## Returns true when one screen-space rectangle overlaps the viewport.
   x < ViewportWidth and y < ViewportHeight and x + w > 0 and y + h > 0
 
-proc center(rect: Rect): Point =
-  ## Returns the center point for one rectangle.
-  Point(x: rect.x + rect.w div 2, y: rect.y + rect.h div 2)
-
-proc navPointX(x: int): int =
-  ## Converts a sprite X coordinate to its foot-center X coordinate.
-  x + NavPointOffsetX
-
-proc navPointY(y: int): int =
-  ## Converts a sprite Y coordinate to its foot-center Y coordinate.
-  y + NavPointOffsetY
-
-proc pointRectDistanceSquared(x, y: int, rect: Rect): int =
-  ## Returns the squared distance from one point to one rectangle.
-  let
-    dx =
-      if x < rect.x:
-        rect.x - x
-      elif x >= rect.x + rect.w:
-        x - (rect.x + rect.w - 1)
-      else:
-        0
-    dy =
-      if y < rect.y:
-        rect.y - y
-      elif y >= rect.y + rect.h:
-        y - (rect.y + rect.h - 1)
-      else:
-        0
-  dx * dx + dy * dy
-
 proc playerDistanceSquared(bot: Bot, rect: Rect): int =
   ## Returns the squared distance from the bot foot pixel to one rectangle.
   pointRectDistanceSquared(
-    bot.selfX.navPointX(),
-    bot.selfY.navPointY(),
+    bot.selfX.footXAt(),
+    bot.selfY.footYAt(),
     rect
   )
 
-proc distanceSquared(ax, ay, bx, by: int): int =
-  ## Returns the squared distance between two points.
-  let
-    dx = ax - bx
-    dy = ay - by
-  dx * dx + dy * dy
-
 proc playerFootX(bot: Bot): int =
   ## Returns the bot foot-center X coordinate.
-  bot.selfX.navPointX()
+  bot.selfX.footXAt()
 
 proc playerFootY(bot: Bot): int =
   ## Returns the bot foot-center Y coordinate.
-  bot.selfY.navPointY()
+  bot.selfY.footYAt()
 
 proc objectWorldX(bot: Bot, objectState: ObjectState): int =
   ## Converts one object X coordinate to current-map coordinates.
@@ -588,11 +522,11 @@ proc objectWorldY(bot: Bot, objectState: ObjectState): int =
 
 proc objectFootX(bot: Bot, objectState: ObjectState): int =
   ## Converts one object X coordinate to current-map foot center.
-  bot.objectWorldX(objectState).navPointX()
+  bot.objectWorldX(objectState).footXAt()
 
 proc objectFootY(bot: Bot, objectState: ObjectState): int =
   ## Converts one object Y coordinate to current-map foot center.
-  bot.objectWorldY(objectState).navPointY()
+  bot.objectWorldY(objectState).footYAt()
 
 proc spriteInfo(bot: Bot, spriteId: int): SpriteInfo =
   ## Returns sprite metadata for one sprite id.
@@ -1231,8 +1165,8 @@ proc findSelfIndexByCamera(bot: Bot): int =
     if objectId < PlayerObjectBase or objectId >= NameObjectBase:
       continue
     let distance = distanceSquared(
-      objectState.x + NavPointOffsetX,
-      objectState.y + NavPointOffsetY,
+      objectState.x.footXAt(),
+      objectState.y.footYAt(),
       ViewportWidth div 2,
       ViewportHeight div 2
     )
