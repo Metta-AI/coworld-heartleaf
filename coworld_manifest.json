@@ -302,5 +302,6 @@
         "player_id": "fatherly_villager"
       }
     ]
-  }
+  },
+  "players_per_user": 9
 }
