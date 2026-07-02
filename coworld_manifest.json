@@ -7,8 +7,10 @@
     "owner": "treeform@softmax.com",
     "runnable": {
       "type": "game",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/games/heartleaf:latest",
-      "run": ["/bin/heartleaf"]
+      "image": "{{GAME_IMAGE}}",
+      "run": [
+        "/bin/heartleaf"
+      ]
     },
     "config_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -156,7 +158,7 @@
       "name": "Villager",
       "type": "player",
       "description": "Sprite-protocol Heartleaf bot that gathers food, greets nearby gnomes, hosts dinner, and searches for active parties.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/villager:latest",
+      "image": "{{VILLAGER_IMAGE}}",
       "run": [
         "/bin/villager"
       ]
@@ -166,7 +168,7 @@
       "name": "Shy Villager",
       "type": "player",
       "description": "Shy LLM-guided Heartleaf gnome that gathers quietly, speaks softly, and honors party invitations.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/shy-villager:latest",
+      "image": "{{SHY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/shy_villager"
       ]
@@ -176,7 +178,7 @@
       "name": "Chatty Villager",
       "type": "player",
       "description": "Chatty LLM-guided Heartleaf gnome that greets everyone, talks constantly, and spreads party invitations.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/chatty-villager:latest",
+      "image": "{{CHATTY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/chatty_villager"
       ]
@@ -186,7 +188,7 @@
       "name": "Friendly Villager",
       "type": "player",
       "description": "Friendly LLM-guided Heartleaf gnome that welcomes everyone, shares food, and hosts warm dinners.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/friendly-villager:latest",
+      "image": "{{FRIENDLY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/friendly_villager"
       ]
@@ -196,10 +198,20 @@
       "name": "Fatherly Villager",
       "type": "player",
       "description": "Fatherly LLM-guided Heartleaf gnome that checks on others, shares food, and makes sure nobody dines alone.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/fatherly-villager:latest",
+      "image": "{{FATHERLY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/fatherly_villager"
       ]
+    }
+  ],
+  "commissioner": [
+    {
+      "id": "default-commissioner",
+      "name": "Default Commissioner",
+      "type": "commissioner",
+      "description": "Game-agnostic round-robin commissioner with mean-score rankings.",
+      "source_url": "https://github.com/Metta-AI/commissioners/tree/main/commissioners/ruleset_strategy_commissioner",
+      "image": "{{COMMISSIONER_IMAGE}}"
     }
   ],
   "reporter": [
