@@ -2593,7 +2593,8 @@ proc globalPanelClickedPlayer(message: Message): int =
       let row = (y - GlobalPanelPad) div GlobalPanelRowHeight
       if row >= 0 and row < HouseCount:
         return row
-    of SpriteClientChatMessage, SpriteClientInputMessage:
+    of SpriteClientChatMessage, SpriteClientInputMessage,
+        SpriteClientReadyMessage, SpriteClientDebugSpriteMessage:
       discard
 
 proc playerChatFromMessage(message: Message): string =
