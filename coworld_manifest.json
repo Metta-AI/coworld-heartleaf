@@ -259,7 +259,7 @@
     "game_config": {
       "seed": 4731713,
       "maxTicks": 1200,
-      "maxGames": 0
+      "maxGames": 1
     },
     "players": [
       {
