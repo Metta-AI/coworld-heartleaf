@@ -27,7 +27,6 @@ const
   NavPointOffsetX = PlayerBoxOffsetX + PlayerBoxWidth div 2
   NavPointOffsetY = PlayerBoxOffsetY + PlayerBoxHeight div 2
   CollectActionRadius = 32
-  GreetingRadius = 180
   PersonStandRadius = 30
   NavStep = 2
   PathArrivePixels = 3
@@ -222,6 +221,8 @@ type
     selfIndex: int
     selfX, selfY: int
     previousX, previousY: int
+    previous2X, previous2Y: int
+    velEstX, velEstY: int
     stuckTicks: int
     unstuckTicks: int
     unstuckMaskIndex: int
@@ -232,8 +233,7 @@ type
     goal: Goal
     path: seq[Point]
     gardenChecked: seq[bool]
-    greetedNames: seq[string]
-    lastGreetingTick: int
+    lastClockHour: int
     chatHistory: seq[ConversationMessage]
     heardChats: seq[string]
     currentGarden: int
@@ -490,50 +490,20 @@ proc repoDir(): string =
   ## Returns the Heartleaf repository directory.
   currentSourcePath().parentDir().parentDir().parentDir()
 
-const DefaultSoulMarkdown = """
-Your name is {name}. You are a Heartleaf gnome player.
-
-Response format:
-Return only one JSON object and no prose. Allowed actions are
-keep_gathering_plants, find_person, find_house, go_home,
-stand_at_house_garden, stand_next_to_person, say_to_person, and
-go_to_party. Fields are action, targetName, houseIndex, message,
-commitParty, and reason. houseIndex is 1 to 9. Only use numeric
-houseIndex values in JSON fields.
-
-Conversation memory:
-The conversation before the final state report is the full chat
-transcript of this game: user turns are lines you heard, formatted as
-Name: text, and your own earlier turns are what you said out loud.
-Remember it. Follow up on invitations you gave or received, answer
-questions people asked you, do not repeat greetings to the same person,
-and keep your promises. Even with a long transcript, always respond
-with only one JSON object.
-
-General strategy:
-Gather as much food as possible early. If food is high by 3pm, stand at
-your house to greet people. At 4pm, invite people to your house if you
-have food. After 5pm, stop gathering and switch to social party
-planning. After 6pm, go to a party or your own house even if food is
-low. If food is low, seek a party. If food is high, invite people to
-your party using say_to_person.
-
-Chat rules:
-Say short friendly phrases to nearby players so they are more likely to
-cooperate. Prefer messages under 12 words. In chat messages, never call
-houses by number. Use my house, your house, or the owner's name, like
-Anton's house. If you agree to attend a party, set commitParty true,
-set houseIndex to that owner's house, and say a short confirmation. Do
-not confirm attendance if you are already committed somewhere else or
-hosting your own party. Choose who to visit, who to invite, and exactly
-what to say. Honor party agreements unless nobody else is there.
-"""
-
 var soulTemplate = ""
 
 proc setSoulTemplate*(soul: string) =
   ## Sets the soul markdown used as the full LLM system prompt.
   soulTemplate = soul.strip()
+
+proc requireSoul() =
+  ## Raises when no soul markdown was provided.
+  if soulTemplate.len == 0:
+    raise newException(
+      TalkingVillagerError,
+      "No soul markdown was provided. " &
+        "Pass a complete soul to talkingVillagerMain."
+    )
 
 proc loadSoulInstructions(name: string): string =
   ## Builds the full system prompt for one player name.
@@ -542,14 +512,9 @@ proc loadSoulInstructions(name: string): string =
       name.strip()
     else:
       "a Heartleaf gnome"
-  let soul =
-    if soulTemplate.len > 0:
-      soulTemplate
-    else:
-      DefaultSoulMarkdown.strip()
-  if soul.contains("{name}"):
-    return soul.replace("{name}", cleanName)
-  "Your name is " & cleanName & ".\n\n" & soul
+  if soulTemplate.contains("{name}"):
+    return soulTemplate.replace("{name}", cleanName)
+  "Your name is " & cleanName & ".\n\n" & soulTemplate
 
 when defined(gui):
   proc atlasPath(): string =
@@ -801,16 +766,6 @@ proc scanHeardChats(bot: Bot) =
     if speaker.len == 0 or speaker == bot.playerName:
       continue
     bot.recordChatLine("user", speaker, text)
-
-proc hasGreeted(bot: Bot, name: string): bool =
-  ## Returns true when this bot has greeted a name today.
-  for greetedName in bot.greetedNames:
-    if greetedName == name:
-      return true
-
-proc greetingText(bot: Bot, name: string): string =
-  ## Returns one short greeting for a nearby player.
-  "Hi " & name
 
 proc logName(bot: Bot): string =
   ## Returns the username and fixed player name for bot logs.
@@ -1253,12 +1208,45 @@ proc clockName(minutes: int): string =
       $minute
   $hour & ":" & minuteText & suffix
 
+proc clockAnnouncement(minutes: int): string =
+  ## Returns one hourly clock line for the conversation history.
+  let clock = minutes.clockName()
+  if minutes < DinnerMinutes:
+    let hours = (DinnerMinutes - minutes) div 60
+    if hours <= 0:
+      "It is " & clock & ". Dinner starts within the hour!"
+    elif hours == 1:
+      "It is " & clock & " (1 hour till dinner)."
+    else:
+      "It is " & clock & " (" & $hours & " hours till dinner)."
+  elif minutes < DinnerMinutes + 60:
+    "It is " & clock & ". It is dinner time!"
+  elif minutes < DayEndMinutes:
+    let hours = (DayEndMinutes - minutes) div 60
+    if hours <= 1:
+      "It is " & clock & " (night falls within the hour)."
+    else:
+      "It is " & clock & " (" & $hours & " hours till night time)."
+  else:
+    "It is " & clock & ". It is night time."
+
+proc maybeRecordClock(bot: Bot) =
+  ## Records one clock line in the conversation every game hour.
+  if bot.minutes < 0:
+    return
+  let hour = bot.minutes div 60
+  if hour == bot.lastClockHour:
+    return
+  bot.lastClockHour = hour
+  bot.chatHistory.add(ConversationMessage(
+    role: "user",
+    content: "Clock: " & bot.minutes.clockAnnouncement()
+  ))
+
 proc resetGardenPlan(bot: Bot) =
-  ## Resets the static garden checklist and greetings for a new day.
+  ## Resets the static garden checklist for a new day.
   inc bot.dayIndex
   bot.gardenChecked = newSeq[bool](bot.resources.gardens.len)
-  bot.greetedNames.setLen(0)
-  bot.lastGreetingTick = -1
   bot.currentGarden = -1
   bot.partyHouse = UnknownHouse
   bot.searchHouse = UnknownHouse
@@ -1438,10 +1426,17 @@ proc updateStuck(bot: Bot, mask: uint8) =
   let
     footX = bot.playerFootX()
     footY = bot.playerFootY()
-  if moving and footX == bot.previousX and footY == bot.previousY:
+    blocked = footX == bot.previousX and footY == bot.previousY
+    wobbling = footX == bot.previous2X and footY == bot.previous2Y and
+      not blocked
+  if moving and (blocked or wobbling):
     inc bot.stuckTicks
   else:
     bot.stuckTicks = 0
+  bot.velEstX = footX - bot.previousX
+  bot.velEstY = footY - bot.previousY
+  bot.previous2X = bot.previousX
+  bot.previous2Y = bot.previousY
   bot.previousX = footX
   bot.previousY = footY
   if bot.unstuckTicks > 0:
@@ -1543,42 +1538,6 @@ proc analyze(bot: Bot) =
       bot.playerName.len > 0:
     bot.currentHouse = bot.homeIndex
 
-proc maybeGreetNearby(bot: Bot, ws: WebSocket): bool =
-  ## Greets newly seen nearby players once per day.
-  if not bot.localized or bot.mapKind == MapOverlay:
-    return false
-  let
-    selfX = bot.playerFootX()
-    selfY = bot.playerFootY()
-    radiusSquared = GreetingRadius * GreetingRadius
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    let playerIndex = objectId - PlayerObjectBase
-    if playerIndex == bot.selfIndex:
-      continue
-    let name = bot.visiblePlayerName(playerIndex)
-    if name.len == 0 or name == bot.playerName or bot.hasGreeted(name):
-      continue
-    let distance = distanceSquared(
-      selfX,
-      selfY,
-      bot.objectFootX(objectState),
-      bot.objectFootY(objectState)
-    )
-    if distance > radiusSquared:
-      continue
-    let message = bot.greetingText(name)
-    bot.greetedNames.add(name)
-    bot.lastGreetingTick = bot.frameTick
-    ws.send(blobFromChat(message), BinaryMessage)
-    bot.recordOwnChat(message)
-    bot.log("chat " & message)
-    return true
-  false
-
 proc homeIndexFromName(name: string): int =
   ## Guesses a zero-based home index from trailing name digits.
   var start = name.len
@@ -1637,8 +1596,7 @@ proc initBot(name: string, slot: int, decodeVisualSprites = false): Bot =
   result.committedPartyHouse = UnknownHouse
   result.dayIndex = 0
   result.gardenChecked = newSeq[bool](result.resources.gardens.len)
-  result.greetedNames = @[]
-  result.lastGreetingTick = -1
+  result.lastClockHour = -1
 
 proc gardenGoal(bot: Bot): Goal =
   ## Returns a goal for the nearest garden that may still have food.
@@ -3001,6 +2959,10 @@ proc ensurePath(bot: Bot, goal: Goal) =
 
 proc pathTarget(bot: Bot, goal: Goal): Point =
   ## Returns the current lookahead point along the path.
+  if goal.kind == GoalIdle:
+    # An idle goal has no coordinates; stand still instead of
+    # marching toward the map origin.
+    return Point(x: bot.playerFootX(), y: bot.playerFootY())
   result = Point(x: goal.x, y: goal.y)
   if bot.path.len > 1:
     var
@@ -3050,24 +3012,46 @@ proc needsMovement(bot: Bot, target: Point): bool =
   abs(target.x - bot.playerFootX()) > MoveDeadZonePixels or
     abs(target.y - bot.playerFootY()) > MoveDeadZonePixels
 
+proc coastPixels(speed: int): int =
+  ## Approximates how far crewrift friction coasts one speed estimate.
+  ## Friction 144/256 leaves a geometric tail of about 9/7 of one tick.
+  (abs(speed) * 9) div 7
+
+proc axisMask(delta, speed: int, negativeMask, positiveMask: uint8): uint8 =
+  ## Returns one axis input, coasting when momentum already arrives.
+  if abs(delta) <= MoveDeadZonePixels:
+    return 0
+  let towardSpeed =
+    if delta > 0:
+      speed
+    else:
+      -speed
+  if towardSpeed > 0 and coastPixels(towardSpeed) >= abs(delta):
+    return 0
+  if delta > 0:
+    positiveMask
+  else:
+    negativeMask
+
 proc movementMask(bot: Bot, target: Point): uint8 =
-  ## Builds a directional input mask toward one path target.
-  let
-    dx = target.x - bot.playerFootX()
-    dy = target.y - bot.playerFootY()
-  if abs(dx) > MoveDeadZonePixels:
-    if dx > 0:
-      result = result or ButtonRight
-    else:
-      result = result or ButtonLeft
-  if abs(dy) > MoveDeadZonePixels:
-    if dy > 0:
-      result = result or ButtonDown
-    else:
-      result = result or ButtonUp
+  ## Builds a directional input mask with arrival coasting so momentum
+  ## does not overshoot the target and wobble back and forth.
+  axisMask(
+    target.x - bot.playerFootX(),
+    bot.velEstX,
+    ButtonLeft,
+    ButtonRight
+  ) or axisMask(
+    target.y - bot.playerFootY(),
+    bot.velEstY,
+    ButtonUp,
+    ButtonDown
+  )
 
 proc firstMovingPathTarget(bot: Bot, goal: Goal): Point =
   ## Returns the first path point that can actually produce movement.
+  if goal.kind == GoalIdle:
+    return Point(x: bot.playerFootX(), y: bot.playerFootY())
   for point in bot.path:
     if bot.needsMovement(point):
       return point
@@ -3077,14 +3061,10 @@ proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
   ## Chooses the next input mask for one game frame.
   bot.analyze()
   bot.scanHeardChats()
+  bot.maybeRecordClock()
   if not bot.localized:
     bot.desiredMask = 0
     bot.hasTarget = false
-    return 0
-  if bot.maybeGreetNearby(ws):
-    bot.desiredMask = 0
-    bot.hasTarget = false
-    bot.updateStuck(0)
     return 0
   discard bot.pollLlmDecision()
   if bot.llmWaiting:
@@ -3983,6 +3963,7 @@ proc runBot(
       false
   var bot = initBot(name, slot, useGui)
   try:
+    requireSoul()
     requireBedrockConfig()
   except TalkingVillagerError as e:
     echo bot.name, " fatal: ", e.msg
@@ -4008,8 +3989,7 @@ proc runBot(
               break
           continue
         let nextMask = bot.decideNextMask(ws)
-        if bot.lastGreetingTick != bot.frameTick:
-          bot.maybeSendDecisionChat(ws)
+        bot.maybeSendDecisionChat(ws)
         if nextMask != bot.lastMask:
           ws.send(blobFromMask(nextMask), BinaryMessage)
           bot.lastMask = nextMask
