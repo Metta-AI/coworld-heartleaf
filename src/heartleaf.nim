@@ -10,7 +10,6 @@ const
   DefaultSeed = 0x484541
   DefaultMaxTicks = 0
   DefaultMaxGames = 0
-  DebugOutlines = false
   MainMapIndex = 0
   HomeMapIndexBase = 1
   UnassignedPlayerIndex = 0x7fffffff
@@ -211,13 +210,6 @@ const
     "Onion"
   ]
 
-when DebugOutlines:
-  const
-    DebugSpriteId = 3
-    HomeDebugSpriteId = 6
-    DebugObjectId = 3
-    DebugZ = 25_000
-
 type
   Direction = enum
     DirDown
@@ -238,7 +230,6 @@ type
     overhangSprite: RgbaSprite
     bottomTints: array[DayTintCount, RgbaSprite]
     overhangTints: array[DayTintCount, RgbaSprite]
-    debugSprite: RgbaSprite
     walkMask: seq[bool]
 
   GnomeSprites = ref object
@@ -301,8 +292,8 @@ type
   SimServer = ref object
     mainMap: WorldMap
     homeMaps: array[HouseCount, WorldMap]
-    debugRects: seq[ResourceRect]
-    homeDebugRects: seq[ResourceRect]
+    resourceRects: seq[ResourceRect]
+    homeResourceRects: seq[ResourceRect]
     homeResources: HomeResources
     foods: FoodSprites
     gardens: seq[Garden]
@@ -371,7 +362,7 @@ proc dataDir(): string =
   let sourceData = currentSourcePath().parentDir().parentDir() / "data"
   if fileExists(sourceData / "map.aseprite"):
     return sourceData
-  currentSourcePath().parentDir() / "data"
+  return currentSourcePath().parentDir() / "data"
 
 proc layerIndexByName(
   aseprite: AsepriteSprite,
@@ -382,7 +373,7 @@ proc layerIndexByName(
     for name in names:
       if layer.name.normalize() == name.normalize():
         return i
-  -1
+  return -1
 
 proc requiredLayerIndex(
   aseprite: AsepriteSprite,
@@ -396,15 +387,6 @@ proc requiredLayerIndex(
       HeartleafError,
       "Map aseprite needs a " & label & " layer."
     )
-
-proc resourceDebugSprite(
-  width, height: int,
-  rects: openArray[ResourceRect]
-): RgbaSprite =
-  ## Builds one transparent sprite containing resource debug outlines.
-  result = transparentRgbaSprite(width, height)
-  for rect in rects:
-    result.strokeRect(rect.x, rect.y, rect.w, rect.h, rect.color)
 
 proc toRect(rect: ResourceRect): Rect =
   ## Converts one resource rectangle to a gameplay rectangle.
@@ -472,11 +454,7 @@ proc loadWalkMask(walkImage: Image): seq[bool] =
     for x in 0 ..< walkImage.width:
       result[y * walkImage.width + x] = walkImage[x, y].a > 0
 
-proc loadWorldMap(
-  path,
-  label: string,
-  debugRects: seq[ResourceRect]
-): WorldMap =
+proc loadWorldMap(path, label: string): WorldMap =
   ## Loads one layered map with bottom, walkable, and overhang data.
   result = WorldMap()
   let aseprite = readAseprite(path)
@@ -516,11 +494,6 @@ proc loadWorldMap(
       TintSaturationScales[i],
       TintValueScales[i]
     )
-  result.debugSprite = resourceDebugSprite(
-    result.width,
-    result.height,
-    debugRects
-  )
   result.walkMask = walkImage.loadWalkMask()
 
 proc walkabilitySprite(world: WorldMap): RgbaSprite =
@@ -607,15 +580,15 @@ proc initSimServer(seed = DefaultSeed): SimServer =
     homeResourcePath = dataRoot / "home_map.resource"
     tiny5Path = dataRoot / "tiny5.aseprite"
   result.rng = initRand(seed)
-  result.debugRects = loadResourceRects(resourcePath)
-  result.homeDebugRects = loadResourceRects(homeResourcePath)
-  result.homeResources = loadHomeResources(result.homeDebugRects)
-  result.mainMap = loadWorldMap(mapPath, "Map", result.debugRects)
-  let homeMap = loadWorldMap(homeMapPath, "Home map", result.homeDebugRects)
+  result.resourceRects = loadResourceRects(resourcePath)
+  result.homeResourceRects = loadResourceRects(homeResourcePath)
+  result.homeResources = loadHomeResources(result.homeResourceRects)
+  result.mainMap = loadWorldMap(mapPath, "Map")
+  let homeMap = loadWorldMap(homeMapPath, "Home map")
   for i in 0 ..< HouseCount:
     result.homeMaps[i] = homeMap
-  result.houses = loadHouses(result.debugRects)
-  result.gardens = loadGardens(result.debugRects, result.rng)
+  result.houses = loadHouses(result.resourceRects)
+  result.gardens = loadGardens(result.resourceRects, result.rng)
   result.foods = loadFoodSprites(foodPath)
   result.gnomes = loadGnomeSprites(gnomesPath)
   if result.gnomes.len == 0:
@@ -884,7 +857,7 @@ proc scoreDisplayName(player: Player): string =
   ## Returns the score-screen name with username and player name.
   if player.username.len == 0:
     return player.playerName
-  player.username & " (" & player.playerName & ")"
+  return player.username & " (" & player.playerName & ")"
 
 proc scoreOverlaySprite(sim: SimServer): RgbaSprite =
   ## Builds the full-screen cumulative score overlay.
@@ -1059,7 +1032,7 @@ proc addNameTag(
     MapLayerId,
     spriteId
   )
-  y
+  return y
 
 proc addSpeechBubble(
   packet: var seq[uint8],
@@ -1124,25 +1097,25 @@ proc mainBottomSpriteId(tintIndex: int): int =
   ## Returns the main map bottom sprite id for one day tint.
   if tintIndex < 0:
     return BottomSpriteId
-  MainBottomTintSpriteBase + tintIndex
+  return MainBottomTintSpriteBase + tintIndex
 
 proc mainOverhangSpriteId(tintIndex: int): int =
   ## Returns the main map overhang sprite id for one day tint.
   if tintIndex < 0:
     return OverhangSpriteId
-  MainOverhangTintSpriteBase + tintIndex
+  return MainOverhangTintSpriteBase + tintIndex
 
 proc homeBottomSpriteId(tintIndex: int): int =
   ## Returns the home map bottom sprite id for one day tint.
   if tintIndex < 0:
     return HomeBottomSpriteId
-  HomeBottomTintSpriteBase + tintIndex
+  return HomeBottomTintSpriteBase + tintIndex
 
 proc homeOverhangSpriteId(tintIndex: int): int =
   ## Returns the home map overhang sprite id for one day tint.
   if tintIndex < 0:
     return HomeOverhangSpriteId
-  HomeOverhangTintSpriteBase + tintIndex
+  return HomeOverhangTintSpriteBase + tintIndex
 
 proc clockGlyphIndex(ch: char): int =
   ## Returns the compact clock sprite slot for one glyph.
@@ -1152,7 +1125,7 @@ proc clockGlyphIndex(ch: char): int =
   for i, glyph in ClockGlyphs:
     if glyph == ' ':
       return i
-  0
+  return 0
 
 proc clockGlyphSpriteId(ch: char): int =
   ## Returns the sprite id for one clock glyph.
@@ -1162,13 +1135,13 @@ proc foodName(foodIndex: int): string =
   ## Returns the display name for one food slot.
   if foodIndex >= 0 and foodIndex < FoodNames.len:
     return FoodNames[foodIndex]
-  "food " & $foodIndex
+  return "food " & $foodIndex
 
 proc playerNameForHouse(houseIndex: int): string =
   ## Returns the fixed in-game player name for one house.
   if houseIndex >= 0 and houseIndex < PlayerNames.len:
     return PlayerNames[houseIndex]
-  "Player"
+  return "Player"
 
 proc dailyResultsJson*(sim: SimServer): string =
   ## Returns one daily player score result as JSON.
@@ -1200,7 +1173,7 @@ proc dailyResultsJson*(sim: SimServer): string =
   results["usernames"] = usernames
   results["playerNames"] = playerNames
   results["scores"] = scores
-  $results
+  return $results
 
 proc totalItems(foods: FoodCounts): int =
   ## Returns the total number of items in one food count set.
@@ -1229,18 +1202,18 @@ proc mapFor(sim: SimServer, mapIndex: int): WorldMap =
   ## Returns the live world map data for one map id.
   if mapIndex.isHomeMap():
     return sim.homeMaps[mapIndex - HomeMapIndexBase]
-  sim.mainMap
+  return sim.mainMap
 
 proc currentDayMinutes(sim: SimServer): int =
   ## Returns the current in-game minute of the day.
   let step = min(DayStepCount, sim.dayTick * DayStepCount div DayTicks)
-  DayStartMinutes + step * DayStepMinutes
+  return DayStartMinutes + step * DayStepMinutes
 
 proc twoDigits(value: int): string =
   ## Formats one integer as two decimal digits.
   if value < 10:
     return "0" & $value
-  $value
+  return $value
 
 proc clockText(sim: SimServer): string =
   ## Returns the current weekday and game clock as 12-hour text.
@@ -1259,14 +1232,14 @@ proc clockText(sim: SimServer): string =
         12
       else:
         hour24 mod 12
-  weekday & " " & $hour12 & ":" & minute.twoDigits() & suffix
+  return weekday & " " & $hour12 & ":" & minute.twoDigits() & suffix
 
 proc dayTintIndex(sim: SimServer): int =
   ## Returns the active dusk tint index, or -1 during full daylight.
   let minutes = sim.currentDayMinutes()
   if minutes < DuskStartMinutes:
     return -1
-  min(
+  return min(
     DayTintCount - 1,
     (minutes - DuskStartMinutes) * DayTintCount div
       (DayEndMinutes - DuskStartMinutes)
@@ -1308,12 +1281,6 @@ proc addSpriteProtocolInit(
     sim.mainMap.overhangSprite,
     "heartleaf overhang"
   )
-  when DebugOutlines:
-    packet.addRgbaSprite(
-      DebugSpriteId,
-      sim.mainMap.debugSprite,
-      "heartleaf debug"
-    )
   for i in 0 ..< DayTintCount:
     packet.addRgbaSprite(
       mainBottomSpriteId(i),
@@ -1335,12 +1302,6 @@ proc addSpriteProtocolInit(
     sim.homeMaps[0].overhangSprite,
     "heartleaf home overhang"
   )
-  when DebugOutlines:
-    packet.addRgbaSprite(
-      HomeDebugSpriteId,
-      sim.homeMaps[0].debugSprite,
-      "heartleaf home debug"
-    )
   for i in 0 ..< DayTintCount:
     packet.addRgbaSprite(
       homeBottomSpriteId(i),
@@ -1405,7 +1366,7 @@ proc playerFootY(player: Player): int =
 
 proc contains(rect: Rect, x, y: int): bool =
   ## Returns true when a point is inside one rectangle.
-  x >= rect.x and
+  return x >= rect.x and
     y >= rect.y and
     x < rect.x + rect.w and
     y < rect.y + rect.h
@@ -1414,7 +1375,7 @@ proc isWalkable(world: WorldMap, x, y: int): bool =
   ## Returns true when one world pixel is walkable.
   if x < 0 or y < 0 or x >= world.width or y >= world.height:
     return false
-  world.walkMask[y * world.width + x]
+  return world.walkMask[y * world.width + x]
 
 proc canOccupy(world: WorldMap, x, y: int): bool =
   ## Returns true when a gnome can stand at one sprite position.
@@ -1426,7 +1387,7 @@ proc distanceSquared(ax, ay, bx, by: int): int =
   let
     dx = ax - bx
     dy = ay - by
-  dx * dx + dy * dy
+  return dx * dx + dy * dy
 
 proc hasFood(garden: Garden): bool =
   ## Returns true when a garden still has food to collect.
@@ -1451,7 +1412,7 @@ proc rectDistanceSquared(a, b: Rect): int =
         a.y - (b.y + b.h)
       else:
         0
-  dx * dx + dy * dy
+  return dx * dx + dy * dy
 
 proc spawnClear(sim: SimServer, mapIndex, x, y: int): bool =
   ## Returns true when a spawn is walkable and away from other players.
@@ -1471,7 +1432,7 @@ proc spawnClear(sim: SimServer, mapIndex, x, y: int): bool =
       player.playerFootY()
     ) < MinSpawnSpacing * MinSpawnSpacing:
       return false
-  true
+  return true
 
 proc findHouseSpawn(
   sim: SimServer,
@@ -1639,7 +1600,7 @@ proc addPlayer(sim: SimServer, username: string, requestedSlot = -1): int =
     homeFlag: mapIndex,
     mapIndex: mapIndex
   )
-  sim.players.high
+  return sim.players.high
 
 proc gardenInReach(sim: SimServer, player: Player): int =
   ## Returns the closest harvestable garden in reach.
@@ -1690,7 +1651,7 @@ proc playerAtHomeExit(sim: SimServer, player: Player): bool =
     return false
   if not sim.homeResources.hasExit:
     return false
-  sim.homeResources.exit.contains(
+  return sim.homeResources.exit.contains(
     player.playerFootX(),
     player.playerFootY()
   )
@@ -1753,7 +1714,7 @@ proc interact(sim: SimServer, playerIndex: int) =
 proc cameraXFor(sim: SimServer, player: Player): int =
   ## Returns the player camera x coordinate.
   let world = sim.mapFor(player.mapIndex)
-  worldClampPixel(
+  return worldClampPixel(
     player.playerFootX() - ViewportWidth div 2,
     world.width - ViewportWidth
   )
@@ -1761,7 +1722,7 @@ proc cameraXFor(sim: SimServer, player: Player): int =
 proc cameraYFor(sim: SimServer, player: Player): int =
   ## Returns the player camera y coordinate.
   let world = sim.mapFor(player.mapIndex)
-  worldClampPixel(
+  return worldClampPixel(
     player.playerFootY() - ViewportHeight div 2,
     world.height - ViewportHeight
   )
@@ -2020,27 +1981,13 @@ proc addPlayerView(
     MapLayerId,
     overhangSpriteId
   )
-  when DebugOutlines:
-    let debugSpriteId =
-      if onMainMap:
-        DebugSpriteId
-      else:
-        HomeDebugSpriteId
-    packet.addObject(
-      DebugObjectId,
-      -cameraX,
-      -cameraY,
-      DebugZ,
-      MapLayerId,
-      debugSpriteId
-    )
   packet.addInventoryObjects(
     sim,
     cache,
     player
   )
   packet.addClockObjects(sim)
-  true
+  return true
 
 proc addGlobalWorldView(
   packet: var seq[uint8],
@@ -2082,15 +2029,6 @@ proc addGlobalWorldView(
     MapLayerId,
     mainOverhangSpriteId(tintIndex)
   )
-  when DebugOutlines:
-    packet.addObject(
-      DebugObjectId,
-      0,
-      0,
-      DebugZ,
-      MapLayerId,
-      DebugSpriteId
-    )
   packet.addClockObjects(sim)
 
 proc buildPlayerPacket(
@@ -2218,14 +2156,14 @@ proc signum(value: int): int =
     return -1
   if value > 0:
     return 1
-  0
+  return 0
 
 proc slideScanRadius(carry, velocity: int): int =
   ## Returns the perpendicular scan radius for blocked movement.
   let
     pending = abs(carry) div MotionScale
     speed = (abs(velocity) + MotionScale - 1) div MotionScale
-  clamp(max(1, max(pending, speed)), 1, MovementSlideMaxScan)
+  return clamp(max(1, max(pending, speed)), 1, MovementSlideMaxScan)
 
 proc canSlideHorizontal(world: WorldMap, x, y, step, offset: int): bool =
   ## Returns true when a horizontal step can slide by one offset.
@@ -2235,7 +2173,7 @@ proc canSlideHorizontal(world: WorldMap, x, y, step, offset: int): bool =
   for i in 1 .. abs(offset):
     if not world.canOccupy(x, y + slideStep * i):
       return false
-  world.canOccupy(x + step, y + offset)
+  return world.canOccupy(x + step, y + offset)
 
 proc canSlideVertical(world: WorldMap, x, y, step, offset: int): bool =
   ## Returns true when a vertical step can slide by one offset.
@@ -2245,7 +2183,7 @@ proc canSlideVertical(world: WorldMap, x, y, step, offset: int): bool =
   for i in 1 .. abs(offset):
     if not world.canOccupy(x + slideStep * i, y):
       return false
-  world.canOccupy(x + offset, y + step)
+  return world.canOccupy(x + offset, y + step)
 
 proc trySlideOffset(
   world: WorldMap,
@@ -2265,7 +2203,7 @@ proc trySlideOffset(
       return false
     player.x += offset
     player.y += step
-  true
+  return true
 
 proc trySlideMove(
   world: WorldMap,
@@ -2478,7 +2416,7 @@ proc startDay(sim: SimServer) =
   sim.dayTick = 0
   sim.scoreTicks = 0
   sim.dinnerDone = false
-  sim.gardens = loadGardens(sim.debugRects, sim.rng)
+  sim.gardens = loadGardens(sim.resourceRects, sim.rng)
   for player in sim.players.mitems:
     player.dinnerTicks = 0
     player.dinnerRecord = nil
@@ -2645,7 +2583,7 @@ proc serveHealthz(request: Request): bool =
   if request.path != HealthzPath or request.httpMethod notin ["GET", "HEAD"]:
     return false
   request.respondPlain(200, "healthy")
-  true
+  return true
 
 proc playerSlot(request: Request): int =
   ## Returns the requested zero-based slot or -1 for automatic assignment.
@@ -2668,7 +2606,7 @@ proc playerUsername(request: Request): string =
   let username = request.queryParams.getOrDefault("username", "")
   if username.len > 0:
     return username.cleanUsername()
-  request.queryParams.getOrDefault("name", "").cleanUsername()
+  return request.queryParams.getOrDefault("name", "").cleanUsername()
 
 proc playerJoinAllowed(slot: int, token: string): bool =
   ## Returns true when the configured token list accepts a join.
@@ -2678,7 +2616,7 @@ proc playerJoinAllowed(slot: int, token: string): bool =
     return token == appState.tokens[slot]
   if slot == -1:
     return token in appState.tokens
-  false
+  return false
 
 proc httpHandler(request: Request) =
   ## Handles Heartleaf HTTP and websocket routes.
@@ -2806,7 +2744,7 @@ proc replayJson(sim: SimServer): string =
     "format": "heartleaf-replay-v1",
     "latestResults": parseJson(sim.dailyResultsJson())
   }
-  $replay & "\n"
+  return $replay & "\n"
 
 proc writeArtifacts(
   sim: SimServer,
