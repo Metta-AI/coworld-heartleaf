@@ -1,0 +1,8 @@
+{
+  "author": "treeform@softmax.com",
+  "name": "fatherly_villager",
+  "image_uri": "public.ecr.aws/s3j4p9s7/treeform/players/fatherly-villager:latest",
+  "binary": "/bin/fatherly_villager",
+  "description": "Fatherly LLM-guided Heartleaf gnome that checks on others, shares food, and makes sure nobody dines alone.",
+  "games": ["heartleaf"]
+}

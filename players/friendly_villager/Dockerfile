@@ -33,9 +33,9 @@ COPY . .
 ARG NimFlags="-d:release -d:useMalloc --opt:speed --stackTrace:on"
 RUN nim c \
   $NimFlags \
-  --nimcache:/tmp/heartleaf-talking-villager-nimcache \
-  --out:talking_villager \
-  players/talking_villager/talking_villager.nim
+  --nimcache:/tmp/heartleaf-friendly_villager-nimcache \
+  --out:friendly_villager \
+  players/friendly_villager/friendly_villager.nim
 
 # Run Docker.
 FROM debian:bookworm-slim
@@ -48,7 +48,7 @@ RUN apt-get update && \
   rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/heartleaf
-COPY --from=build /workspace/heartleaf/talking_villager /bin/talking_villager
+COPY --from=build /workspace/heartleaf/friendly_villager /bin/friendly_villager
 COPY --from=build /workspace/heartleaf/data ./data
 
-CMD ["/bin/talking_villager"]
+CMD ["/bin/friendly_villager"]

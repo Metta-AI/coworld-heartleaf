@@ -1,0 +1,8 @@
+{
+  "author": "treeform@softmax.com",
+  "name": "chatty_villager",
+  "image_uri": "public.ecr.aws/s3j4p9s7/treeform/players/chatty-villager:latest",
+  "binary": "/bin/chatty_villager",
+  "description": "Chatty LLM-guided Heartleaf gnome that greets everyone, talks constantly, and spreads party invitations.",
+  "games": ["heartleaf"]
+}

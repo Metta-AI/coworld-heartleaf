@@ -478,13 +478,11 @@ proc repoDir(): string =
   ## Returns the Heartleaf repository directory.
   currentSourcePath().parentDir().parentDir().parentDir()
 
-proc soulDir(): string =
-  ## Returns the talking Villager soul instruction directory.
-  currentSourcePath().parentDir() / "souls"
+var soulTemplate = ""
 
-proc soulFileName(name: string): string =
-  ## Returns the markdown soul filename for one player name.
-  name.strip().toLowerAscii() & ".md"
+proc setSoulTemplate*(soul: string) =
+  ## Sets the soul markdown shared by every player name.
+  soulTemplate = soul.strip()
 
 proc defaultSoulInstructions(name: string): string =
   ## Returns fallback soul instructions for unknown player names.
@@ -492,17 +490,17 @@ proc defaultSoulInstructions(name: string): string =
     "Gather food early, invite when you have food, attend parties when low."
 
 proc loadSoulInstructions(name: string): string =
-  ## Loads the markdown soul instructions for one player name.
-  let cleanName = name.strip()
-  if cleanName.len == 0:
-    return defaultSoulInstructions("a Heartleaf gnome")
-  let path = soulDir() / cleanName.soulFileName()
-  if fileExists(path):
-    return readFile(path).strip()
-  let defaultPath = soulDir() / "default.md"
-  if fileExists(defaultPath):
-    return readFile(defaultPath).strip()
-  defaultSoulInstructions(cleanName)
+  ## Builds the soul instructions for one player name.
+  let cleanName =
+    if name.strip().len > 0:
+      name.strip()
+    else:
+      "a Heartleaf gnome"
+  if soulTemplate.len == 0:
+    return defaultSoulInstructions(cleanName)
+  if soulTemplate.contains("{name}"):
+    return soulTemplate.replace("{name}", cleanName)
+  "Your name is " & cleanName & ".\n\n" & soulTemplate
 
 when defined(gui):
   proc atlasPath(): string =
@@ -2715,7 +2713,7 @@ proc decisionStateSignature(bot: Bot): string =
 
 proc llmSystemPrompt(): string =
   ## Returns the stable system prompt for the social player.
-  "You are talking_villager, a Heartleaf gnome player. " &
+  "You are a Heartleaf gnome player. " &
     "Return only one JSON object and no prose. " &
     "Allowed actions are keep_gathering_plants, find_person, find_house, " &
     "go_home, stand_at_house_garden, stand_next_to_person, say_to_person, " &
@@ -4330,7 +4328,7 @@ proc runBot(
   try:
     requireBedrockConfig()
   except TalkingVillagerError as e:
-    echo "talking_villager fatal: ", e.msg
+    echo bot.name, " fatal: ", e.msg
     quit(1)
   let viewer =
     if useGui:
@@ -4341,7 +4339,7 @@ proc runBot(
   while viewer.viewerOpen():
     try:
       let ws = newWebSocket(connectUrl)
-      echo "talking_villager connected to ", connectUrl
+      echo bot.name, " connected to ", connectUrl
       connected = true
       bot.lastMask = 0xff'u8
       while viewer.viewerOpen():
@@ -4364,11 +4362,11 @@ proc runBot(
             ws.close()
             break
     except TalkingVillagerError as e:
-      echo "talking_villager fatal: ", e.msg
+      echo bot.name, " fatal: ", e.msg
       quit(1)
     except CatchableError as e:
       connected = false
-      echo "talking_villager reconnecting: ", e.msg
+      echo bot.name, " reconnecting: ", e.msg
       if useGui:
         for i in 0 ..< 25:
           if not viewer.viewerOpen():
@@ -4378,11 +4376,13 @@ proc runBot(
       else:
         sleep(250)
 
-when isMainModule:
+proc talkingVillagerMain*(defaultName = DefaultName, soul = "") =
+  ## Parses bot CLI options and runs one talking Villager bot.
+  setSoulTemplate(soul)
   var
     address = DefaultHost
     port = DefaultPort
-    name = DefaultName
+    name = defaultName
     token = ""
     slot = -1
     url = getEnv("COGAMES_ENGINE_WS_URL")
@@ -4412,3 +4412,6 @@ when isMainModule:
   if slot < 0 and url.len > 0:
     slot = url.slotFromUrl()
   runBot(address, port, name, token, slot, url, gui)
+
+when isMainModule:
+  talkingVillagerMain()
