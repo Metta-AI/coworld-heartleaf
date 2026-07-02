@@ -35,12 +35,12 @@ const
   FootHalfHeight = PlayerBoxHeight div 2
   InteractionRadius = 40
   MotionScale = 256
-  Accel = 84
-  FrictionNum = 184
+  Accel = 76
+  FrictionNum = 144
   FrictionDen = 256
-  MaxSpeed = 672
-  StopThreshold = 12
-  CollisionNudgePixels = 10
+  MaxSpeed = 704
+  StopThreshold = 8
+  MovementSlideMaxScan = 3
   MinSpawnSpacing = 20
   SpawnScanStep = 4
   HouseSpawnMaxDistance = 96
@@ -278,6 +278,7 @@ type
     x, y: int
     velX, velY: int
     carryX, carryY: int
+    inputX, inputY: int
     direction: Direction
     gnomeIndex: int
     homeFlag: int
@@ -1386,24 +1387,6 @@ proc worldClampPixel(value, maxValue: int): int =
   ## Clamps one pixel coordinate into a non-negative world range.
   value.clamp(0, max(0, maxValue))
 
-proc collisionRectAt(x, y: int): Rect =
-  ## Returns the player foot collision rectangle at a sprite position.
-  Rect(
-    x: x + PlayerBoxOffsetX,
-    y: y + PlayerBoxOffsetY,
-    w: PlayerBoxWidth,
-    h: PlayerBoxHeight
-  )
-
-proc collisionRectFromFoot(x, y: int): Rect =
-  ## Returns the player foot collision rectangle at a foot-center position.
-  Rect(
-    x: x - FootHalfWidth,
-    y: y - FootHalfHeight,
-    w: PlayerBoxWidth,
-    h: PlayerBoxHeight
-  )
-
 proc footXAt(spriteX: int): int =
   ## Returns the foot-center x coordinate for one sprite x coordinate.
   spriteX + PlayerBoxOffsetX + PlayerBoxWidth div 2
@@ -1435,17 +1418,8 @@ proc isWalkable(world: WorldMap, x, y: int): bool =
 
 proc canOccupy(world: WorldMap, x, y: int): bool =
   ## Returns true when a gnome can stand at one sprite position.
-  let rect = collisionRectAt(x, y)
-  if rect.x < 0 or rect.y < 0 or
-      rect.x + rect.w > world.width or
-      rect.y + rect.h > world.height:
-    return false
-
-  for py in rect.y ..< rect.y + rect.h:
-    for px in rect.x ..< rect.x + rect.w:
-      if not world.isWalkable(px, py):
-        return false
-  true
+  ## Gnomes occupy a single foot-center pixel, like crewrift crew.
+  world.isWalkable(x.footXAt(), y.footYAt())
 
 proc distanceSquared(ax, ay, bx, by: int): int =
   ## Returns the squared distance between two points.
@@ -1526,7 +1500,7 @@ proc findHouseSpawn(
     while y <= maxScanY:
       var x = minX
       while x <= maxScanX:
-        let feet = collisionRectAt(x, y)
+        let feet = Rect(x: x.footXAt(), y: y.footYAt(), w: 1, h: 1)
         if feet.rectDistanceSquared(house) <= radius * radius and
             sim.spawnClear(MainMapIndex, x, y):
           spawnX = x
@@ -1673,7 +1647,12 @@ proc gardenInReach(sim: SimServer, player: Player): int =
   if player.mapIndex != MainMapIndex:
     return
   let
-    feet = collisionRectFromFoot(player.playerFootX(), player.playerFootY())
+    feet = Rect(
+      x: player.playerFootX(),
+      y: player.playerFootY(),
+      w: 1,
+      h: 1
+    )
     maxDistance = InteractionRadius * InteractionRadius
   var bestDistance = maxDistance + 1
   for i, garden in sim.gardens:
@@ -2162,23 +2141,6 @@ proc buildGlobalPacket(
     result.addGlobalWorldView(sim, nextState.spriteCache)
   result.addGlobalScorePanel(sim, nextState.spriteCache, selectedIndex)
 
-proc applyDrag(value: var int) =
-  ## Applies one tick of friction to a velocity component.
-  value = (value * FrictionNum) div FrictionDen
-  if abs(value) <= StopThreshold:
-    value = 0
-
-proc clampVelocity(velX, velY: var int) =
-  ## Clamps a velocity vector to the maximum speed.
-  let magnitudeSq = velX * velX + velY * velY
-  if magnitudeSq <= MaxSpeed * MaxSpeed:
-    return
-  let magnitude = sqrt(float(magnitudeSq))
-  if magnitude <= 0.0:
-    return
-  velX = int(round(float(velX) * float(MaxSpeed) / magnitude))
-  velY = int(round(float(velY) * float(MaxSpeed) / magnitude))
-
 proc updateDirection(player: var Player, input: InputState) =
   ## Updates the player's facing direction from held input.
   let
@@ -2226,23 +2188,29 @@ proc applyInput(sim: SimServer, playerIndex: int, input: InputState) =
     inc inputY
 
   sim.players[playerIndex].updateDirection(input)
+  let player = sim.players[playerIndex]
+  player.inputX = inputX
+  player.inputY = inputY
   if inputX != 0:
-    sim.players[playerIndex].velX += inputX * Accel
+    player.velX = clamp(
+      player.velX + inputX * Accel,
+      -MaxSpeed,
+      MaxSpeed
+    )
   else:
-    sim.players[playerIndex].velX.applyDrag()
+    player.velX = (player.velX * FrictionNum) div FrictionDen
+    if abs(player.velX) < StopThreshold:
+      player.velX = 0
   if inputY != 0:
-    sim.players[playerIndex].velY += inputY * Accel
+    player.velY = clamp(
+      player.velY + inputY * Accel,
+      -MaxSpeed,
+      MaxSpeed
+    )
   else:
-    sim.players[playerIndex].velY.applyDrag()
-  sim.players[playerIndex].velX = sim.players[playerIndex].velX.clamp(
-    -MaxSpeed,
-    MaxSpeed
-  )
-  sim.players[playerIndex].velY = sim.players[playerIndex].velY.clamp(
-    -MaxSpeed,
-    MaxSpeed
-  )
-  clampVelocity(sim.players[playerIndex].velX, sim.players[playerIndex].velY)
+    player.velY = (player.velY * FrictionNum) div FrictionDen
+    if abs(player.velY) < StopThreshold:
+      player.velY = 0
 
 proc signum(value: int): int =
   ## Returns the sign of one integer as -1, 0, or 1.
@@ -2252,136 +2220,147 @@ proc signum(value: int): int =
     return 1
   0
 
-proc nudgePathClear(
+proc slideScanRadius(carry, velocity: int): int =
+  ## Returns the perpendicular scan radius for blocked movement.
+  let
+    pending = abs(carry) div MotionScale
+    speed = (abs(velocity) + MotionScale - 1) div MotionScale
+  clamp(max(1, max(pending, speed)), 1, MovementSlideMaxScan)
+
+proc canSlideHorizontal(world: WorldMap, x, y, step, offset: int): bool =
+  ## Returns true when a horizontal step can slide by one offset.
+  if offset == 0:
+    return false
+  let slideStep = offset.signum()
+  for i in 1 .. abs(offset):
+    if not world.canOccupy(x, y + slideStep * i):
+      return false
+  world.canOccupy(x + step, y + offset)
+
+proc canSlideVertical(world: WorldMap, x, y, step, offset: int): bool =
+  ## Returns true when a vertical step can slide by one offset.
+  if offset == 0:
+    return false
+  let slideStep = offset.signum()
+  for i in 1 .. abs(offset):
+    if not world.canOccupy(x + slideStep * i, y):
+      return false
+  world.canOccupy(x + offset, y + step)
+
+proc trySlideOffset(
   world: WorldMap,
   player: Player,
   step,
   offset: int,
   horizontal: bool
 ): bool =
-  ## Returns true when a nudged move path stays inside walkable space.
-  let offsetSign = offset.signum()
-  for i in 1 .. abs(offset):
-    let nudge = offsetSign * i
-    if horizontal:
-      if not world.canOccupy(player.x, player.y + nudge):
-        return false
-      if not world.canOccupy(player.x + step, player.y + nudge):
-        return false
-    else:
-      if not world.canOccupy(player.x + nudge, player.y):
-        return false
-      if not world.canOccupy(player.x + nudge, player.y + step):
-        return false
+  ## Tries one candidate slide offset for a blocked movement step.
+  if horizontal:
+    if not world.canSlideHorizontal(player.x, player.y, step, offset):
+      return false
+    player.x += step
+    player.y += offset
+  else:
+    if not world.canSlideVertical(player.x, player.y, step, offset):
+      return false
+    player.x += offset
+    player.y += step
   true
 
-proc tryNudgeOffset(
+proc trySlideMove(
   world: WorldMap,
   player: Player,
   step,
-  offset: int,
-  horizontal: bool,
-  dx,
-  dy: var int
+  radius,
+  preferredSlide: int,
+  horizontal: bool
 ): bool =
-  ## Finds one valid nudged move for a blocked one-pixel step.
-  if not world.nudgePathClear(player, step, offset, horizontal):
+  ## Tries nearby slide offsets for one blocked movement step.
+  if radius <= 0:
     return false
-  if horizontal:
-    dx = step
-    dy = offset
-  else:
-    dx = offset
-    dy = step
-  true
-
-proc moveWithNudge(
-  world: WorldMap,
-  player: Player,
-  step: int,
-  horizontal: bool,
-  dx,
-  dy: var int
-): bool =
-  ## Finds a direct or gently nudged one-pixel movement step.
-  dx = 0
-  dy = 0
-  if horizontal:
-    dx = step
-  else:
-    dy = step
-  if world.canOccupy(player.x + dx, player.y + dy):
-    return true
-
-  let preferred =
-    if horizontal:
-      player.velY.signum()
+  let preferred = preferredSlide.signum()
+  for distance in 1 .. radius:
+    if preferred != 0:
+      if world.trySlideOffset(player, step, preferred * distance, horizontal):
+        return true
+      if world.trySlideOffset(player, step, -preferred * distance, horizontal):
+        return true
     else:
-      player.velX.signum()
-  for distance in 1 .. CollisionNudgePixels:
-    if preferred != 0 and world.tryNudgeOffset(
-      player,
-      step,
-      preferred * distance,
-      horizontal,
-      dx,
-      dy
-    ):
-      return true
-    for direction in [-1, 1]:
-      if direction == preferred:
-        continue
-      if world.tryNudgeOffset(
-        player,
-        step,
-        direction * distance,
-        horizontal,
-        dx,
-        dy
-      ):
+      if world.trySlideOffset(player, step, -distance, horizontal):
+        return true
+      if world.trySlideOffset(player, step, distance, horizontal):
         return true
 
+proc applyMomentumAxis(
+  world: WorldMap,
+  player: Player,
+  carry: var int,
+  velocity,
+  preferredSlide: int,
+  horizontal: bool
+) =
+  ## Applies one fixed-point movement axis with collision sliding.
+  carry += velocity
+  while abs(carry) >= MotionScale:
+    let step =
+      if carry < 0:
+        -1
+      else:
+        1
+    let
+      nx =
+        if horizontal:
+          player.x + step
+        else:
+          player.x
+      ny =
+        if horizontal:
+          player.y
+        else:
+          player.y + step
+    if world.canOccupy(nx, ny):
+      if horizontal:
+        player.x = nx
+      else:
+        player.y = ny
+      carry -= step * MotionScale
+    else:
+      let radius = slideScanRadius(carry, velocity)
+      if world.trySlideMove(player, step, radius, preferredSlide, horizontal):
+        carry -= step * MotionScale
+      else:
+        carry = 0
+        break
+
 proc moveAxis(sim: SimServer, player: Player, horizontal: bool) =
-  ## Moves one player along one axis using pixel collision.
+  ## Moves one player along one axis with crewrift-style sliding.
   let world = sim.mapFor(player.mapIndex)
   if horizontal:
-    player.carryX += player.velX
-    while abs(player.carryX) >= MotionScale:
-      let step =
-        if player.carryX < 0:
-          -1
-        else:
-          1
-      var
-        dx = 0
-        dy = 0
-      if world.moveWithNudge(player, step, horizontal, dx, dy):
-        player.x += dx
-        player.y += dy
-        player.carryX -= step * MotionScale
+    let preferredSlide =
+      if player.inputY != 0:
+        player.inputY
       else:
-        player.carryX = 0
-        player.velX = 0
-        break
+        player.velY.signum()
+    world.applyMomentumAxis(
+      player,
+      player.carryX,
+      player.velX,
+      preferredSlide,
+      true
+    )
   else:
-    player.carryY += player.velY
-    while abs(player.carryY) >= MotionScale:
-      let step =
-        if player.carryY < 0:
-          -1
-        else:
-          1
-      var
-        dx = 0
-        dy = 0
-      if world.moveWithNudge(player, step, horizontal, dx, dy):
-        player.x += dx
-        player.y += dy
-        player.carryY -= step * MotionScale
+    let preferredSlide =
+      if player.inputX != 0:
+        player.inputX
       else:
-        player.carryY = 0
-        player.velY = 0
-        break
+        player.velX.signum()
+    world.applyMomentumAxis(
+      player,
+      player.carryY,
+      player.velY,
+      preferredSlide,
+      false
+    )
 
 proc updateMessages(sim: SimServer) =
   ## Clears transient player panels when their lifetime expires.

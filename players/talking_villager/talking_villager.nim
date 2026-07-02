@@ -26,10 +26,6 @@ const
   PlayerBoxOffsetY = 22
   NavPointOffsetX = PlayerBoxOffsetX + PlayerBoxWidth div 2
   NavPointOffsetY = PlayerBoxOffsetY + PlayerBoxHeight div 2
-  FootHalfWidth = PlayerBoxWidth div 2
-  FootHalfHeight = PlayerBoxHeight div 2
-  FootMinX = FootHalfWidth
-  FootMinY = FootHalfHeight
   CollectActionRadius = 32
   GreetingRadius = 180
   PersonStandRadius = 30
@@ -182,13 +178,6 @@ type
     layer: int
     spriteId: int
 
-  NavMap = ref object
-    width, height: int
-    walk: seq[bool]
-    passable: seq[bool]
-    space: PathSpace
-    jps: JumpPointSpace
-
   Resources = ref object
     gardens: seq[Rect]
     houses: array[9, Rect]
@@ -222,8 +211,8 @@ type
     sprites: seq[SpriteInfo]
     objects: seq[ObjectState]
     resources: Resources
-    mainNav: NavMap
-    homeNav: NavMap
+    mainNav: JumpPointSpace
+    homeNav: JumpPointSpace
     mapKind: MapKind
     previousMapKind: MapKind
     currentHouse: int
@@ -607,15 +596,6 @@ proc center(rect: Rect): Point =
   ## Returns the center point for one rectangle.
   Point(x: rect.x + rect.w div 2, y: rect.y + rect.h div 2)
 
-proc collisionRectFromFoot(x, y: int): Rect =
-  ## Returns the server collision rectangle at one foot-center position.
-  Rect(
-    x: x - FootHalfWidth,
-    y: y - FootHalfHeight,
-    w: PlayerBoxWidth,
-    h: PlayerBoxHeight
-  )
-
 proc navPointX(x: int): int =
   ## Converts a sprite X coordinate to its foot-center X coordinate.
   x + NavPointOffsetX
@@ -624,31 +604,32 @@ proc navPointY(y: int): int =
   ## Converts a sprite Y coordinate to its foot-center Y coordinate.
   y + NavPointOffsetY
 
-proc rectDistanceSquared(a, b: Rect): int =
-  ## Returns the squared distance between two rectangles.
+proc pointRectDistanceSquared(x, y: int, rect: Rect): int =
+  ## Returns the squared distance from one point to one rectangle.
   let
     dx =
-      if a.x + a.w < b.x:
-        b.x - (a.x + a.w)
-      elif b.x + b.w < a.x:
-        a.x - (b.x + b.w)
+      if x < rect.x:
+        rect.x - x
+      elif x >= rect.x + rect.w:
+        x - (rect.x + rect.w - 1)
       else:
         0
     dy =
-      if a.y + a.h < b.y:
-        b.y - (a.y + a.h)
-      elif b.y + b.h < a.y:
-        a.y - (b.y + b.h)
+      if y < rect.y:
+        rect.y - y
+      elif y >= rect.y + rect.h:
+        y - (rect.y + rect.h - 1)
       else:
         0
   dx * dx + dy * dy
 
 proc playerDistanceSquared(bot: Bot, rect: Rect): int =
-  ## Returns the squared distance from the bot to one rectangle.
-  collisionRectFromFoot(
+  ## Returns the squared distance from the bot foot pixel to one rectangle.
+  pointRectDistanceSquared(
     bot.selfX.navPointX(),
-    bot.selfY.navPointY()
-  ).rectDistanceSquared(rect)
+    bot.selfY.navPointY(),
+    rect
+  )
 
 proc distanceSquared(ax, ay, bx, by: int): int =
   ## Returns the squared distance between two points.
@@ -808,82 +789,38 @@ proc shouldDecodePixels(bot: Bot, kind: SpriteKind): bool =
   ## Returns true when a sprite packet should retain decoded RGBA pixels.
   bot.decodeVisualSprites or kind.needsPixels()
 
-proc walkAt(nav: NavMap, x, y: int): bool =
-  ## Returns true when one map pixel is walkable.
-  if nav == nil or x < 0 or y < 0 or x >= nav.width or y >= nav.height:
-    return false
-  nav.walk[y * nav.width + x]
+proc buildNavSpace(sprite: SpriteInfo): JumpPointSpace =
+  ## Builds a pathy JPS+ space from one walkability sprite.
+  var walkMask = newSeq[bool](sprite.width * sprite.height)
+  for i in 0 ..< walkMask.len:
+    walkMask[i] = sprite.pixels[i * 4 + 3] > 0
+  newJumpPointSpace(walkMask, sprite.width, sprite.height, DiagonalPath)
 
-proc passableAt(nav: NavMap, x, y: int): bool =
-  ## Returns true when the player box fits at one foot-center position.
-  if nav == nil or x < 0 or y < 0 or x >= nav.width or y >= nav.height:
-    return false
-  nav.passable[y * nav.width + x]
-
-proc buildNavMap(sprite: SpriteInfo): NavMap =
-  ## Builds a collision-aware JPS+ pathfinding grid from one
-  ## walkability sprite.
-  result = NavMap()
-  let
-    width = sprite.width
-    height = sprite.height
-  result.width = width
-  result.height = height
-  result.walk = newSeq[bool](width * height)
-  for i in 0 ..< result.walk.len:
-    result.walk[i] = sprite.pixels[i * 4 + 3] > 0
-  # Summed-area table over walkable pixels so each foot-box check is
-  # four lookups instead of a full box sweep.
-  var sums = newSeq[int32]((width + 1) * (height + 1))
-  for y in 0 ..< height:
-    for x in 0 ..< width:
-      sums[(y + 1) * (width + 1) + x + 1] =
-        sums[y * (width + 1) + x + 1] +
-        sums[(y + 1) * (width + 1) + x] -
-        sums[y * (width + 1) + x] +
-        (if result.walk[y * width + x]: 1'i32 else: 0'i32)
-  result.passable = newSeq[bool](width * height)
-  for y in 0 ..< height:
-    for x in 0 ..< width:
-      let box = collisionRectFromFoot(x, y)
-      if box.x < 0 or box.y < 0 or
-          box.x + box.w > width or
-          box.y + box.h > height:
-        continue
-      let walkable =
-        sums[(box.y + box.h) * (width + 1) + box.x + box.w] -
-        sums[box.y * (width + 1) + box.x + box.w] -
-        sums[(box.y + box.h) * (width + 1) + box.x] +
-        sums[box.y * (width + 1) + box.x]
-      result.passable[y * width + x] = walkable == int32(box.w * box.h)
-  result.space = newPathSpace(result.passable, width, height, DiagonalPath)
-  result.jps = newJumpPointSpace(result.space)
-
-proc nearestPassablePoint(nav: NavMap, x, y: int): Point =
-  ## Returns the nearest foot-center point where the player box fits.
+proc nearestPassablePoint(nav: JumpPointSpace, x, y: int): Point =
+  ## Returns the nearest walkable foot pixel to a position.
   result = Point(
-    x: x.clamp(0, nav.width - 1),
-    y: y.clamp(0, nav.height - 1)
+    x: x.clamp(0, nav.path.width - 1),
+    y: y.clamp(0, nav.path.height - 1)
   )
-  if nav.passableAt(result.x, result.y):
+  if nav.path.passable(result.x, result.y):
     return
-  let step = nav.space.nearestPassable(
+  let step = nav.path.nearestPassable(
     result.x,
     result.y,
-    max(nav.width, nav.height)
+    max(nav.path.width, nav.path.height)
   )
   if step.found:
     result = Point(x: step.x, y: step.y)
 
-proc nearestPointInside(nav: NavMap, rect: Rect, x, y: int): Point =
-  ## Returns the nearest passable foot point inside one rectangle.
+proc nearestPointInside(nav: JumpPointSpace, rect: Rect, x, y: int): Point =
+  ## Returns the nearest walkable foot pixel inside one rectangle.
   result = rect.center()
   if nav == nil:
     return
   var bestDistance = high(int)
-  for py in max(0, rect.y) ..< min(nav.height, rect.y + rect.h):
-    for px in max(0, rect.x) ..< min(nav.width, rect.x + rect.w):
-      if not nav.passable[py * nav.width + px]:
+  for py in max(0, rect.y) ..< min(nav.path.height, rect.y + rect.h):
+    for px in max(0, rect.x) ..< min(nav.path.width, rect.x + rect.w):
+      if not nav.path.passable(px, py):
         continue
       let distance = distanceSquared(px, py, x, y)
       if distance < bestDistance:
@@ -891,30 +828,29 @@ proc nearestPointInside(nav: NavMap, rect: Rect, x, y: int): Point =
         result = Point(x: px, y: py)
 
 proc nearestPointOutside(
-  nav: NavMap,
+  nav: JumpPointSpace,
   rect: Rect,
   desired: Point,
   radius: int
 ): tuple[found: bool, point: Point] =
-  ## Returns the nearest passable point near but outside one rectangle.
+  ## Returns the nearest walkable point near but outside one rectangle.
   if nav == nil:
     return
   var
     bestDistance = high(int)
     bestRectDistance = high(int)
   let
-    minX = max(0, rect.x - radius - PlayerBoxWidth)
-    maxX = min(nav.width - 1, rect.x + rect.w + radius + PlayerBoxWidth)
-    minY = max(0, rect.y - radius - PlayerBoxHeight)
-    maxY = min(nav.height - 1, rect.y + rect.h + radius + PlayerBoxHeight)
+    minX = max(0, rect.x - radius)
+    maxX = min(nav.path.width - 1, rect.x + rect.w + radius)
+    minY = max(0, rect.y - radius)
+    maxY = min(nav.path.height - 1, rect.y + rect.h + radius)
   for py in minY .. maxY:
     for px in minX .. maxX:
       if rect.contains(px, py):
         continue
-      if not nav.passable[py * nav.width + px]:
+      if not nav.path.passable(px, py):
         continue
-      let rectDistance =
-        collisionRectFromFoot(px, py).rectDistanceSquared(rect)
+      let rectDistance = pointRectDistanceSquared(px, py, rect)
       if rectDistance > radius * radius:
         continue
       let distance = distanceSquared(px, py, desired.x, desired.y)
@@ -945,48 +881,57 @@ proc toDensePath(steps: openArray[PathStep]): seq[Point] =
       walked += PathDensifyPixels
     result.add(point)
 
-proc findPath(nav: NavMap, startX, startY, goalX, goalY: int): seq[Point] =
-  ## Finds a JPS+ path between two foot-center positions.
-  if nav == nil or nav.jps == nil:
+proc pathTo(
+  nav: JumpPointSpace,
+  startX,
+  startY,
+  goalX,
+  goalY: int
+): seq[Point] =
+  ## Finds a JPS+ path between two foot pixels.
+  if nav == nil:
     return
   let
     start = nav.nearestPassablePoint(startX, startY)
     goal = nav.nearestPassablePoint(goalX, goalY)
-  nav.jps.findPath(start.x, start.y, goal.x, goal.y).toDensePath()
+  nav.findPath(start.x, start.y, goal.x, goal.y).toDensePath()
 
-proc findPath(nav: NavMap, startX, startY: int, rect: Rect): seq[Point] =
-  ## Finds a JPS+ path to a passable point inside one rectangle.
+proc pathTo(
+  nav: JumpPointSpace,
+  startX,
+  startY: int,
+  rect: Rect
+): seq[Point] =
+  ## Finds a JPS+ path to a walkable pixel inside one rectangle.
   if nav == nil:
     return
   let goal = nav.nearestPointInside(rect, startX, startY)
-  nav.findPath(startX, startY, goal.x, goal.y)
+  nav.pathTo(startX, startY, goal.x, goal.y)
 
-proc findPathNear(
-  nav: NavMap,
+proc pathNear(
+  nav: JumpPointSpace,
   startX,
   startY: int,
   rect: Rect,
   radius: int
 ): seq[Point] =
-  ## Finds a JPS+ path to a point that can interact with one rectangle.
-  if nav == nil or nav.jps == nil:
+  ## Finds a JPS+ path to a pixel that can interact with one rectangle.
+  if nav == nil:
     return
-  if nav.passableAt(startX, startY) and
-      collisionRectFromFoot(startX, startY).rectDistanceSquared(rect) <=
-        radius * radius:
+  if nav.path.passable(startX, startY) and
+      pointRectDistanceSquared(startX, startY, rect) <= radius * radius:
     return @[Point(x: startX, y: startY)]
   var candidates: seq[tuple[distance: int, point: Point]]
   let
-    minX = max(0, rect.x - radius - PlayerBoxWidth)
-    maxX = min(nav.width - 1, rect.x + rect.w + radius + PlayerBoxWidth)
-    minY = max(0, rect.y - radius - PlayerBoxHeight)
-    maxY = min(nav.height - 1, rect.y + rect.h + radius + PlayerBoxHeight)
+    minX = max(0, rect.x - radius)
+    maxX = min(nav.path.width - 1, rect.x + rect.w + radius)
+    minY = max(0, rect.y - radius)
+    maxY = min(nav.path.height - 1, rect.y + rect.h + radius)
   for py in countup(minY, maxY, 2):
     for px in countup(minX, maxX, 2):
-      if not nav.passable[py * nav.width + px]:
+      if not nav.path.passable(px, py):
         continue
-      if collisionRectFromFoot(px, py).rectDistanceSquared(rect) >
-          radius * radius:
+      if pointRectDistanceSquared(px, py, rect) > radius * radius:
         continue
       candidates.add((
         distance: distanceSquared(px, py, startX, startY),
@@ -999,7 +944,7 @@ proc findPathNear(
   var tried = 0
   var index = 0
   while index < candidates.len and tried < 8:
-    result = nav.findPath(
+    result = nav.pathTo(
       startX,
       startY,
       candidates[index].point.x,
@@ -1020,8 +965,8 @@ proc sameGoal(a, b: Goal): bool =
     a.gardenIndex == b.gardenIndex and
     a.targetName == b.targetName
 
-proc navForCurrentMap(bot: Bot): NavMap =
-  ## Returns the navigation map for the current observed map.
+proc navForCurrentMap(bot: Bot): JumpPointSpace =
+  ## Returns the navigation space for the current observed map.
   case bot.mapKind
   of MapMain:
     bot.mainNav
@@ -1037,9 +982,9 @@ proc updateNavSprite(bot: Bot, sprite: SpriteInfo) =
     return
   case sprite.kind
   of SpriteMainWalk:
-    bot.mainNav = sprite.buildNavMap()
+    bot.mainNav = sprite.buildNavSpace()
   of SpriteHomeWalk:
-    bot.homeNav = sprite.buildNavMap()
+    bot.homeNav = sprite.buildNavSpace()
   else:
     discard
 
@@ -1335,12 +1280,15 @@ proc nearestMorningHome(bot: Bot): int =
   result = UnknownHouse
   if bot.mapKind != MapMain or bot.minutes > MorningIdentityUntilMinutes:
     return
-  let feet = collisionRectFromFoot(bot.playerFootX(), bot.playerFootY())
   var bestDistance = MorningIdentityRadius * MorningIdentityRadius + 1
   for i, house in bot.resources.houses:
     if not bot.resources.houseValid[i]:
       continue
-    let distance = feet.rectDistanceSquared(house)
+    let distance = pointRectDistanceSquared(
+      bot.playerFootX(),
+      bot.playerFootY(),
+      house
+    )
     if distance <= MorningIdentityRadius * MorningIdentityRadius and
         distance < bestDistance:
       bestDistance = distance
@@ -1439,12 +1387,15 @@ proc nearbyMarkedGarden(bot: Bot): int =
   result = -1
   if bot.mapKind != MapMain:
     return
-  let feet = collisionRectFromFoot(bot.playerFootX(), bot.playerFootY())
   var bestDistance = CollectActionRadius * CollectActionRadius + 1
   for i, rect in bot.resources.gardens:
     if not bot.gardenHasMarker(i):
       continue
-    let distance = feet.rectDistanceSquared(rect)
+    let distance = pointRectDistanceSquared(
+      bot.playerFootX(),
+      bot.playerFootY(),
+      rect
+    )
     if distance <= CollectActionRadius * CollectActionRadius and
         distance < bestDistance:
       result = i
@@ -1664,7 +1615,7 @@ proc gardenGoal(bot: Bot): Goal =
     if preferMarkers and bot.gardenMarkerVisible(i) and
         not bot.gardenHasMarker(i):
       continue
-    let path = bot.mainNav.findPathNear(
+    let path = bot.mainNav.pathNear(
       bot.playerFootX(),
       bot.playerFootY(),
       rect,
@@ -1745,11 +1696,11 @@ proc playerNearHouse(
       houseIndex >= bot.resources.houseValid.len or
       not bot.resources.houseValid[houseIndex]:
     return false
-  collisionRectFromFoot(
+  pointRectDistanceSquared(
     bot.objectFootX(objectState),
-    bot.objectFootY(objectState)
-  ).rectDistanceSquared(bot.resources.houses[houseIndex]) <=
-    HouseGatherMaxRadius * HouseGatherMaxRadius
+    bot.objectFootY(objectState),
+    bot.resources.houses[houseIndex]
+  ) <= HouseGatherMaxRadius * HouseGatherMaxRadius
 
 proc visiblePlayerHome(bot: Bot, playerIndex: int): int =
   ## Returns the fixed home index for one visible player.
@@ -2770,10 +2721,9 @@ proc goalReached(bot: Bot, goal: Goal): bool =
   of GoalCollect:
     if goal.gardenIndex >= 0 and
         goal.gardenIndex < bot.resources.gardens.len:
-      return collisionRectFromFoot(
+      return pointRectDistanceSquared(
         bot.playerFootX(),
-        bot.playerFootY()
-      ).rectDistanceSquared(
+        bot.playerFootY(),
         bot.resources.gardens[goal.gardenIndex]
       ) <= CollectActionRadius * CollectActionRadius
     distanceSquared(
@@ -2938,7 +2888,7 @@ proc ensurePath(bot: Bot, goal: Goal) =
   of GoalCollect:
     if goal.gardenIndex >= 0 and
         goal.gardenIndex < bot.resources.gardens.len:
-      bot.path = nav.findPathNear(
+      bot.path = nav.pathNear(
         bot.playerFootX(),
         bot.playerFootY(),
         bot.resources.gardens[goal.gardenIndex],
@@ -2948,27 +2898,27 @@ proc ensurePath(bot: Bot, goal: Goal) =
     if goal.houseIndex >= 0 and
         goal.houseIndex < bot.resources.houseValid.len and
         bot.resources.houseValid[goal.houseIndex]:
-      bot.path = nav.findPath(
+      bot.path = nav.pathTo(
         bot.playerFootX(),
         bot.playerFootY(),
         bot.resources.houses[goal.houseIndex]
       )
   of GoalExitHouse:
     if bot.resources.hasExit:
-      bot.path = nav.findPath(
+      bot.path = nav.pathTo(
         bot.playerFootX(),
         bot.playerFootY(),
         bot.resources.exit
       )
   else:
-    bot.path = nav.findPath(
+    bot.path = nav.pathTo(
       bot.playerFootX(),
       bot.playerFootY(),
       goal.x,
       goal.y
     )
   if bot.path.len == 0:
-    bot.path = nav.findPath(
+    bot.path = nav.pathTo(
       bot.playerFootX(),
       bot.playerFootY(),
       goal.x,
@@ -3007,11 +2957,11 @@ proc pathTarget(bot: Bot, goal: Goal): Point =
   if bot.path.len > 0:
     result = bot.path[0]
     let nav = bot.navForCurrentMap()
-    if nav != nil and nav.space != nil:
+    if nav != nil and nav.path != nil:
       # Steer toward the farthest waypoint with a clear line of sight,
       # like notsus, so paths cut corners instead of hugging waypoints.
       for i in 0 ..< min(bot.path.len, SteerLookaheadPoints):
-        if nav.space.linePassable(
+        if nav.path.linePassable(
           bot.playerFootX(),
           bot.playerFootY(),
           bot.path[i].x,
@@ -3492,8 +3442,8 @@ when defined(gui):
           ViewerTarget
         )
 
-  proc activeNav(bot: Bot): NavMap =
-    ## Returns the navigation map currently being debugged.
+  proc activeNav(bot: Bot): JumpPointSpace =
+    ## Returns the navigation space currently being debugged.
     case bot.mapKind
     of MapMain:
       bot.mainNav
@@ -3505,13 +3455,13 @@ when defined(gui):
       else:
         bot.homeNav
 
-  proc navScale(nav: NavMap): float32 =
+  proc navScale(nav: JumpPointSpace): float32 =
     ## Returns a map scale that fits the viewer map panel.
-    if nav == nil or nav.width <= 0 or nav.height <= 0:
+    if nav == nil or nav.path.width <= 0 or nav.path.height <= 0:
       return 1.0'f
     min(
-      ViewerMapWidth / nav.width.float32,
-      ViewerMapHeight / nav.height.float32
+      ViewerMapWidth / nav.path.width.float32,
+      ViewerMapHeight / nav.path.height.float32
     )
 
   proc navSampleStep(scale: float32): int =
@@ -3599,10 +3549,10 @@ when defined(gui):
       return
 
     let step = navSampleStep(scale)
-    for my in countup(0, nav.height - 1, step):
-      for mx in countup(0, nav.width - 1, step):
+    for my in countup(0, nav.path.height - 1, step):
+      for mx in countup(0, nav.path.width - 1, step):
         let color =
-          if nav.walkAt(mx, my):
+          if nav.path.passable(mx, my):
             ViewerWalk
           else:
             ViewerWall
