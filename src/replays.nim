@@ -2,6 +2,18 @@ import
   bitworld/replays as replayCodec
 
 type
+  ReplayKeyframe* = object
+    tick*: int
+    simBytes*: string
+    joinIndex*: int
+    leaveIndex*: int
+    inputIndex*: int
+    chatIndex*: int
+    hashIndex*: int
+    masks*: seq[uint8]
+    hashValidationFailed*: bool
+    hashMismatchTick*: int
+
   ReplayPlayer* = object
     data*: ReplayData
     joinIndex*: int
@@ -12,11 +24,15 @@ type
     masks*: seq[uint8]
     playing*: bool
     looping*: bool
+    speedIndex*: int
     hashValidationFailed*: bool
     hashMismatchTick*: int
+    keyframes*: seq[ReplayKeyframe]
 
 const
   ReplayFps* = 24
+  PlaybackSpeeds* = [1, 2, 3, 4, 8, 16]
+  ReplayKeyframeTicks* = 100
   HeartleafGameName* = "heartleaf"
   HeartleafGameVersion* = "0.1.0"
   HeartleafReplayMagic = "HEARTLEA"
@@ -76,6 +92,10 @@ proc initReplayPlayer*(data: ReplayData): ReplayPlayer =
   result.looping = true
   result.hashMismatchTick = -1
 
+proc replaySpeed*(replay: ReplayPlayer): int =
+  ## Returns the current integer replay speed.
+  PlaybackSpeeds[clamp(replay.speedIndex, 0, PlaybackSpeeds.high)]
+
 proc replayMaxTick*(replay: ReplayPlayer): int =
   ## Returns the final tick available in the replay.
   if replay.data.hashes.len == 0:
@@ -97,3 +117,43 @@ proc ensureReplayPlayer*(replay: var ReplayPlayer, player: int) =
   ## Expands replay input tables for one player.
   while replay.masks.len <= player:
     replay.masks.add(0)
+
+proc saveReplayKeyframe*(
+  replay: ReplayPlayer,
+  tick: int,
+  simBytes: string
+): ReplayKeyframe =
+  ## Builds one replay keyframe from the current playback cursors.
+  ReplayKeyframe(
+    tick: tick,
+    simBytes: simBytes,
+    joinIndex: replay.joinIndex,
+    leaveIndex: replay.leaveIndex,
+    inputIndex: replay.inputIndex,
+    chatIndex: replay.chatIndex,
+    hashIndex: replay.hashIndex,
+    masks: replay.masks,
+    hashValidationFailed: replay.hashValidationFailed,
+    hashMismatchTick: replay.hashMismatchTick
+  )
+
+proc restoreReplayKeyframeCursors*(
+  replay: var ReplayPlayer,
+  keyframe: ReplayKeyframe
+) =
+  ## Restores playback cursors and masks from one replay keyframe.
+  replay.joinIndex = keyframe.joinIndex
+  replay.leaveIndex = keyframe.leaveIndex
+  replay.inputIndex = keyframe.inputIndex
+  replay.chatIndex = keyframe.chatIndex
+  replay.hashIndex = keyframe.hashIndex
+  replay.masks = keyframe.masks
+  replay.hashValidationFailed = keyframe.hashValidationFailed
+  replay.hashMismatchTick = keyframe.hashMismatchTick
+
+proc replayKeyframeIndex*(replay: ReplayPlayer, tick: int): int =
+  ## Returns the newest keyframe at or before one tick.
+  for i, keyframe in replay.keyframes:
+    if keyframe.tick > tick:
+      break
+    result = i

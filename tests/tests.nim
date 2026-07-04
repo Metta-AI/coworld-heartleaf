@@ -127,4 +127,37 @@ block:
     "playback should reproduce the final game hash"
   doAssert playSim.gameHash() == data.hashes[^1].hash,
     "final hash should match the recorded stream"
+
+  echo "Testing replay keyframes and seeking"
+  # Reference hashes come from a second, straight linear playback.
+  var
+    refSim = initSimServer(TestSeed)
+    refPlayer = initReplayPlayer(data)
+    refHashes = newSeq[uint64](TestTicks + 1)
+  refHashes[0] = refSim.gameHash()
+  for tick in 1 .. TestTicks:
+    refPlayer.stepReplay(refSim)
+    doAssert refSim.tickCount == tick, "reference playback should be linear"
+    refHashes[tick] = refSim.gameHash()
+
+  var seekPlayer = initReplayPlayer(data)
+  seekPlayer.buildReplayKeyframes(TestSeed)
+  doAssert seekPlayer.keyframes.len == 3,
+    "a 200 tick replay should keyframe ticks 0, 100, and 200"
+  doAssert seekPlayer.keyframes[0].tick == 0, "first keyframe should be 0"
+  doAssert seekPlayer.keyframes[1].tick == 100,
+    "second keyframe should be 100"
+  doAssert seekPlayer.keyframes[2].tick == 200, "last keyframe should be 200"
+  echo "Keyframe simBytes sizes: ",
+    seekPlayer.keyframes[0].simBytes.len, " ",
+    seekPlayer.keyframes[1].simBytes.len, " ",
+    seekPlayer.keyframes[2].simBytes.len, " bytes"
+
+  let seekSim = initSimServer(TestSeed)
+  for target in [0, 37, 100, 150, 199]:
+    seekPlayer.seekReplay(seekSim, target)
+    doAssert seekSim.tickCount == target,
+      "seek should land on tick " & $target
+    doAssert seekSim.gameHash() == refHashes[target],
+      "seek to tick " & $target & " should match the linear hash"
   removeFile(replayPath)
