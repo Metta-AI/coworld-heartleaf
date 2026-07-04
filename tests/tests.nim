@@ -1,7 +1,10 @@
 import
-  std/[os, strutils],
+  std/[json, os, strutils],
   bitworld/client as bitworldClient,
   bitworld/resources,
+  bitworld/spriteprotocol,
+  heartleaf,
+  replays,
   ../players/talking_villager/decisions
 
 echo "Testing assets"
@@ -55,3 +58,106 @@ let fencedDecision = parseLlmDecision("""
 doAssert fencedDecision.valid, "fenced JSON should parse defensively"
 doAssert fencedDecision.action == LlmGoToParty, "party action should parse"
 doAssert fencedDecision.houseIndex == 8, "house 9 should become index 8"
+
+echo "Testing replay round trip"
+block:
+  const
+    TestSeed = 4242
+    TestTicks = 200
+  let replayPath = getTempDir() / "heartleaf-test-replay.bitreplay"
+
+  # Record: drive a live-style sim with scripted inputs and a chat.
+  var
+    recSim = initSimServer(TestSeed)
+    writer = openReplayWriter(replayPath, $(%*{"seed": TestSeed}))
+  doAssert recSim.addPlayer("alice", -1) == 0, "alice should join first"
+  writer.writeJoin(tickTime(0), 0, "alice", -1, "")
+  writer.lastMasks.add(0)
+  doAssert recSim.addPlayer("bob", 3) == 1, "bob should join second"
+  writer.writeJoin(tickTime(0), 1, "bob", 3, "")
+  writer.lastMasks.add(0)
+
+  var masks = [0'u8, 0'u8]
+  for tick in 0 ..< TestTicks:
+    masks[0] =
+      if tick < 40:
+        ButtonRight
+      elif tick < 90:
+        ButtonRight or ButtonDown
+      elif tick < 120:
+        ButtonA
+      else:
+        ButtonUp or ButtonLeft
+    masks[1] =
+      if tick mod 30 < 15:
+        ButtonLeft
+      else:
+        ButtonDown or ButtonA
+    for playerIndex in 0 ..< 2:
+      writer.writeInputMaskChange(
+        tickTime(recSim.tickCount),
+        playerIndex,
+        masks[playerIndex]
+      )
+    if tick == 100:
+      recSim.applyPlayerChat(0, "hello bob")
+      writer.writeChat(tickTime(recSim.tickCount), 0, "hello bob")
+    let inputs = @[decodeInputMask(masks[0]), decodeInputMask(masks[1])]
+    recSim.step(inputs)
+    writer.writeHash(uint32(recSim.tickCount), recSim.gameHash())
+  let recordedHash = recSim.gameHash()
+  writer.closeReplayWriter()
+
+  # Play back against a fresh sim and validate every recorded hash.
+  let data = loadReplay(replayPath)
+  doAssert data.configJson == $(%*{"seed": TestSeed}),
+    "replay config should round trip"
+  doAssert data.joins.len == 2, "replay should keep both joins"
+  doAssert data.chats.len == 1, "replay should keep the chat"
+  doAssert data.hashes.len == TestTicks, "replay should hash every tick"
+  var
+    playSim = initSimServer(TestSeed)
+    replay = initReplayPlayer(data)
+  doAssert replay.replayMaxTick() == TestTicks, "max tick should match"
+  while replay.playing and replay.hashIndex < data.hashes.len:
+    replay.stepReplay(playSim)
+  doAssert playSim.tickCount == TestTicks, "playback should reach the end"
+  doAssert not replay.hashValidationFailed, "replay hashes should validate"
+  doAssert playSim.gameHash() == recordedHash,
+    "playback should reproduce the final game hash"
+  doAssert playSim.gameHash() == data.hashes[^1].hash,
+    "final hash should match the recorded stream"
+
+  echo "Testing replay keyframes and seeking"
+  # Reference hashes come from a second, straight linear playback.
+  var
+    refSim = initSimServer(TestSeed)
+    refPlayer = initReplayPlayer(data)
+    refHashes = newSeq[uint64](TestTicks + 1)
+  refHashes[0] = refSim.gameHash()
+  for tick in 1 .. TestTicks:
+    refPlayer.stepReplay(refSim)
+    doAssert refSim.tickCount == tick, "reference playback should be linear"
+    refHashes[tick] = refSim.gameHash()
+
+  var seekPlayer = initReplayPlayer(data)
+  seekPlayer.buildReplayKeyframes(TestSeed)
+  doAssert seekPlayer.keyframes.len == 3,
+    "a 200 tick replay should keyframe ticks 0, 100, and 200"
+  doAssert seekPlayer.keyframes[0].tick == 0, "first keyframe should be 0"
+  doAssert seekPlayer.keyframes[1].tick == 100,
+    "second keyframe should be 100"
+  doAssert seekPlayer.keyframes[2].tick == 200, "last keyframe should be 200"
+  echo "Keyframe simBytes sizes: ",
+    seekPlayer.keyframes[0].simBytes.len, " ",
+    seekPlayer.keyframes[1].simBytes.len, " ",
+    seekPlayer.keyframes[2].simBytes.len, " bytes"
+
+  let seekSim = initSimServer(TestSeed)
+  for target in [0, 37, 100, 150, 199]:
+    seekPlayer.seekReplay(seekSim, target)
+    doAssert seekSim.tickCount == target,
+      "seek should land on tick " & $target
+    doAssert seekSim.gameHash() == refHashes[target],
+      "seek to tick " & $target & " should match the linear hash"
+  removeFile(replayPath)

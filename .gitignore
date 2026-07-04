@@ -22,3 +22,4 @@ nimcache
 # Project specific ignores.
 out/
 *.dSYM/
+nim.cfg

@@ -2,7 +2,7 @@ import
   std/[algorithm, json, options, os, parseopt, strutils],
   bitworld/[spriteprotocol, resources],
   curly, pathy, supersnappy, whisky,
-  decisions, heartleaf/[common, protocol]
+  bedrock_auth, decisions, heartleaf/[common, protocol]
 
 const
 
@@ -250,10 +250,12 @@ proc requireBedrockConfig() =
   ## Raises when live Bedrock cannot be called.
   if mockBedrockReply().len > 0:
     return
-  if bedrockToken().len == 0:
+  if bedrockToken().len == 0 and not hasAwsCredentialSignal():
     raise newException(
       TalkingVillagerError,
-      "AWS_BEARER_TOKEN_BEDROCK or BEDROCK_KEY is not set."
+      "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
+        "BEDROCK_KEY, or provide AWS credentials via env keys, the " &
+        "container endpoint, or IRSA web identity."
     )
 
 proc transientBedrockError(answer: BedrockResult): bool =
@@ -306,20 +308,35 @@ proc permanentBedrockError(answer: BedrockResult): bool =
       message.contains("invalid"):
     return true
 
+proc bedrockHost(): string =
+  ## Returns the Bedrock Runtime host for the selected Region.
+  "bedrock-runtime." & bedrockRegion() & ".amazonaws.com"
+
+proc bedrockPath(): string =
+  ## Returns the REST path for a Bedrock InvokeModel request.
+  "/model/" & bedrockModel().awsUriEncode() & "/invoke"
+
 proc bedrockUrl(): string =
   ## Builds the Bedrock Runtime InvokeModel URL.
-  var endpoint = getEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME").strip()
-  while endpoint.len > 0 and endpoint[^1] == '/':
-    endpoint.setLen(endpoint.len - 1)
-  if endpoint.len == 0:
-    endpoint = "https://bedrock-runtime." & bedrockRegion() & ".amazonaws.com"
-  endpoint & "/model/" & bedrockModel() & "/invoke"
+  let sidecar = sidecarEndpoint()
+  if sidecar.len > 0:
+    return sidecar.joinUrl(bedrockPath())
+  "https://" & bedrockHost() & bedrockPath()
 
-proc bedrockHeaders(): HttpHeaders =
-  ## Builds one Bedrock HTTP header set.
-  result["Authorization"] = "Bearer " & bedrockToken()
-  result["Accept"] = "application/json"
-  result["Content-Type"] = "application/json"
+proc bedrockHeaders(body: string): HttpHeaders =
+  ## Builds one Bedrock HTTP header set for the signed request body.
+  if hasSidecarEndpoint():
+    result["Accept"] = "application/json"
+    result["Content-Type"] = "application/json"
+  elif bedrockToken().len > 0:
+    result["Authorization"] = "Bearer " & bedrockToken()
+    result["Accept"] = "application/json"
+    result["Content-Type"] = "application/json"
+  else:
+    for (key, value) in signedBedrockHeaders(
+      body, bedrockHost(), bedrockPath(), bedrockRegion()
+    ):
+      result[key] = value
   let latency = bedrockPerformanceLatency()
   if latency.len > 0:
     result["X-Amzn-Bedrock-PerformanceConfig-Latency"] = latency
@@ -357,6 +374,8 @@ proc bedrockBody(messages: openArray[ConversationMessage]): string =
     "system": systemPrompt,
     "messages": chatMessages
   }
+  if not hasSidecarEndpoint():
+    body["requestMetadata"] = bedrockRequestMetadata("talking_villager")
   $body
 
 proc parseBedrockReply(body: string): string =
@@ -371,13 +390,14 @@ proc startTalkToBedrock(
   tag: string
 ): bool =
   ## Starts a non-blocking Bedrock request.
-  if bedrockToken().len == 0:
+  if bedrockToken().len == 0 and not hasAwsCredentialSignal():
     return false
+  let body = bedrockBody(messages)
   bedrockCurl.startRequest(
     "POST",
     bedrockUrl(),
-    bedrockHeaders(),
-    bedrockBody(messages),
+    bedrockHeaders(body),
+    body,
     bedrockTimeoutSeconds(),
     tag
   )
@@ -959,13 +979,18 @@ proc clockAnnouncement(minutes: int): string =
   if minutes < DinnerMinutes:
     let hours = (DinnerMinutes - minutes) div 60
     if hours <= 0:
-      "It is " & clock & ". Dinner starts within the hour!"
+      "It is " & clock & ". Dinner starts within the hour! Be INSIDE " &
+        "your dinner house before it is served at 6:55pm - if you are " &
+        "outside when it is served you miss dinner entirely."
     elif hours == 1:
-      "It is " & clock & " (1 hour till dinner)."
+      "It is " & clock & " (1 hour till dinner). Settle on a dinner " &
+        "house now; you must be inside it before 6:55pm."
     else:
       "It is " & clock & " (" & $hours & " hours till dinner)."
   elif minutes < DinnerMinutes + 60:
-    "It is " & clock & ". It is dinner time!"
+    "It is " & clock & ". It is dinner time! Dinner is served at " &
+      "6:55pm sharp. Get inside the dinner house NOW and STAY inside - " &
+      "anyone outside at 6:55pm misses dinner and scores nothing."
   elif minutes < DayEndMinutes:
     let hours = (DayEndMinutes - minutes) div 60
     if hours <= 1:
@@ -2394,7 +2419,9 @@ proc startLlmDecision(bot: Bot): bool =
   if not started:
     raise newException(
       TalkingVillagerError,
-      "AWS_BEARER_TOKEN_BEDROCK or BEDROCK_KEY is not set."
+      "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
+        "BEDROCK_KEY, or provide AWS credentials via env keys, the " &
+        "container endpoint, or IRSA web identity."
     )
   bot.llmWaiting = true
   bot.decisionStartedTick = bot.frameTick
@@ -2940,7 +2967,8 @@ proc runBot(
   token: string,
   slot: int,
   url: string,
-  soul: string
+  soul: string,
+  exitOnDisconnect: bool
 ) =
   ## Connects the talking Villager bot to a Heartleaf sprite player endpoint.
   let connectUrl =
@@ -2954,10 +2982,12 @@ proc runBot(
   except TalkingVillagerError as e:
     echo bot.name, " fatal: ", e.msg
     quit(1)
+  var hadConnection = false
   while true:
     try:
       let ws = newWebSocket(connectUrl)
       echo bot.name, " connected to ", connectUrl
+      hadConnection = true
       bot.lastMask = 0xff'u8
       while true:
         if not ws.receiveUpdates(bot):
@@ -2972,6 +3002,8 @@ proc runBot(
       quit(1)
     except CatchableError as e:
       echo bot.name, " reconnecting: ", e.msg
+      if exitOnDisconnect and hadConnection:
+        break
       sleep(250)
 
 proc talkingVillagerMain*(defaultName = DefaultName, soul: string) =
@@ -3005,4 +3037,4 @@ proc talkingVillagerMain*(defaultName = DefaultName, soul: string) =
       discard
   if slot < 0 and url.len > 0:
     slot = url.slotFromUrl()
-  runBot(address, port, name, token, slot, url, soul)
+  runBot(address, port, name, token, slot, url, soul, url.len > 0)

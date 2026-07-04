@@ -7,7 +7,7 @@
     "owner": "treeform@softmax.com",
     "runnable": {
       "type": "game",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/games/heartleaf:latest",
+      "image": "{{GAME_IMAGE}}",
       "run": [
         "/bin/heartleaf"
       ]
@@ -23,7 +23,7 @@
         "tokens": {
           "description": "One connection token per player slot, indexed by slot.",
           "type": "array",
-          "minItems": 0,
+          "minItems": 9,
           "maxItems": 9,
           "items": {
             "type": "string",
@@ -58,6 +58,20 @@
           "type": "integer",
           "minimum": 0,
           "default": 0
+        },
+        "num_agents": {
+          "description": "Player seat count used by hosted league seating.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9,
+          "default": 9
+        },
+        "daySeconds": {
+          "description": "Real seconds per in-game day, before the 10-second score screen.",
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 600,
+          "default": 180
         }
       }
     },
@@ -158,40 +172,62 @@
       "name": "Shy Villager",
       "type": "player",
       "description": "Shy LLM-guided Heartleaf gnome that gathers quietly, speaks softly, and honors party invitations.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/shy-villager:latest",
+      "image": "{{SHY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/shy_villager"
-      ]
+      ],
+      "env": {
+        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
+      }
     },
     {
       "id": "chatty_villager",
       "name": "Chatty Villager",
       "type": "player",
       "description": "Chatty LLM-guided Heartleaf gnome that greets everyone, talks constantly, and spreads party invitations.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/chatty-villager:latest",
+      "image": "{{CHATTY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/chatty_villager"
-      ]
+      ],
+      "env": {
+        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
+      }
     },
     {
       "id": "friendly_villager",
       "name": "Friendly Villager",
       "type": "player",
       "description": "Friendly LLM-guided Heartleaf gnome that welcomes everyone, shares food, and hosts warm dinners.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/friendly-villager:latest",
+      "image": "{{FRIENDLY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/friendly_villager"
-      ]
+      ],
+      "env": {
+        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
+      }
     },
     {
       "id": "fatherly_villager",
       "name": "Fatherly Villager",
       "type": "player",
       "description": "Fatherly LLM-guided Heartleaf gnome that checks on others, shares food, and makes sure nobody dines alone.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/fatherly-villager:latest",
+      "image": "{{FATHERLY_VILLAGER_IMAGE}}",
       "run": [
         "/bin/fatherly_villager"
-      ]
+      ],
+      "env": {
+        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
+      }
+    }
+  ],
+  "commissioner": [
+    {
+      "id": "default-commissioner",
+      "name": "Default Commissioner",
+      "type": "commissioner",
+      "description": "Game-agnostic round-robin commissioner with mean-score rankings.",
+      "source_url": "https://github.com/Metta-AI/commissioners/tree/fa8ac7cb2bc6fd54c5675c7993919afabebcf4ba/commissioners/ruleset_strategy_commissioner",
+      "image": "{{COMMISSIONER_IMAGE}}"
     }
   ],
   "reporter": [
@@ -200,7 +236,7 @@
       "name": "Default Reporter",
       "type": "reporter",
       "description": "Default Coworld reporter for generic episode artifacts.",
-      "image": "public.ecr.aws/q5f4m8t9/cogames@sha256:396e56a9ba1576aecc5b9868a85fa309ea98fdbbf8d656c94ec021906197ea52"
+      "image": "{{REPORTER_IMAGE}}"
     }
   ],
   "grader": [
@@ -209,11 +245,23 @@
       "name": "BitWorld Score Grader",
       "type": "grader",
       "description": "Generic BitWorld grader that scores episode interest from score spread and game-specific activity signals.",
-      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/grader/graders/bitworld_score/bitworld_score_grader",
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/b2d755d2355fba8107d228adffb0e12dd7ab75b4/grader/graders/bitworld_score/bitworld_score_grader",
       "image": "ghcr.io/metta-ai/coworld-heartleaf-grader:latest"
     }
   ],
   "variants": [
+    {
+      "id": "league",
+      "name": "League",
+      "game_config": {
+        "seed": 4731713,
+        "maxTicks": 23760,
+        "maxGames": 1,
+        "num_agents": 9,
+        "daySeconds": 100
+      },
+      "description": "Nine compressed Heartleaf days (100s each) so every gnome gets a hosting turn, used for hosted league rounds."
+    },
     {
       "id": "freeplay",
       "name": "Freeplay",
@@ -239,7 +287,7 @@
     "game_config": {
       "seed": 4731713,
       "maxTicks": 1200,
-      "maxGames": 0
+      "maxGames": 1
     },
     "players": [
       {
@@ -270,5 +318,6 @@
         "player_id": "fatherly_villager"
       }
     ]
-  }
+  },
+  "players_per_user": 9
 }
