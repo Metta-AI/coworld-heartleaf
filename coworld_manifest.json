@@ -65,6 +65,13 @@
           "minimum": 1,
           "maximum": 9,
           "default": 9
+        },
+        "daySeconds": {
+          "description": "Real seconds per in-game day, before the 10-second score screen.",
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 600,
+          "default": 180
         }
       }
     },
@@ -258,11 +265,12 @@
       "name": "League",
       "game_config": {
         "seed": 4731713,
-        "maxTicks": 4560,
+        "maxTicks": 23760,
         "maxGames": 1,
-        "num_agents": 9
+        "num_agents": 9,
+        "daySeconds": 100
       },
-      "description": "One full Heartleaf day with the end-of-day score screen, used for hosted league rounds."
+      "description": "Nine compressed Heartleaf days (100s each) so every gnome gets a hosting turn, used for hosted league rounds."
     },
     {
       "id": "freeplay",

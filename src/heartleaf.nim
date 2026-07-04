@@ -53,6 +53,7 @@ const
   DayEndMinutes = 22 * 60
   DinnerMinutes = 18 * 60
   DinnerTallyMinutes = DinnerMinutes + 55
+  DefaultDaySeconds = DayRealMinutes * 60
   DayStepMinutes = 5
   DayTotalMinutes = DayEndMinutes - DayStartMinutes
   DayStepCount = DayTotalMinutes div DayStepMinutes
@@ -306,6 +307,7 @@ type
     rng: Rand
     tickCount*: int
     dayTick: int
+    dayTicks: int
     dayNumber: int
     scoreTicks: int
     dinnerDone: bool
@@ -344,6 +346,7 @@ type
     seed: int
     maxTicks: int
     maxGames: int
+    daySeconds: int
     tokens: seq[string]
 
 var appState: WebSocketAppState
@@ -571,9 +574,10 @@ proc loadFoodSprites(path: string): FoodSprites =
     FoodSpriteSize
   )
 
-proc initSimServer*(seed = DefaultSeed): SimServer =
+proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   ## Initializes the Heartleaf simulation.
   result = SimServer()
+  result.dayTicks = max(TicksPerSecond, dayTicks)
   let dataRoot = dataDir()
   # Keep asset paths explicit here so startup shows what the game needs.
   let
@@ -1211,7 +1215,7 @@ proc mapFor(sim: SimServer, mapIndex: int): WorldMap =
 
 proc currentDayMinutes(sim: SimServer): int =
   ## Returns the current in-game minute of the day.
-  let step = min(DayStepCount, sim.dayTick * DayStepCount div DayTicks)
+  let step = min(DayStepCount, sim.dayTick * DayStepCount div sim.dayTicks)
   return DayStartMinutes + step * DayStepMinutes
 
 proc twoDigits(value: int): string =
@@ -2430,7 +2434,7 @@ proc startDay(sim: SimServer) =
 
 proc startScoreScreen(sim: SimServer) =
   ## Starts the end-of-day scoring screen.
-  sim.dayTick = DayTicks
+  sim.dayTick = sim.dayTicks
   sim.scoreTicks = ScoreScreenTicks
   for player in sim.players.mitems:
     player.dinnerTicks = 0
@@ -2466,7 +2470,7 @@ proc step*(sim: SimServer, inputs: openArray[InputState]) =
   inc sim.dayTick
   if not sim.dinnerDone and sim.currentDayMinutes() >= DinnerTallyMinutes:
     sim.startDinnerParties()
-  if sim.dayTick >= DayTicks:
+  if sim.dayTick >= sim.dayTicks:
     sim.startScoreScreen()
 
 proc mixHash(hash: var uint64, value: uint64) =
@@ -2967,6 +2971,7 @@ proc runServerLoop*(
   seed = DefaultSeed,
   maxTicks = DefaultMaxTicks,
   maxGames = DefaultMaxGames,
+  daySeconds = DefaultDaySeconds,
   tokens: seq[string] = @[],
   saveReplayPath = "",
   runtimeConfig = RuntimeConfig()
@@ -2980,6 +2985,7 @@ proc runServerLoop*(
       "seed": seed,
       "maxTicks": maxTicks,
       "maxGames": maxGames,
+      "daySeconds": daySeconds,
       "tokenCount": tokens.len
     })
   )
@@ -2998,8 +3004,9 @@ proc runServerLoop*(
   )
   httpServer.waitUntilReady()
 
+  let dayTicks = max(1, daySeconds) * TicksPerSecond
   var
-    sim = initSimServer(seed)
+    sim = initSimServer(seed, dayTicks)
     lastTick = getMonoTime()
     runTicks = 0
     gamesFinished = 0
@@ -3132,7 +3139,7 @@ proc runServerLoop*(
       inc gamesFinished
       if maxGames > 0 and gamesFinished >= maxGames:
         quit(0)
-      sim = initSimServer(seed + gamesFinished)
+      sim = initSimServer(seed + gamesFinished, dayTicks)
       runTicks = 0
       lastWrittenDay = 0
       {.gcsafe.}:
@@ -3205,6 +3212,8 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("max-ticks", config.maxTicks)
   node.readConfigInt("maxGames", config.maxGames)
   node.readConfigInt("max-games", config.maxGames)
+  node.readConfigInt("daySeconds", config.daySeconds)
+  node.readConfigInt("day-seconds", config.daySeconds)
   node.readConfigStrings("tokens", config.tokens)
 
 proc limitText(value: int): string =
@@ -3221,20 +3230,21 @@ proc echoStartupConfig(config: RunConfig) =
     " seed=", config.seed,
     " tokens=", config.tokens.len,
     " maxTicks=", config.maxTicks.limitText(),
-    " maxGames=", config.maxGames.limitText()
+    " maxGames=", config.maxGames.limitText(),
+    " daySeconds=", config.daySeconds
 
-proc replaySeedFor(data: ReplayData): int =
-  ## Reads the recorded simulation seed from a replay header.
-  var config = RunConfig(
+proc replayRunConfigFor(data: ReplayData): RunConfig =
+  ## Reads the recorded simulation config from a replay header.
+  result = RunConfig(
     address: DefaultHost,
     port: DefaultPort,
     seed: DefaultSeed,
     maxTicks: DefaultMaxTicks,
     maxGames: DefaultMaxGames,
+    daySeconds: DefaultDaySeconds,
     tokens: @[]
   )
-  config.update(data.configJson)
-  config.seed
+  result.update(data.configJson)
 
 proc runReplayServerLoop*(
   host = DefaultHost,
@@ -3248,10 +3258,13 @@ proc runReplayServerLoop*(
   var
     replayData = ReplayData()
     replaySeed = DefaultSeed
+    replayDayTicks = DefaultDaySeconds * TicksPerSecond
     replayLoaded = false
   if runtimeConfig.replay.len > 0:
     replayData = parseReplayBytes(runtimeConfig.replay)
-    replaySeed = replayData.replaySeedFor()
+    let replayConfig = replayData.replayRunConfigFor()
+    replaySeed = replayConfig.seed
+    replayDayTicks = max(1, replayConfig.daySeconds) * TicksPerSecond
     replayLoaded = true
   appState.replayLoaded = replayLoaded
 
@@ -3271,7 +3284,7 @@ proc runReplayServerLoop*(
   httpServer.waitUntilReady()
 
   var
-    sim = initSimServer(replaySeed)
+    sim = initSimServer(replaySeed, replayDayTicks)
     replay =
       if replayLoaded:
         initReplayPlayer(replayData)
@@ -3297,8 +3310,10 @@ proc runReplayServerLoop*(
     if pendingReplayUri.len > 0:
       try:
         replayData = loadReplayUri(pendingReplayUri)
-        replaySeed = replayData.replaySeedFor()
-        sim = initSimServer(replaySeed)
+        let replayConfig = replayData.replayRunConfigFor()
+        replaySeed = replayConfig.seed
+        replayDayTicks = max(1, replayConfig.daySeconds) * TicksPerSecond
+        sim = initSimServer(replaySeed, replayDayTicks)
         replay = initReplayPlayer(replayData)
         replayLoaded = true
         {.gcsafe.}:
@@ -3322,7 +3337,7 @@ proc runReplayServerLoop*(
       replay.stepReplay(sim)
       if not replay.playing and replay.looping and
           replay.replayMaxTick() > 0:
-        sim = initSimServer(replaySeed)
+        sim = initSimServer(replaySeed, replayDayTicks)
         replay.resetReplay()
         replay.playing = true
 
@@ -3354,6 +3369,7 @@ when isMainModule:
       seed: DefaultSeed,
       maxTicks: DefaultMaxTicks,
       maxGames: DefaultMaxGames,
+      daySeconds: DefaultDaySeconds,
       tokens: @[]
     )
   config.update(runtimeConfig.config)
@@ -3377,6 +3393,7 @@ when isMainModule:
     seed = config.seed,
     maxTicks = config.maxTicks,
     maxGames = config.maxGames,
+    daySeconds = config.daySeconds,
     tokens = config.tokens,
     saveReplayPath = localReplayPath,
     runtimeConfig = runtimeConfig
