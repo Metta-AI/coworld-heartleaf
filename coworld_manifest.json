@@ -168,16 +168,6 @@
   },
   "player": [
     {
-      "id": "villager",
-      "name": "Villager",
-      "type": "player",
-      "description": "Sprite-protocol Heartleaf bot that gathers food, greets nearby gnomes, hosts dinner, and searches for active parties.",
-      "image": "{{VILLAGER_IMAGE}}",
-      "run": [
-        "/bin/villager"
-      ]
-    },
-    {
       "id": "shy_villager",
       "name": "Shy Villager",
       "type": "player",
@@ -301,19 +291,10 @@
     },
     "players": [
       {
-        "player_id": "villager"
+        "player_id": "shy_villager"
       },
       {
-        "player_id": "villager"
-      },
-      {
-        "player_id": "villager"
-      },
-      {
-        "player_id": "villager"
-      },
-      {
-        "player_id": "villager"
+        "player_id": "shy_villager"
       },
       {
         "player_id": "shy_villager"
@@ -322,7 +303,16 @@
         "player_id": "chatty_villager"
       },
       {
+        "player_id": "chatty_villager"
+      },
+      {
         "player_id": "friendly_villager"
+      },
+      {
+        "player_id": "friendly_villager"
+      },
+      {
+        "player_id": "fatherly_villager"
       },
       {
         "player_id": "fatherly_villager"

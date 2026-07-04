@@ -2,7 +2,7 @@ import
   std/[algorithm, json, options, os, parseopt, strutils],
   bitworld/[spriteprotocol, resources],
   curly, pathy, supersnappy, whisky,
-  bedrock_auth, decisions
+  bedrock_auth, decisions, heartleaf/[common, protocol]
 
 const
 
@@ -13,21 +13,11 @@ const
   DefaultBedrockMaxTokens = 192
   BedrockTemperature = 0.2
 
-  ViewportWidth = 320
-  ViewportHeight = 200
-  FoodSpriteSize = 32
-  FoodVeggieSlots = 24
 
-  PlayerBoxWidth = 14
-  PlayerBoxHeight = 8
-  PlayerBoxOffsetX = 9
-  PlayerBoxOffsetY = 22
-  NavPointOffsetX = PlayerBoxOffsetX + PlayerBoxWidth div 2
-  NavPointOffsetY = PlayerBoxOffsetY + PlayerBoxHeight div 2
 
-  CollectActionRadius = 32
+  CollectActionRadius = InteractionRadius - 8
   PersonStandRadius = 30
-  NavStep = 2
+  GoalArrivePixels = 2
   PathArrivePixels = 3
   PathRejoinPixels = 8
 
@@ -40,19 +30,15 @@ const
   MaxDrainMessages = 256
   DefaultName = "talking_villager"
   UnknownHouse = -1
-  HouseCount = 9
   DecisionRetryTicks = 24
   DecisionStuckTicks = RepathStuckTicks * 2
   HighFoodForInvites = 6
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
-  DayStartMinutes = 8 * 60
   HostPrepMinutes = 15 * 60
   InviteStartMinutes = 16 * 60
   HouseEnterMinutes = 17 * 60
-  DinnerMinutes = 18 * 60
   PartyLeaveMinutes = 20 * 60
-  DayEndMinutes = 22 * 60
   LatePartySearchMinutes = 16 * 60
   MaxHostWaitMinutes = 90
   StrongHostFood = 12
@@ -61,27 +47,7 @@ const
   HouseGatherMaxRadius = 96
   MorningIdentityUntilMinutes = 9 * 60
   MorningIdentityRadius = 140
-  BottomObjectId = 1
-  PlayerObjectBase = 1000
-  NameObjectBase = 2000
-  ChatObjectBase = 3000
-  GardenObjectBase = 4000
-  InventoryObjectBase = 5000
-  InventoryCountObjectBase = 6000
-  ClockObjectBase = 7000
-  ScoreObjectBase = 7100
 
-  PlayerNames = [
-    "Ivan",
-    "Anton",
-    "Yura",
-    "Sasha",
-    "Maxim",
-    "Nikita",
-    "Vova",
-    "Dima",
-    "Egor"
-  ]
 
   UnstuckMasks = [
     ButtonUp,
@@ -123,12 +89,6 @@ type
     GoalStandPerson
     GoalMove
 
-  Rect = object
-    x, y, w, h: int
-
-  Point = object
-    x, y: int
-
   Goal = object
     kind: GoalKind
     screenKind: ScreenKind
@@ -157,9 +117,6 @@ type
     houseValid: array[9, bool]
     exit: Rect
     hasExit: bool
-
-  DrawItem = object
-    layer, z, y, id: int
 
   ConversationMessage = object
     role: string
@@ -486,38 +443,6 @@ proc loadSoulInstructions(bot: Bot, name: string): string =
     return bot.soulTemplate.replace("{name}", cleanName)
   "Your name is " & cleanName & ".\n\n" & bot.soulTemplate
 
-proc toRect(rect: ResourceRect): Rect =
-  ## Converts one resource rectangle to the bot rectangle type.
-  Rect(x: rect.x, y: rect.y, w: rect.w, h: rect.h)
-
-proc rectName(rect: ResourceRect): string =
-  ## Returns the normalized resource rectangle name.
-  rect.name.strip().toLowerAscii()
-
-proc houseIndex(name: string): int =
-  ## Returns the zero-based house index in one resource name.
-  if not name.startsWith("house"):
-    return -1
-  try:
-    result = parseInt(name["house".len .. ^1]) - 1
-  except ValueError:
-    result = -1
-  if result < 0 or result >= 9:
-    return -1
-
-proc playerNameForHouse(houseIndex: int): string =
-  ## Returns the fixed in-game player name for one house.
-  if houseIndex >= 0 and houseIndex < PlayerNames.len:
-    return PlayerNames[houseIndex]
-  ""
-
-proc houseIndexForPlayerName(name: string): int =
-  ## Returns the fixed house index for one in-game player name.
-  for i, playerName in PlayerNames:
-    if playerName == name:
-      return i
-  return -1
-
 proc loadBotResources(): Resources =
   ## Loads house, garden, and home-exit resource rectangles.
   result = Resources()
@@ -527,7 +452,7 @@ proc loadBotResources(): Resources =
     if name == "garden":
       result.gardens.add(rect.toRect())
     else:
-      let index = name.houseIndex()
+      let index = name.houseIndexFromName()
       if index >= 0:
         result.houses[index] = rect.toRect()
         result.houseValid[index] = true
@@ -536,67 +461,25 @@ proc loadBotResources(): Resources =
       result.exit = rect.toRect()
       result.hasExit = true
 
-proc contains(rect: Rect, x, y: int): bool =
-  ## Returns true when a point is inside one rectangle.
-  x >= rect.x and y >= rect.y and x < rect.x + rect.w and y < rect.y + rect.h
-
 proc screenRectVisible(x, y, w, h: int): bool =
   ## Returns true when one screen-space rectangle overlaps the viewport.
   x < ViewportWidth and y < ViewportHeight and x + w > 0 and y + h > 0
 
-proc center(rect: Rect): Point =
-  ## Returns the center point for one rectangle.
-  Point(x: rect.x + rect.w div 2, y: rect.y + rect.h div 2)
-
-proc navPointX(x: int): int =
-  ## Converts a sprite X coordinate to its foot-center X coordinate.
-  x + NavPointOffsetX
-
-proc navPointY(y: int): int =
-  ## Converts a sprite Y coordinate to its foot-center Y coordinate.
-  y + NavPointOffsetY
-
-proc pointRectDistanceSquared(x, y: int, rect: Rect): int =
-  ## Returns the squared distance from one point to one rectangle.
-  let
-    dx =
-      if x < rect.x:
-        rect.x - x
-      elif x >= rect.x + rect.w:
-        x - (rect.x + rect.w - 1)
-      else:
-        0
-    dy =
-      if y < rect.y:
-        rect.y - y
-      elif y >= rect.y + rect.h:
-        y - (rect.y + rect.h - 1)
-      else:
-        0
-  dx * dx + dy * dy
-
 proc playerDistanceSquared(bot: Bot, rect: Rect): int =
   ## Returns the squared distance from the bot foot pixel to one rectangle.
   pointRectDistanceSquared(
-    bot.selfX.navPointX(),
-    bot.selfY.navPointY(),
+    bot.selfX.footXAt(),
+    bot.selfY.footYAt(),
     rect
   )
 
-proc distanceSquared(ax, ay, bx, by: int): int =
-  ## Returns the squared distance between two points.
-  let
-    dx = ax - bx
-    dy = ay - by
-  dx * dx + dy * dy
-
 proc playerFootX(bot: Bot): int =
   ## Returns the bot foot-center X coordinate.
-  bot.selfX.navPointX()
+  bot.selfX.footXAt()
 
 proc playerFootY(bot: Bot): int =
   ## Returns the bot foot-center Y coordinate.
-  bot.selfY.navPointY()
+  bot.selfY.footYAt()
 
 proc objectWorldX(bot: Bot, objectState: ObjectState): int =
   ## Converts one object X coordinate to current-map coordinates.
@@ -608,11 +491,11 @@ proc objectWorldY(bot: Bot, objectState: ObjectState): int =
 
 proc objectFootX(bot: Bot, objectState: ObjectState): int =
   ## Converts one object X coordinate to current-map foot center.
-  bot.objectWorldX(objectState).navPointX()
+  bot.objectWorldX(objectState).footXAt()
 
 proc objectFootY(bot: Bot, objectState: ObjectState): int =
   ## Converts one object Y coordinate to current-map foot center.
-  bot.objectWorldY(objectState).navPointY()
+  bot.objectWorldY(objectState).footYAt()
 
 proc spriteInfo(bot: Bot, spriteId: int): SpriteInfo =
   ## Returns sprite metadata for one sprite id.
@@ -628,9 +511,9 @@ proc visiblePlayerName(bot: Bot, playerIndex: int): string =
   if not objectState.present:
     return
   let sprite = bot.spriteInfo(objectState.spriteId)
-  if sprite == nil or not sprite.label.startsWith("name "):
+  if sprite == nil or not sprite.label.startsWith(NameLabelPrefix):
     return
-  sprite.label["name ".len .. ^1]
+  sprite.label[NameLabelPrefix.len .. ^1]
 
 proc visiblePlayerIndexByName(bot: Bot, name: string): int =
   ## Returns the visible player index for one fixed player name.
@@ -656,9 +539,9 @@ proc visibleChatText(bot: Bot, playerIndex: int): string =
   if not objectState.present:
     return
   let sprite = bot.spriteInfo(objectState.spriteId)
-  if sprite == nil or not sprite.label.startsWith("chat "):
+  if sprite == nil or not sprite.label.startsWith(ChatLabelPrefix):
     return
-  sprite.label["chat ".len .. ^1]
+  sprite.label[ChatLabelPrefix.len .. ^1]
 
 proc recordChatLine(bot: Bot, role, speaker, text: string) =
   ## Appends one heard or spoken chat line to the conversation history.
@@ -736,29 +619,29 @@ proc classifySprite(label: string): tuple[kind: SpriteKind, glyph: char] =
   ## Classifies one Heartleaf sprite protocol label.
   let lower = label.toLowerAscii()
   result = (kind: SpriteUnknown, glyph: '\0')
-  if lower == "heartleaf main walkability":
+  if lower == MainWalkabilityLabel:
     result.kind = SpriteMainWalk
-  elif lower == "heartleaf home walkability":
+  elif lower == HomeWalkabilityLabel:
     result.kind = SpriteHomeWalk
-  elif lower.startsWith("heartleaf home bottom"):
+  elif lower.startsWith(HomeBottomLabelPrefix):
     result.kind = SpriteHomeBottom
-  elif lower.startsWith("heartleaf bottom"):
+  elif lower.startsWith(MainBottomLabelPrefix):
     result.kind = SpriteMainBottom
-  elif lower == "garden marker":
+  elif lower == GardenMarkerLabel:
     result.kind = SpriteGarden
-  elif lower.startsWith("gnome "):
+  elif lower.startsWith(GnomeLabelPrefix):
     result.kind = SpriteGnome
-  elif lower.startsWith("name "):
+  elif lower.startsWith(NameLabelPrefix):
     result.kind = SpriteName
-  elif lower.startsWith("chat "):
+  elif lower.startsWith(ChatLabelPrefix):
     result.kind = SpriteChat
-  elif lower.startsWith("clock "):
+  elif lower.startsWith(ClockLabelPrefix):
     result.kind = SpriteClock
-    if label.len > "clock ".len:
-      result.glyph = label["clock ".len]
+    if label.len > ClockLabelPrefix.len:
+      result.glyph = label[ClockLabelPrefix.len]
     else:
       result.glyph = ' '
-  elif lower.startsWith("score ") or lower.startsWith("dinner "):
+  elif lower.startsWith(ScoreLabelPrefix) or lower.startsWith(DinnerLabelPrefix):
     result.kind = SpriteOverlay
 
 proc needsPixels(kind: SpriteKind): bool =
@@ -1089,51 +972,6 @@ proc log(bot: Bot, text: string) =
   ## Writes one bot activity log line.
   echo bot.logName(), ": ", text, " (", bot.clockText(), ")"
 
-proc parseClockMinutes(text: string): int =
-  ## Parses one Heartleaf AM/PM clock string into day minutes.
-  result = -1
-  let parts = strutils.splitWhitespace(text)
-  if parts.len == 0:
-    return
-  let token = parts[^1]
-  if token.len < 4:
-    return
-  let suffix = token[^2 .. ^1].toLowerAscii()
-  if suffix != "am" and suffix != "pm":
-    return
-  let timeParts = token[0 .. ^3].split(':')
-  if timeParts.len != 2:
-    return
-  try:
-    var hour = parseInt(timeParts[0])
-    let minute = parseInt(timeParts[1])
-    if suffix == "pm" and hour < 12:
-      hour += 12
-    elif suffix == "am" and hour == 12:
-      hour = 0
-    result = hour * 60 + minute
-  except ValueError:
-    result = -1
-
-proc clockName(minutes: int): string =
-  ## Formats day minutes as one AM/PM clock string.
-  let wrapped = ((minutes mod (24 * 60)) + (24 * 60)) mod (24 * 60)
-  var hour = wrapped div 60
-  let minute = wrapped mod 60
-  let suffix =
-    if hour >= 12:
-      "pm"
-    else:
-      "am"
-  hour = hour mod 12
-  if hour == 0:
-    hour = 12
-  let minuteText =
-    if minute < 10:
-      "0" & $minute
-    else:
-      $minute
-  $hour & ":" & minuteText & suffix
 
 proc clockAnnouncement(minutes: int): string =
   ## Returns one hourly clock line for the conversation history.
@@ -1236,7 +1074,7 @@ proc findSelfIndexByName(bot: Bot): int =
   result = -1
   if bot.playerName.len == 0:
     return
-  let expected = "name " & bot.playerName
+  let expected = NameLabelPrefix & bot.playerName
   for objectId, objectState in bot.objects:
     if not objectState.present:
       continue
@@ -1256,8 +1094,8 @@ proc findSelfIndexByCamera(bot: Bot): int =
     if objectId < PlayerObjectBase or objectId >= NameObjectBase:
       continue
     let distance = distanceSquared(
-      objectState.x + NavPointOffsetX,
-      objectState.y + NavPointOffsetY,
+      objectState.x.footXAt(),
+      objectState.y.footYAt(),
       ViewportWidth div 2,
       ViewportHeight div 2
     )
@@ -2714,7 +2552,7 @@ proc goalReached(bot: Bot, goal: Goal): bool =
       bot.playerFootY(),
       goal.x,
       goal.y
-    ) <= NavStep * NavStep
+    ) <= GoalArrivePixels * GoalArrivePixels
   of GoalIdle:
     true
 
@@ -3030,67 +2868,6 @@ proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
     result = UnstuckMasks[bot.unstuckMaskIndex]
   bot.desiredMask = result
   bot.updateStuck(result)
-
-proc inputMaskSummary(mask: uint8): string =
-  ## Returns a compact name for one input mask.
-  var parts: seq[string]
-  if (mask and ButtonUp) != 0:
-    parts.add("up")
-  if (mask and ButtonDown) != 0:
-    parts.add("down")
-  if (mask and ButtonLeft) != 0:
-    parts.add("left")
-  if (mask and ButtonRight) != 0:
-    parts.add("right")
-  if (mask and ButtonSelect) != 0:
-    parts.add("select")
-  if (mask and ButtonA) != 0:
-    parts.add("a")
-  if (mask and ButtonB) != 0:
-    parts.add("b")
-  if parts.len == 0:
-    return "none"
-  parts.join("+")
-
-proc screenKindName(kind: ScreenKind): string =
-  ## Returns a readable screen-kind label.
-  case kind
-  of UnknownScreen:
-    "unknown"
-  of MainMap:
-    "world"
-  of HomeMap:
-    "home"
-  of OverlayScreen:
-    "overlay"
-
-proc socialPlanName(bot: Bot): string =
-  ## Returns the bot's current social dinner plan.
-  if bot.shouldGather():
-    return "gather"
-  if bot.minutes >= HouseEnterMinutes and bot.minutes < PartyLeaveMinutes:
-    return "enter"
-  if bot.hostCommitted:
-    return "committed host"
-  if bot.partyHouse == bot.homeIndex:
-    return "host"
-  if bot.partyHouse >= 0:
-    return "guest"
-  if bot.searchHouse >= 0:
-    return "seek"
-  "plan"
-
-proc checkedGardenCount(bot: Bot): int =
-  ## Returns how many static gardens have been ruled out today.
-  for checked in bot.gardenChecked:
-    if checked:
-      inc result
-
-proc markedGardenCount(bot: Bot): int =
-  ## Returns how many visible gardens still show a pickup marker.
-  for i in 0 ..< bot.resources.gardens.len:
-    if bot.gardenHasMarker(i):
-      inc result
 
 proc queryEscape(value: string): string =
   ## Escapes a query string component.

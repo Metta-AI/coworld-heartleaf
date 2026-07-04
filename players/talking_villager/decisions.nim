@@ -1,9 +1,9 @@
 import std/[json, strutils]
 
+import heartleaf/[common, protocol]
+
 const
   UnknownHouse = -1
-  HouseCount = 9
-  MaxChatChars* = 48
 
 type
   LlmActionKind* = enum
@@ -30,7 +30,7 @@ type
 proc cleanDecisionText*(text: string): string =
   ## Returns a printable ASCII chat string capped to Heartleaf chat size.
   for ch in text.strip():
-    if result.len >= MaxChatChars:
+    if result.len >= ChatMaxChars:
       break
     let value = ord(ch)
     if value >= 32 and value < 127:
