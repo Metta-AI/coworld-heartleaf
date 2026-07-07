@@ -153,6 +153,17 @@ block:
     doAssert garden.centerX > 0 and garden.centerY > 0,
       "garden centre should be a real map point"
 
+  # Chat hearing range: only a speaker with an active bubble has an audience,
+  # and it never includes the speaker or an invalid slot.
+  doAssert replayChatAudience(playSim, 99).len == 0,
+    "an out-of-range slot should have no audience"
+  doAssert replayChatAudience(playSim, 1).len == 0,
+    "bob never chatted, so nobody hears bob"
+  for heardSlot in replayChatAudience(playSim, 0):
+    doAssert heardSlot != 0, "a speaker never hears themselves"
+    doAssert heardSlot >= 0 and heardSlot < snapshots.len,
+      "audience slots should be valid players"
+
   echo "Testing replay keyframes and seeking"
   # Reference hashes come from a second, straight linear playback.
   var

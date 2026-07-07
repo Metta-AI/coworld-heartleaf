@@ -3728,6 +3728,42 @@ proc snapshotReplayGardens*(sim: SimServer): seq[ReplayGardenSnapshot] =
       foodTotal: foodTotal
     ))
 
+proc replayChatVisibleTo(sim: SimServer, speaker, viewer: Player): bool =
+  ## Whether `viewer` would see `speaker`'s current speech bubble — the
+  ## in-game "hearing range". Chat has no explicit radius: a bubble is only
+  ## delivered to a viewer when it lands inside that viewer's viewport (the
+  ## camera follows the viewer, clamped at map edges). This mirrors the exact
+  ## geometry of `addNameTag` + `addSpeechBubble` on the render path.
+  if speaker.message.len == 0 or speaker.messageTicks <= 0:
+    return false
+  if speaker.mapIndex != viewer.mapIndex:  # a house wall blocks the bubble
+    return false
+  let
+    cameraX = sim.cameraXFor(viewer)
+    cameraY = sim.cameraYFor(viewer)
+    screenX = speaker.x - cameraX
+    screenY = speaker.y - cameraY
+    tag = sim.nameTagSprite(speaker.playerName)
+    nameY = screenY - tag.height - NameGapY
+    bubble = sim.speechBubbleSprite(speaker.message)
+    bubbleX = screenX + GnomeSpriteSize div 2 - bubble.width div 2
+    bubbleY = nameY - bubble.height - ChatGapY
+  rectVisible(bubbleX, bubbleY, bubble.width, bubble.height,
+    ViewportWidth, ViewportHeight)
+
+proc replayChatAudience*(sim: SimServer, speakerSlot: int): seq[int] =
+  ## Slots of the OTHER players who would currently see `speakerSlot`'s chat
+  ## bubble — everyone in hearing range at this tick. Empty when the speaker
+  ## has no active message. Evaluate it on the tick the message is set; the
+  ## bubble then lingers (`ChatLifetimeTicks`), so someone who walks up later
+  ## can also see it — this captures the audience at the moment of speaking.
+  if speakerSlot < 0 or speakerSlot >= sim.players.len:
+    return @[]
+  let speaker = sim.players[speakerSlot]
+  for slot, viewer in sim.players:
+    if slot != speakerSlot and sim.replayChatVisibleTo(speaker, viewer):
+      result.add(slot)
+
 proc runReplayServerLoop*(
   host = DefaultHost,
   port = DefaultPort,

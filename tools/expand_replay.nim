@@ -168,6 +168,9 @@ proc main() =
   proc processTick(tick: int) =
     let day = sim.replaySimDay().dayNumber
     let players = snapshotReplayPlayers(sim)
+    var nameBySlot = initTable[int, string]()
+    for snapshot in players:
+      nameBySlot[snapshot.slot] = snapshot.playerName
     var seen: seq[int]
 
     for snapshot in players:
@@ -216,13 +219,23 @@ proc main() =
             "t" & $tick & " exit_house " & snapshot.playerName & " <- " &
               $before.houseIndex)
 
-      # Chat: message changed to a new non-empty bubble.
+      # Chat: message changed to a new non-empty bubble. Chat has no explicit
+      # radius — a player "hears" it when the speaker's bubble lands in their
+      # viewport (same map), so record everyone in range at the speaking tick.
       if snapshot.message.len > 0 and snapshot.message != before.message:
+        var heardBy = newJArray()
+        for slot in sim.replayChatAudience(snapshot.slot):
+          heardBy.add(%*{"slot": slot, "name": nameBySlot.getOrDefault(slot)})
         config.emit(
           eventRow(tick, day, snapshot.slot, snapshot.playerName,
             snapshot.username, "chat",
-            %*{"text": snapshot.message}),
-          "t" & $tick & " chat " & snapshot.playerName & ": " & snapshot.message)
+            %*{
+              "text": snapshot.message,
+              "heard_count": heardBy.len,
+              "heard_by": heardBy
+            }),
+          "t" & $tick & " chat " & snapshot.playerName & " (heard by " &
+            $heardBy.len & "): " & snapshot.message)
 
       # Score: hosting reward accrued.
       if snapshot.score > before.score:
