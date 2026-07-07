@@ -3615,6 +3615,119 @@ proc replayRunConfigFor(data: ReplayData): RunConfig =
   )
   result.update(data.configJson)
 
+# ---------------------------------------------------------------------------
+# Replay inspection (tooling)
+#
+# A small, read-only snapshot API for off-line replay analysis (see
+# tools/expand_replay.nim). The core `Player`/`SimServer`/`Garden` fields are
+# module-private, so this exposes exactly the per-tick state an analysis tool
+# needs to re-simulate a replay and read out positions and events — no more.
+# ---------------------------------------------------------------------------
+
+type
+  ReplayPlayerSnapshot* = object
+    slot*: int                ## player index (join order == gnome slot)
+    username*: string         ## connection username (varies game to game)
+    playerName*: string       ## chosen display name (stable identity)
+    x*, y*: int               ## foot-centre position in the CURRENT map's pixels
+    direction*: string        ## "north" | "south" | "east" | "west"
+    mapIndex*: int            ## 0 = main map, 1..HouseCount = a home map
+    houseIndex*: int          ## -1 on the main map, else the house they are inside
+    homeIndex*: int           ## the player's OWN house (0-based), -1 if unassigned
+    inventory*: seq[int]      ## per-veggie carried counts (len == FoodVeggieSlots)
+    inventoryTotal*: int      ## sum of `inventory`
+    score*: int               ## cumulative hosting score
+    message*: string          ## current chat-bubble text ("" when none)
+    messageTicks*: int        ## ticks the current message has left
+    dinnerCount*: int         ## number of completed dinners recorded so far
+    dinnerTicks*: int         ## ticks into the current dinner (0 when not dining)
+    lastDinnerHost*: string   ## host name of the most recent completed dinner
+    lastDinnerWasHost*: bool  ## whether THIS player hosted that dinner
+    lastDinnerGuests*: int    ## guest count of that dinner
+    lastDinnerFood*: int      ## total food served at it
+    lastDinnerScore*: int     ## score it awarded
+
+  ReplayGardenSnapshot* = object
+    index*: int               ## garden index (matches sim garden order)
+    centerX*, centerY*: int   ## garden-rect centre in main-map pixels
+    foodTotal*: int           ## total food currently available in the garden
+
+proc replayFoodNames*(): seq[string] =
+  ## Veggie names indexed by inventory slot (for naming harvest events).
+  @FoodNames
+
+proc replaySimConfig*(data: ReplayData): tuple[seed: int, dayTicks: int] =
+  ## Seed + day length recorded in a replay header, ready for `initSimServer`.
+  let config = data.replayRunConfigFor()
+  (seed: config.seed, dayTicks: max(1, config.daySeconds) * TicksPerSecond)
+
+proc replaySimDay*(sim: SimServer): tuple[dayNumber, dayTick, dayTicks: int] =
+  ## The simulation's day-cycle position (event context).
+  (dayNumber: sim.dayNumber, dayTick: sim.dayTick, dayTicks: sim.dayTicks)
+
+proc replayDirectionName(direction: Direction): string =
+  ## Human-readable facing, matching the sprite gnome labels.
+  case direction
+  of DirDown: "south"
+  of DirUp: "north"
+  of DirRight: "east"
+  of DirLeft: "west"
+
+proc snapshotReplayPlayers*(sim: SimServer): seq[ReplayPlayerSnapshot] =
+  ## One snapshot per connected player at the simulation's current tick.
+  result = newSeqOfCap[ReplayPlayerSnapshot](sim.players.len)
+  for slot, player in sim.players:
+    var inventoryTotal = 0
+    for count in player.inventory:
+      inventoryTotal += count
+    var snapshot = ReplayPlayerSnapshot(
+      slot: slot,
+      username: player.username,
+      playerName: player.playerName,
+      x: player.x.footXAt(),
+      y: player.y.footYAt(),
+      direction: replayDirectionName(player.direction),
+      mapIndex: player.mapIndex,
+      houseIndex:
+        if player.mapIndex.isHomeMap(): player.mapIndex - HomeMapIndexBase
+        else: -1,
+      homeIndex:
+        if player.homeFlag.isHomeMap(): player.homeFlag - HomeMapIndexBase
+        else: -1,
+      inventory: @(player.inventory),
+      inventoryTotal: inventoryTotal,
+      score: player.score,
+      message: player.message,
+      messageTicks: player.messageTicks,
+      dinnerCount: player.dinners.len,
+      dinnerTicks: player.dinnerTicks
+    )
+    if player.dinners.len > 0:
+      let dinner = player.dinners[^1]
+      var foodTotal = 0
+      for count in dinner.foods:
+        foodTotal += count
+      snapshot.lastDinnerHost = dinner.hostName
+      snapshot.lastDinnerWasHost = dinner.wasHost
+      snapshot.lastDinnerGuests = dinner.guestCount
+      snapshot.lastDinnerFood = foodTotal
+      snapshot.lastDinnerScore = dinner.score
+    result.add(snapshot)
+
+proc snapshotReplayGardens*(sim: SimServer): seq[ReplayGardenSnapshot] =
+  ## One snapshot per garden at the simulation's current tick.
+  result = newSeqOfCap[ReplayGardenSnapshot](sim.gardens.len)
+  for index, garden in sim.gardens:
+    var foodTotal = 0
+    for count in garden.inventory:
+      foodTotal += count
+    result.add(ReplayGardenSnapshot(
+      index: index,
+      centerX: garden.rect.x + garden.rect.w div 2,
+      centerY: garden.rect.y + garden.rect.h div 2,
+      foodTotal: foodTotal
+    ))
+
 proc runReplayServerLoop*(
   host = DefaultHost,
   port = DefaultPort,
