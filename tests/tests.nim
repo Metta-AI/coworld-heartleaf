@@ -128,6 +128,42 @@ block:
   doAssert playSim.gameHash() == data.hashes[^1].hash,
     "final hash should match the recorded stream"
 
+  echo "Testing replay snapshot inspection"
+  doAssert replaySimConfig(data).seed == TestSeed,
+    "replaySimConfig should recover the recorded seed"
+  let foodNames = replayFoodNames()
+  doAssert foodNames.len > 0, "food names should be listed"
+  doAssert "Apple" in foodNames, "food names should include Apple"
+
+  let snapshots = snapshotReplayPlayers(playSim)
+  doAssert snapshots.len == 2, "both players should be snapshotted"
+  for snapshot in snapshots:
+    doAssert snapshot.inventory.len == foodNames.len,
+      "inventory should have one slot per food"
+    doAssert snapshot.inventoryTotal >= 0, "inventory total should be sane"
+    doAssert snapshot.x > 0 and snapshot.y > 0,
+      "a played-back player should have a real foot position"
+    doAssert snapshot.direction in ["north", "south", "east", "west"],
+      "direction should be a named facing"
+
+  let gardens = snapshotReplayGardens(playSim)
+  doAssert gardens.len > 0, "the main map should have gardens"
+  for garden in gardens:
+    doAssert garden.foodTotal >= 0, "garden food should be non-negative"
+    doAssert garden.centerX > 0 and garden.centerY > 0,
+      "garden centre should be a real map point"
+
+  # Chat hearing range: only a speaker with an active bubble has an audience,
+  # and it never includes the speaker or an invalid slot.
+  doAssert replayChatAudience(playSim, 99).len == 0,
+    "an out-of-range slot should have no audience"
+  doAssert replayChatAudience(playSim, 1).len == 0,
+    "bob never chatted, so nobody hears bob"
+  for heardSlot in replayChatAudience(playSim, 0):
+    doAssert heardSlot != 0, "a speaker never hears themselves"
+    doAssert heardSlot >= 0 and heardSlot < snapshots.len,
+      "audience slots should be valid players"
+
   echo "Testing replay keyframes and seeking"
   # Reference hashes come from a second, straight linear playback.
   var
