@@ -1,10 +1,12 @@
 # Heartleaf ruleset-strategy commissioner config.
 #
-# Mirrors the bundled default config with two deviations:
+# Mirrors the bundled default config with one deviation:
 # - Rounds run every 30 minutes (one Heartleaf day per round).
-# - Competition entrants are every competing membership, not champions.
-#   Heartleaf is a 9-seat party game where one author fields several
-#   personality bots, and the platform keeps only one champion per player.
+#
+# Competition entrants are champions: each player fields exactly its current
+# champion, so the league is not spammed with stale, benched versions of a
+# player's earlier submissions. The 9 game seats are filled by duplicating the
+# real champions (fill_seats: duplicate), not by seating outdated versions.
 
 schedule_interval_minutes: 30
 
@@ -55,5 +57,4 @@ divisions:
     level: 1
     match:
       type: competition
-    entrants:
-      status: competing
+    entrants: champions
