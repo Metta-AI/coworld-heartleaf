@@ -1,0 +1,48 @@
+services:
+  game:
+    image: coworld-heartleaf-game:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+  shy_villager:
+    image: coworld-heartleaf-shy-villager:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: players/shy_villager/Dockerfile
+      network: host
+  chatty_villager:
+    image: coworld-heartleaf-chatty-villager:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: players/chatty_villager/Dockerfile
+      network: host
+  friendly_villager:
+    image: coworld-heartleaf-friendly-villager:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: players/friendly_villager/Dockerfile
+      network: host
+  fatherly_villager:
+    image: coworld-heartleaf-fatherly-villager:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: players/fatherly_villager/Dockerfile
+      network: host
+  commissioner:
+    image: coworld-heartleaf-commissioner:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: commissioner/Dockerfile
+  grader:
+    image: coworld-heartleaf-grader:latest
+    platform: linux/amd64
+    build:
+      context: grader
+      dockerfile: graders/bitworld_score/bitworld_score_grader/Dockerfile

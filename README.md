@@ -2,26 +2,6 @@
 
 # heartleaf - A cozy multiplayer garden dinner game.
 
-<!-- COWORLD-VERIFY-BADGE:START -->
-![Coworld verify: failed](https://img.shields.io/badge/coworld%20verify-failed-red)
-<!-- COWORLD-VERIFY-BADGE:END -->
-
-
-<!-- COWORLD-REPO-STATUS:START -->
-> [!NOTE]
-> Coworld repo status: **incomplete** (`coworld-incomplete`).
-> Canonical repository: `Metta-AI/coworld-heartleaf`.
-> Manifest path: `coworld_manifest.json`.
-> Build path: `Dockerfile`
-> Certification: blocked until `uv run coworld certify coworld_manifest.json` passes and the result is recorded.
->
-> Missing pieces:
-> - [ ] Validate the root concrete manifest against the current Coworld schema.
-> - [ ] Run `uv run coworld certify coworld_manifest.json` with the bundled players.
-> - [ ] Switch the repo topic to `coworld-complete` after certification passes.
-<!-- COWORLD-REPO-STATUS:END -->
-
-
 `nimby install heartleaf`
 
 ![Github Actions](https://github.com/treeform/cogame-heartleaf/workflows/Github%20Actions/badge.svg)
@@ -41,6 +21,16 @@ dinner in the evening.
 Players connect over websockets at `/player`. The browser sprite client is
 served at `/client/player`, and the global observer is served at
 `/client/global`.
+
+## Coworld package
+
+This repository owns the Coworld manifest template and every image build declared by it:
+
+```bash
+coworld build --version 0.1.11
+coworld certify dist/coworld_manifest.json
+coworld upload-coworld dist/coworld_manifest.json
+```
 
 > **AI disclaimer: Much of this game was AI generated.**
 
