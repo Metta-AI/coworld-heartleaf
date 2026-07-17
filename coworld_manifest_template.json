@@ -2,7 +2,6 @@
   "$schema": "https://raw.githubusercontent.com/Metta-AI/metta/main/packages/coworld/src/coworld/coworld_manifest_schema.json",
   "game": {
     "name": "heartleaf",
-    "version": "0.1.0",
     "description": "A cozy BitWorld garden dinner game where players grow food, collect vegetables, and gather in the evening.",
     "owner": "treeform@softmax.com",
     "runnable": {
@@ -10,7 +9,8 @@
       "image": "{{GAME_IMAGE}}",
       "run": [
         "/bin/heartleaf"
-      ]
+      ],
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master"
     },
     "config_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -178,7 +178,8 @@
       ],
       "env": {
         "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
-      }
+      },
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/players/shy_villager"
     },
     {
       "id": "chatty_villager",
@@ -191,7 +192,8 @@
       ],
       "env": {
         "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
-      }
+      },
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/players/chatty_villager"
     },
     {
       "id": "friendly_villager",
@@ -204,7 +206,8 @@
       ],
       "env": {
         "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
-      }
+      },
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/players/friendly_villager"
     },
     {
       "id": "fatherly_villager",
@@ -217,7 +220,8 @@
       ],
       "env": {
         "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
-      }
+      },
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/players/fatherly_villager"
     }
   ],
   "commissioner": [
@@ -230,23 +234,15 @@
       "image": "{{COMMISSIONER_IMAGE}}"
     }
   ],
-  "reporter": [
-    {
-      "id": "default-reporter",
-      "name": "Default Reporter",
-      "type": "reporter",
-      "description": "Default Coworld reporter for generic episode artifacts.",
-      "image": "{{REPORTER_IMAGE}}"
-    }
-  ],
+  "reporter": [],
   "grader": [
     {
       "id": "bitworld-score-grader",
       "name": "BitWorld Score Grader",
       "type": "grader",
       "description": "Generic BitWorld grader that scores episode interest from score spread and game-specific activity signals.",
-      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/b2d755d2355fba8107d228adffb0e12dd7ab75b4/grader/graders/bitworld_score/bitworld_score_grader",
-      "image": "ghcr.io/metta-ai/coworld-heartleaf-grader:latest"
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/grader/graders/bitworld_score/bitworld_score_grader",
+      "image": "{{GRADER_IMAGE}}"
     }
   ],
   "variants": [

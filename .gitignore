@@ -21,5 +21,6 @@ nimcache
 
 # Project specific ignores.
 out/
+/dist/
 *.dSYM/
 nim.cfg
