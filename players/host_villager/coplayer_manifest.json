@@ -1,0 +1,8 @@
+{
+  "author": "softmax@softmax.com",
+  "name": "host_villager",
+  "image_uri": "",
+  "binary": "/bin/host_villager",
+  "description": "Host-always Heartleaf gnome: deterministic gather-and-host schedule with LLM-generated dinner invitations.",
+  "games": ["heartleaf"]
+}
