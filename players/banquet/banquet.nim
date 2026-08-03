@@ -271,9 +271,10 @@ proc visibleChatText(bot: Bot, playerIndex: int): string =
   sprite.label[ChatLabelPrefix.len .. ^1]
 
 proc scanHeardChats(bot: Bot) =
-  ## Watches chat bubbles for sibling handshake tokens and rival hosts.
-  ## A sibling token only counts when the embedded name matches the
-  ## speaker's own name tag, so relayed copies cannot spoof a sibling.
+  ## Reads chat bubbles for twin handshake tokens and for how each
+  ## gnome speaks, which decides the wording its invitations get. A
+  ## handshake token only counts when the name inside it matches the
+  ## speaker's own name tag, so a relayed copy cannot spoof a twin.
   for objectId, objectState in bot.objects:
     if objectId < ChatObjectBase or objectId >= GardenObjectBase:
       continue
