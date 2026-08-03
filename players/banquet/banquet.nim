@@ -1401,8 +1401,11 @@ proc banquetGoal(bot: Bot): Goal =
     if bot.screenKind == HomeMap:
       return bot.exitGoal()
     return bot.gatherOwnHouseGoal()
-  if bot.inRendezvous():
-    return bot.rendezvousGoal()
+  # The handshake rides along with gathering rather than taking a walk
+  # of its own. Every garden is stripped within the first two hours, so
+  # a morning spent at a meeting point conceded a whole day of food —
+  # measured at one item out of thirty-nine — and the gardens are where
+  # the other gnomes are anyway.
   bot.gatherGoal()
 
 proc queueChat(bot: Bot, line: string) =
@@ -1487,8 +1490,6 @@ proc maybeInvite(bot: Bot) =
   ## Invites the nearest visible non-sibling gnome to the host's
   ## dinner, throttled per target so lines vary through the day.
   if bot.chatQueue.len > 0 or bot.playerName.len == 0:
-    return
-  if bot.inRendezvous():
     return
   if bot.minutes < DayStartMinutes + 30 or
       bot.minutes >= DinnerEnterMinutes:
