@@ -43,6 +43,11 @@ const
   # sentence-reading gnome can hear costs us that gnome's evening, so
   # it is only ever used when none of them is on screen.
   DialectToken = "/hl! "
+  # A gnome that has said many lines and only ever one of them is
+  # running a template, not thinking; it is ranked last as a target and
+  # its house is never a destination.
+  DistinctLineSamples = 6
+  RepeaterMinLines = 8
   ChatQueueLimit = 2
   ChatSpacingTicks = 24
 
@@ -167,6 +172,9 @@ type
     lastInviteTick: array[HouseCount, int]
     speaksPlainly: array[HouseCount, bool]
     speaksDialect: array[HouseCount, bool]
+    heardLines: array[HouseCount, int]
+    distinctLines: array[HouseCount, seq[string]]
+    everGuested: array[HouseCount, bool]
     lastTokenTick: int
     tokenSerial: int
     tokensNearSibling: int
@@ -291,6 +299,10 @@ proc scanHeardChats(bot: Bot) =
       continue
     let speakerHouse = speaker.houseIndexForPlayerName()
     if speakerHouse >= 0 and speakerHouse < HouseCount:
+      inc bot.heardLines[speakerHouse]
+      if bot.distinctLines[speakerHouse].len < DistinctLineSamples and
+          text notin bot.distinctLines[speakerHouse]:
+        bot.distinctLines[speakerHouse].add(text)
       if text.startsWith(DialectToken):
         bot.speaksDialect[speakerHouse] = true
       elif not text.startsWith(SiblingToken):
@@ -1349,8 +1361,12 @@ proc gatherGoal(bot: Bot): Goal =
 
 proc guestDinnerGoal(bot: Bot): Goal =
   ## Returns the guest-side dinner goal: wait at the host's door from
-  ## late afternoon, then sit inside through the 6:55pm tally.
+  ## late afternoon, then sit inside through the 6:55pm tally. The only
+  ## house we ever walk into is our own twin's — eating at anyone
+  ## else's table scores us nothing and multiplies their plate.
   let host = bot.hostHouse()
+  if host != bot.homeIndex and not bot.siblingHouses[host]:
+    return bot.ownHomeGoal()
   if bot.minutes >= DinnerEnterMinutes:
     if bot.screenKind == HomeMap:
       if bot.currentHouse == host:
@@ -1451,6 +1467,44 @@ proc summonLine(targetName, hostName: string): string =
   DialectToken & targetName[0 .. 0] & " come now! Party at " &
     hostName[0 .. 0] & "'s house tonight! food!"
 
+proc observeGuests(bot: Bot) =
+  ## Records who actually turns up inside our own house. What a gnome
+  ## does is worth more than how it talks: a gnome that has eaten at
+  ## our table is the best target in the field even if every line it
+  ## ever says is identical.
+  if bot.screenKind != HomeMap or bot.currentHouse != bot.homeIndex:
+    return
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+      continue
+    let playerIndex = objectId - PlayerObjectBase
+    if playerIndex == bot.selfIndex:
+      continue
+    let house = bot.visiblePlayerName(playerIndex).houseIndexForPlayerName()
+    if house >= 0 and house < HouseCount and not bot.everGuested[house]:
+      bot.everGuested[house] = true
+      echo bot.name, ": guest seen at our table: house ", house + 1
+
+proc isRepeater(bot: Bot, house: int): bool =
+  ## Returns true for a gnome that has talked plenty and only ever had
+  ## one thing to say. There is no reasoning with a recording.
+  bot.heardLines[house] >= RepeaterMinLines and
+    bot.distinctLines[house].len <= 1
+
+proc targetRank(bot: Bot, house: int): int =
+  ## Lower ranks are pitched first. Gnomes that have actually eaten
+  ## with us come first, then ones that hold a real conversation, then
+  ## the rest, and recordings last.
+  if bot.everGuested[house]:
+    return 0
+  if bot.distinctLines[house].len >= 3:
+    return 1
+  if bot.isRepeater(house):
+    return 3
+  2
+
 proc maybeInvite(bot: Bot) =
   ## Invites the nearest visible non-sibling gnome to the host's
   ## dinner, throttled per target so lines vary through the day.
@@ -1464,6 +1518,7 @@ proc maybeInvite(bot: Bot) =
   let hostName = bot.hostHouse().playerNameForHouse()
   var
     bestIndex = -1
+    bestRank = high(int)
     bestDistance = high(int)
   for objectId, objectState in bot.objects:
     if not objectState.present:
@@ -1489,9 +1544,14 @@ proc maybeInvite(bot: Bot) =
       bot.objectFootX(objectState),
       bot.objectFootY(objectState)
     )
-    if distance < bestDistance:
-      bestDistance = distance
-      bestIndex = playerIndex
+    let rank = bot.targetRank(house)
+    if rank > bestRank:
+      continue
+    if rank == bestRank and distance >= bestDistance:
+      continue
+    bestRank = rank
+    bestDistance = distance
+    bestIndex = playerIndex
   if bestIndex < 0:
     return
   let
@@ -1778,6 +1838,7 @@ proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
   ## Chooses the next input mask for one game frame.
   bot.analyze()
   bot.scanHeardChats()
+  bot.observeGuests()
   if not bot.localized:
     bot.desiredMask = 0
     bot.hasTarget = false
