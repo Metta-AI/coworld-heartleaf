@@ -1481,18 +1481,15 @@ proc shortInviteLine(bot: Bot, targetName, hostName: string): string =
     "'s house tonight! food!"
 
 proc inviteLine(bot: Bot, targetName, hostName: string): string =
-  ## Builds one invitation to our real party at our real house.
-  ## One wording serves both audiences: the token and house clause that
-  ## scripted listeners parse, with full names so listeners that read
-  ## chat as language can resolve the house too. Never abbreviate the
-  ## host — a listener that cannot resolve the name still treats the
-  ## line as its one accepted invitation and then declines every later
-  ## one, so a short name costs the guest outright.
+  ## Builds the invitation we lead with: the guest's name first, then
+  ## the house spelled out in plain words. Measured across versions,
+  ## the field's most dependable guest accepts this and ignores the
+  ## same invitation once it carries the bot channel's prefix or an
+  ## abbreviated house, and it never attends the rivals who use those.
   if bot.minutes >= SummonFromMinutes:
-    return InviteToken & targetName & " come now! " & InviteHouseClause &
-      hostName & "'s house!"
-  InviteToken & targetName & "! " & InviteHouseClause & hostName &
-    "'s house tonight!"
+    return targetName & "! " & InviteHouseClause & hostName &
+      "'s house - come now!"
+  targetName & "! " & InviteHouseClause & hostName & "'s house at 6!"
 
 proc maybeInvite(bot: Bot) =
   ## Invites the nearest visible gnome to the host twin's dinner, one
