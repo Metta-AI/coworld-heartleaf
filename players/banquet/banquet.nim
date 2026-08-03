@@ -1510,12 +1510,14 @@ proc maybeInvite(bot: Bot) =
   # sentence-reader that overhears that channel stops accepting our
   # invitations for the evening, and chat carries only to gnomes on our
   # screen, so the summons waits until none of them is watching.
-  if bot.dayIndex >= 1 and not bot.speaksPlainly[house] and
-      bot.minutes >= InviteUrgentMinutes and
-      not bot.plainSpeakerVisible():
-    # Waiting for the first day means every sentence-reader in the
-    # field has already given itself away, so silence here is evidence
-    # rather than ignorance.
+  # The rival that wins this league says one thing, on the bot channel,
+  # and it is an order to come now rather than a booking for six. Its
+  # listeners obey it and keep coming back for the rest of the game —
+  # but it does not say a word until the early afternoon, and we are
+  # out here from breakfast. Saying the same thing first is the whole
+  # opening. Sentence-readers must not overhear it, and chat only
+  # carries to gnomes on our screen, so we wait for a clear moment.
+  if not bot.speaksPlainly[house] and not bot.plainSpeakerVisible():
     bot.queueChat(summonLine(name, hostName))
 
 proc maybeSendPendingChat(bot: Bot, ws: WebSocket) =
