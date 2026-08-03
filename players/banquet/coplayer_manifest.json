@@ -1,0 +1,10 @@
+{
+  "author": "treeform@softmax.com",
+  "name": "banquet",
+  "image_uri": "",
+  "binary": "/bin/banquet",
+  "description": "Coordinated gather-and-host Heartleaf gnome: twin seats meet, elect a host, race the gardens, and pack the 6:55pm dinner table.",
+  "games": [
+    "heartleaf"
+  ]
+}
