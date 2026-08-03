@@ -27,7 +27,11 @@ const
   DinnerEnterMinutes = 18 * 60 + 15
   EveningGatherMinutes = 19 * 60 + 5
   SummonFromMinutes = 15 * 60
-  TourFromMinutes = 12 * 60
+  # Measured: 96% of a day's harvest is in hand by 10am, because the
+  # whole village strips all 39 gardens in the first two hours. The
+  # rest of the day is worth far more spent recruiting than walking to
+  # gardens that are already empty.
+  TourFromMinutes = 10 * 60
   # Chat cadence in frame ticks (24 ticks per real second).
   HandshakeIntervalTicks = 48
   HandshakeConfirmSends = 6
@@ -1363,9 +1367,10 @@ proc guestDinnerGoal(bot: Bot): Goal =
   bot.gatherAtHouseGoal(host)
 
 proc banquetGoal(bot: Bot): Goal =
-  ## Returns the banquet goal for the current clock and role. Gather
-  ## all day, meet siblings on the first morning, then host or guest
-  ## the 6:55pm dinner tally and bank leftovers for tomorrow.
+  ## Returns the banquet goal for the current clock and role. Race the
+  ## gardens at dawn while they still hold food, spend the long empty
+  ## middle of the day recruiting door to door, then host or attend the
+  ## 6:55pm tally.
   if not bot.localized or bot.navForCurrentMap() == nil:
     return Goal(kind: GoalIdle, screenKind: bot.screenKind)
   if bot.screenKind == OverlayScreen:
@@ -1389,10 +1394,15 @@ proc banquetGoal(bot: Bot): Goal =
   let touring =
     case bot.role()
     of RoleGuest: true
-    of RoleHost: false
-    of RoleSolo: bot.minutes >= TourFromMinutes
+    of RoleHost, RoleSolo: bot.minutes >= TourFromMinutes
   if touring:
-    let house = bot.tourTarget()
+    var house = bot.tourTarget()
+    if house == UnknownHouse:
+      # A lap is done; start another so gnomes who were out gathering
+      # the first time round still get asked.
+      for i in 0 ..< HouseCount:
+        bot.pitchedToday[i] = false
+      house = bot.tourTarget()
     if house != UnknownHouse:
       # Count the door as worked once we arrive, so an owner who is out
       # gathering costs one visit rather than looping the rest of the day.
