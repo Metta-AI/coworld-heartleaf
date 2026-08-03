@@ -39,6 +39,12 @@ const
   # Sibling handshake chat token; must match the speaker's own name to
   # count, so third-party relays of the line cannot spoof a sibling.
   SiblingToken = "hl5 "
+  # The bot channel some listeners read. Emitting it anywhere a
+  # sentence-reading gnome can hear costs us that gnome's evening, so
+  # it is only ever used when none of them is on screen.
+  DialectToken = "/hl! "
+  ChatQueueLimit = 2
+  ChatSpacingTicks = 24
 
 
   UnstuckMasks = [
@@ -154,12 +160,13 @@ type
     desiredMask: uint8
     target: Point
     hasTarget: bool
-    pendingChat: string
-    hasPendingChat: bool
+    chatQueue: seq[string]
     lastChatSentTick: int
     # Banquet twin coordination and invitations.
     siblingHouses: array[HouseCount, bool]
     lastInviteTick: array[HouseCount, int]
+    speaksPlainly: array[HouseCount, bool]
+    speaksDialect: array[HouseCount, bool]
     lastTokenTick: int
     tokenSerial: int
     tokensNearSibling: int
@@ -282,6 +289,12 @@ proc scanHeardChats(bot: Bot) =
     bot.heardChats[playerIndex] = text
     if playerIndex == bot.selfIndex or speaker == bot.playerName:
       continue
+    let speakerHouse = speaker.houseIndexForPlayerName()
+    if speakerHouse >= 0 and speakerHouse < HouseCount:
+      if text.startsWith(DialectToken):
+        bot.speaksDialect[speakerHouse] = true
+      elif not text.startsWith(SiblingToken):
+        bot.speaksPlainly[speakerHouse] = true
     if text.startsWith(SiblingToken):
       let parts = text.splitWhitespace()
       if parts.len >= 2 and parts[1] == speaker:
@@ -690,8 +703,7 @@ proc resetGardenPlan(bot: Bot) =
   inc bot.dayIndex
   bot.gardenChecked = newSeq[bool](bot.resources.gardens.len)
   bot.currentGarden = -1
-  bot.pendingChat = ""
-  bot.hasPendingChat = false
+  bot.chatQueue.setLen(0)
   bot.path.setLen(0)
   bot.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
 
@@ -1376,15 +1388,16 @@ proc banquetGoal(bot: Bot): Goal =
   bot.gatherGoal()
 
 proc queueChat(bot: Bot, line: string) =
-  ## Queues one chat line for sending on the next possible frame.
-  if bot.hasPendingChat or line.len == 0:
+  ## Queues one chat line, spaced out on send so a listener polling for
+  ## speech bubbles sees each line rather than only the last.
+  if bot.chatQueue.len >= ChatQueueLimit or line.len == 0:
     return
-  bot.pendingChat =
+  bot.chatQueue.add(
     if line.len > ChatMaxChars:
       line[0 ..< ChatMaxChars]
     else:
       line
-  bot.hasPendingChat = true
+  )
 
 proc siblingVisible(bot: Bot): bool =
   ## Returns true when any known sibling gnome is on screen now.
@@ -1414,10 +1427,34 @@ proc maybeHandshake(bot: Bot) =
     inc bot.tokensNearSibling
   bot.queueChat(SiblingToken & bot.playerName & " " & $bot.tokenSerial)
 
+proc plainSpeakerVisible(bot: Bot): bool =
+  ## Returns true when a gnome we have heard speak in sentences is on
+  ## screen, and so within earshot of anything we say.
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+      continue
+    let playerIndex = objectId - PlayerObjectBase
+    if playerIndex == bot.selfIndex:
+      continue
+    let house = bot.visiblePlayerName(playerIndex).houseIndexForPlayerName()
+    if house >= 0 and house < HouseCount and bot.speaksPlainly[house]:
+      return true
+
+proc summonLine(targetName, hostName: string): string =
+  ## Builds the bot-channel summons, in the abbreviated shape its
+  ## readers expect, calling the guest over immediately rather than
+  ## booking it for later.
+  if targetName.len == 0 or hostName.len == 0:
+    return ""
+  DialectToken & targetName[0 .. 0] & " come now! Party at " &
+    hostName[0 .. 0] & "'s house tonight! food!"
+
 proc maybeInvite(bot: Bot) =
   ## Invites the nearest visible non-sibling gnome to the host's
   ## dinner, throttled per target so lines vary through the day.
-  if bot.hasPendingChat or bot.playerName.len == 0:
+  if bot.chatQueue.len > 0 or bot.playerName.len == 0:
     return
   if bot.inRendezvous():
     return
@@ -1468,19 +1505,29 @@ proc maybeInvite(bot: Bot) =
     bot.queueChat(name & "! Doors close 6:55! Eat at " & hostName & "'s!")
   else:
     bot.queueChat(name & "! Feast at " & hostName & "'s at 6! Come!")
+  # One gnome in this field wanders in and out of our house all day and
+  # is simply elsewhere at the tally; it reads only the bot channel. Any
+  # sentence-reader that overhears that channel stops accepting our
+  # invitations for the evening, and chat carries only to gnomes on our
+  # screen, so the summons waits until none of them is watching.
+  if bot.speaksDialect[house] and bot.minutes >= InviteUrgentMinutes and
+      not bot.plainSpeakerVisible():
+    bot.queueChat(summonLine(name, hostName))
 
 proc maybeSendPendingChat(bot: Bot, ws: WebSocket) =
   ## Sends one queued chat line when someone can hear it.
-  if not bot.hasPendingChat:
+  if bot.chatQueue.len == 0:
     return
   if bot.screenKind == OverlayScreen:
     return
   if bot.visibleOtherPlayerCount() == 0:
     return
-  ws.send(blobFromChat(bot.pendingChat), BinaryMessage)
-  bot.log("chat " & bot.pendingChat)
-  bot.pendingChat = ""
-  bot.hasPendingChat = false
+  if bot.frameTick - bot.lastChatSentTick < ChatSpacingTicks:
+    return
+  let line = bot.chatQueue[0]
+  bot.chatQueue.delete(0)
+  ws.send(blobFromChat(line), BinaryMessage)
+  bot.log("chat " & line)
   bot.lastChatSentTick = bot.frameTick
 
 proc goalReached(bot: Bot, goal: Goal): bool =
