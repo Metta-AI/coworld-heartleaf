@@ -26,11 +26,11 @@ const
   GatherUntilMinutes = 16 * 60 + 30
   DinnerEnterMinutes = 18 * 60 + 15
   EveningGatherMinutes = 19 * 60 + 5
-  InviteUrgentMinutes = 17 * 60
+  SummonFromMinutes = 15 * 60
   # Chat cadence in frame ticks (24 ticks per real second).
   HandshakeIntervalTicks = 48
   HandshakeConfirmSends = 6
-  InviteCooldownTicks = 700
+  InviteCooldownTicks = 300
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
   HouseGatherMaxRadius = 96
@@ -39,6 +39,12 @@ const
   # Sibling handshake chat token; must match the speaker's own name to
   # count, so third-party relays of the line cannot spoof a sibling.
   SiblingToken = "hl5 "
+  # The village's common invitation dialect, read off public replays.
+  # Listeners key on the "Party at <host>'s house" clause and act on it
+  # from any speaker; every line we send names our own real house and a
+  # party we actually host, so the invitation is true as well as legible.
+  InviteToken = "/hl! "
+  InviteHouseClause = "Party at "
 
 
   UnstuckMasks = [
@@ -159,6 +165,8 @@ type
     lastChatSentTick: int
     # Banquet twin coordination and invitations.
     siblingHouses: array[HouseCount, bool]
+    rivalHosts: array[HouseCount, bool]
+    invitesSent: array[HouseCount, int]
     lastInviteTick: array[HouseCount, int]
     lastTokenTick: int
     tokenSerial: int
@@ -255,10 +263,17 @@ proc visibleChatText(bot: Bot, playerIndex: int): string =
     return
   sprite.label[ChatLabelPrefix.len .. ^1]
 
+proc hostTag(name: string): string =
+  ## Returns how one gnome's house is named inside an invitation: the
+  ## village dialect abbreviates the owner to a single initial.
+  if name.len == 0:
+    return ""
+  name[0 .. 0]
+
 proc scanHeardChats(bot: Bot) =
-  ## Watches chat bubbles for sibling handshake tokens. A token only
-  ## counts when the embedded name matches the speaker's own name tag,
-  ## so relayed copies of the line cannot spoof a sibling.
+  ## Watches chat bubbles for sibling handshake tokens and rival hosts.
+  ## A sibling token only counts when the embedded name matches the
+  ## speaker's own name tag, so relayed copies cannot spoof a sibling.
   for objectId, objectState in bot.objects:
     if objectId < ChatObjectBase or objectId >= GardenObjectBase:
       continue
@@ -290,6 +305,20 @@ proc scanHeardChats(bot: Bot) =
             not bot.siblingHouses[house]:
           bot.siblingHouses[house] = true
           echo bot.name, ": sibling found: ", speaker, " house ", house + 1
+      continue
+    if text.startsWith(InviteToken):
+      # A gnome advertising its own house is a rival host: it is
+      # recruiting rather than available, so stop spending pitches on it.
+      let clauseAt = text.find(InviteHouseClause)
+      if clauseAt < 0:
+        continue
+      let named = text[clauseAt + InviteHouseClause.len .. ^1]
+      if not named.startsWith(speaker.hostTag()):
+        continue
+      let house = speaker.houseIndexForPlayerName()
+      if house >= 0 and house < HouseCount and not bot.rivalHosts[house]:
+        bot.rivalHosts[house] = true
+        echo bot.name, ": rival host: ", speaker, " house ", house + 1
 
 proc logName(bot: Bot): string =
   ## Returns the username and fixed player name for bot logs.
@@ -1414,9 +1443,34 @@ proc maybeHandshake(bot: Bot) =
     inc bot.tokensNearSibling
   bot.queueChat(SiblingToken & bot.playerName & " " & $bot.tokenSerial)
 
+proc inviteLine(bot: Bot, targetName, hostName: string): string =
+  ## Builds one invitation to our real party at our real house.
+  ## Alternating wordings reach both audiences in the village: the
+  ## abbreviated dialect that scripted listeners parse, and a plain
+  ## sentence with full names for listeners that read chat as language.
+  let
+    house = targetName.houseIndexForPlayerName()
+    dialect = house < 0 or (bot.invitesSent[house] mod 2) == 0
+    summon = bot.minutes >= SummonFromMinutes
+  if dialect:
+    let target =
+      if summon:
+        targetName.hostTag() & " come now!"
+      else:
+        targetName.hostTag() & "!"
+    return InviteToken & target & " " & InviteHouseClause &
+      hostName.hostTag() & "'s house tonight! food!"
+  if summon:
+    return targetName & "! " & InviteHouseClause & hostName &
+      "'s house - come now!"
+  targetName & "! " & InviteHouseClause & hostName & "'s house at 6!"
+
 proc maybeInvite(bot: Bot) =
-  ## Invites the nearest visible non-sibling gnome to the host's
-  ## dinner, throttled per target so lines vary through the day.
+  ## Invites one visible gnome to the host twin's dinner. Targets are
+  ## ranked by how promising they are — a gnome that advertises its own
+  ## house is recruiting, not available — then by distance. Invitations
+  ## run from early morning, hours before rival hosts start recruiting,
+  ## because a listener's first accepted invitation is the binding one.
   if bot.hasPendingChat or bot.playerName.len == 0:
     return
   if bot.inRendezvous():
@@ -1427,6 +1481,7 @@ proc maybeInvite(bot: Bot) =
   let hostName = bot.hostHouse().playerNameForHouse()
   var
     bestIndex = -1
+    bestRival = true
     bestDistance = high(int)
   for objectId, objectState in bot.objects:
     if not objectState.present:
@@ -1446,31 +1501,30 @@ proc maybeInvite(bot: Bot) =
       continue
     if bot.frameTick - bot.lastInviteTick[house] < InviteCooldownTicks:
       continue
-    let distance = distanceSquared(
-      bot.playerFootX(),
-      bot.playerFootY(),
-      bot.objectFootX(objectState),
-      bot.objectFootY(objectState)
-    )
-    if distance < bestDistance:
-      bestDistance = distance
-      bestIndex = playerIndex
+    let
+      rival = bot.rivalHosts[house]
+      distance = distanceSquared(
+        bot.playerFootX(),
+        bot.playerFootY(),
+        bot.objectFootX(objectState),
+        bot.objectFootY(objectState)
+      )
+    if rival and not bestRival:
+      continue
+    if rival == bestRival and distance >= bestDistance:
+      continue
+    bestRival = rival
+    bestDistance = distance
+    bestIndex = playerIndex
   if bestIndex < 0:
     return
   let
     name = bot.visiblePlayerName(bestIndex)
     house = name.houseIndexForPlayerName()
+    line = bot.inviteLine(name, hostName)
   bot.lastInviteTick[house] = bot.frameTick
-  if bot.role() == RoleGuest:
-    if bot.minutes >= InviteUrgentMinutes:
-      bot.queueChat(name & "! Doors close 6:55! Eat at " & hostName & "'s!")
-    else:
-      bot.queueChat(name & "! Feast at " & hostName & "'s at 6! Come!")
-  else:
-    if bot.minutes >= InviteUrgentMinutes:
-      bot.queueChat(name & "! Dinner at my house! Doors close 6:55!")
-    else:
-      bot.queueChat(name & "! Dinner at my house at 6! All welcome!")
+  inc bot.invitesSent[house]
+  bot.queueChat(line)
 
 proc maybeSendPendingChat(bot: Bot, ws: WebSocket) =
   ## Sends one queued chat line when someone can hear it.
