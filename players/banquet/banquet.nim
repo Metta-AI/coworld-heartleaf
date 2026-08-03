@@ -166,7 +166,6 @@ type
     lastChatSentTick: int
     # Banquet twin coordination and invitations.
     siblingHouses: array[HouseCount, bool]
-    rivalHosts: array[HouseCount, bool]
     invitesSent: array[HouseCount, int]
     pitchedToday: array[HouseCount, bool]
     lastInviteTick: array[HouseCount, int]
@@ -265,13 +264,6 @@ proc visibleChatText(bot: Bot, playerIndex: int): string =
     return
   sprite.label[ChatLabelPrefix.len .. ^1]
 
-proc hostTag(name: string): string =
-  ## Returns how one gnome's house is named inside an invitation: the
-  ## village dialect abbreviates the owner to a single initial.
-  if name.len == 0:
-    return ""
-  name[0 .. 0]
-
 proc scanHeardChats(bot: Bot) =
   ## Watches chat bubbles for sibling handshake tokens and rival hosts.
   ## A sibling token only counts when the embedded name matches the
@@ -308,19 +300,6 @@ proc scanHeardChats(bot: Bot) =
           bot.siblingHouses[house] = true
           echo bot.name, ": sibling found: ", speaker, " house ", house + 1
       continue
-    if text.startsWith(InviteToken):
-      # A gnome advertising its own house is a rival host: it is
-      # recruiting rather than available, so stop spending pitches on it.
-      let clauseAt = text.find(InviteHouseClause)
-      if clauseAt < 0:
-        continue
-      let named = text[clauseAt + InviteHouseClause.len .. ^1]
-      if not named.startsWith(speaker.hostTag()):
-        continue
-      let house = speaker.houseIndexForPlayerName()
-      if house >= 0 and house < HouseCount and not bot.rivalHosts[house]:
-        bot.rivalHosts[house] = true
-        echo bot.name, ": rival host: ", speaker, " house ", house + 1
 
 proc logName(bot: Bot): string =
   ## Returns the username and fixed player name for bot logs.
@@ -1342,7 +1321,7 @@ proc tourTarget(bot: Bot): int =
   var bestDistance = high(int)
   for house in 0 ..< HouseCount:
     if house == bot.homeIndex or bot.siblingHouses[house] or
-        bot.rivalHosts[house] or bot.pitchedToday[house]:
+        bot.pitchedToday[house]:
       continue
     if house >= bot.resources.houseValid.len or
         not bot.resources.houseValid[house]:
@@ -1468,25 +1447,17 @@ proc maybeHandshake(bot: Bot) =
 
 proc inviteLine(bot: Bot, targetName, hostName: string): string =
   ## Builds one invitation to our real party at our real house.
-  ## Alternating wordings reach both audiences in the village: the
-  ## abbreviated dialect that scripted listeners parse, and a plain
-  ## sentence with full names for listeners that read chat as language.
-  let
-    house = targetName.houseIndexForPlayerName()
-    dialect = house < 0 or (bot.invitesSent[house] mod 2) == 0
-    summon = bot.minutes >= SummonFromMinutes
-  if dialect:
-    let target =
-      if summon:
-        targetName.hostTag() & " come now!"
-      else:
-        targetName.hostTag() & "!"
-    return InviteToken & target & " " & InviteHouseClause &
-      hostName.hostTag() & "'s house tonight! food!"
-  if summon:
-    return targetName & "! " & InviteHouseClause & hostName &
-      "'s house - come now!"
-  targetName & "! " & InviteHouseClause & hostName & "'s house at 6!"
+  ## One wording serves both audiences: the token and house clause that
+  ## scripted listeners parse, with full names so listeners that read
+  ## chat as language can resolve the house too. Never abbreviate the
+  ## host — a listener that cannot resolve the name still treats the
+  ## line as its one accepted invitation and then declines every later
+  ## one, so a short name costs the guest outright.
+  if bot.minutes >= SummonFromMinutes:
+    return InviteToken & targetName & " come now! " & InviteHouseClause &
+      hostName & "'s house!"
+  InviteToken & targetName & "! " & InviteHouseClause & hostName &
+    "'s house tonight!"
 
 proc maybeInvite(bot: Bot) =
   ## Invites one visible gnome to the host twin's dinner. Targets are
@@ -1504,7 +1475,6 @@ proc maybeInvite(bot: Bot) =
   let hostName = bot.hostHouse().playerNameForHouse()
   var
     bestIndex = -1
-    bestRival = true
     bestDistance = high(int)
   for objectId, objectState in bot.objects:
     if not objectState.present:
@@ -1524,19 +1494,14 @@ proc maybeInvite(bot: Bot) =
       continue
     if bot.frameTick - bot.lastInviteTick[house] < InviteCooldownTicks:
       continue
-    let
-      rival = bot.rivalHosts[house]
-      distance = distanceSquared(
-        bot.playerFootX(),
-        bot.playerFootY(),
-        bot.objectFootX(objectState),
-        bot.objectFootY(objectState)
-      )
-    if rival and not bestRival:
+    let distance = distanceSquared(
+      bot.playerFootX(),
+      bot.playerFootY(),
+      bot.objectFootX(objectState),
+      bot.objectFootY(objectState)
+    )
+    if distance >= bestDistance:
       continue
-    if rival == bestRival and distance >= bestDistance:
-      continue
-    bestRival = rival
     bestDistance = distance
     bestIndex = playerIndex
   if bestIndex < 0:
