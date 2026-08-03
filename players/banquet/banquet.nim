@@ -27,6 +27,7 @@ const
   DinnerEnterMinutes = 18 * 60 + 15
   EveningGatherMinutes = 19 * 60 + 5
   SummonFromMinutes = 15 * 60
+  TourFromMinutes = 12 * 60
   # Chat cadence in frame ticks (24 ticks per real second).
   HandshakeIntervalTicks = 48
   HandshakeConfirmSends = 6
@@ -167,6 +168,7 @@ type
     siblingHouses: array[HouseCount, bool]
     rivalHosts: array[HouseCount, bool]
     invitesSent: array[HouseCount, int]
+    pitchedToday: array[HouseCount, bool]
     lastInviteTick: array[HouseCount, int]
     lastTokenTick: int
     tokenSerial: int
@@ -723,6 +725,8 @@ proc resetGardenPlan(bot: Bot) =
   bot.hasPendingChat = false
   bot.path.setLen(0)
   bot.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
+  for house in 0 ..< HouseCount:
+    bot.pitchedToday[house] = false
 
 proc updateClock(bot: Bot) =
   ## Updates the bot's current day clock from the UI glyphs.
@@ -1320,38 +1324,37 @@ proc role(bot: Bot): BotRole =
   RoleGuest
 
 proc inRendezvous(bot: Bot): bool =
-  ## Returns true while the morning sibling handshake meetup runs.
-  ## Hosted pods can join well after 8:00am, so the window runs to
-  ## noon; a bot leaves early once it has broadcast enough confirm
-  ## tokens with a sibling in view. Day two retries only when lonely.
-  if bot.dayIndex > 1 or bot.minutes >= RendezvousEndMinutes:
-    return false
-  if bot.dayIndex == 1 and bot.knownSiblingCount() > 0:
-    return false
-  bot.tokensNearSibling < HandshakeConfirmSends
+  ## Returns true while the sibling handshake is still worth sending.
+  ## The handshake rides along with gathering rather than taking a trip
+  ## of its own: every garden is stripped within the first few hours,
+  ## so a morning spent meeting is a whole day of food conceded, and
+  ## the gardens are where the other gnomes are anyway.
+  if bot.knownSiblingCount() > 0:
+    return bot.tokensNearSibling < HandshakeConfirmSends
+  bot.minutes < RendezvousEndMinutes
 
-proc rendezvousGoal(bot: Bot): Goal =
-  ## Returns the map-center meetup goal for the sibling handshake.
-  ## Bots spread out by home index so they do not shove each other.
-  if bot.screenKind == HomeMap:
-    return bot.exitGoal()
-  if bot.screenKind != MainMap or bot.mainNav == nil or
-      bot.mainWidth <= 0:
-    return Goal(kind: GoalIdle, screenKind: bot.screenKind)
-  let
-    offset = (bot.homeIndex - HouseCount div 2) * 24
-    spot = bot.mainNav.nearestPassablePoint(
-      bot.mainWidth div 2 + offset,
-      bot.mainHeight div 2
+proc tourTarget(bot: Bot): int =
+  ## Returns the nearest house whose owner has not been pitched today.
+  ## Rival hosts and siblings are skipped; they are not recruitable.
+  result = UnknownHouse
+  if bot.screenKind != MainMap or bot.mainNav == nil:
+    return
+  var bestDistance = high(int)
+  for house in 0 ..< HouseCount:
+    if house == bot.homeIndex or bot.siblingHouses[house] or
+        bot.rivalHosts[house] or bot.pitchedToday[house]:
+      continue
+    if house >= bot.resources.houseValid.len or
+        not bot.resources.houseValid[house]:
+      continue
+    let distance = pointRectDistanceSquared(
+      bot.playerFootX(),
+      bot.playerFootY(),
+      bot.resources.houses[house]
     )
-  Goal(
-    kind: GoalMove,
-    screenKind: MainMap,
-    x: spot.x,
-    y: spot.y,
-    houseIndex: UnknownHouse,
-    gardenIndex: -1
-  )
+    if distance < bestDistance:
+      bestDistance = distance
+      result = house
 
 proc gatherGoal(bot: Bot): Goal =
   ## Returns the default harvest-race goal.
@@ -1400,8 +1403,28 @@ proc banquetGoal(bot: Bot): Goal =
     if bot.screenKind == HomeMap:
       return bot.exitGoal()
     return bot.gatherOwnHouseGoal()
-  if bot.inRendezvous():
-    return bot.rendezvousGoal()
+  # Only the host's food is ever spent, so the host farms and the guest
+  # twin buys guests instead: chat reaches only gnomes whose screen we
+  # are on, so someone has to walk to the doors, and the guest's own
+  # harvest would never be served to anyone.
+  let touring =
+    case bot.role()
+    of RoleGuest: true
+    of RoleHost: false
+    of RoleSolo: bot.minutes >= TourFromMinutes
+  if touring:
+    let house = bot.tourTarget()
+    if house != UnknownHouse:
+      # Count the door as worked once we arrive, so an owner who is out
+      # gathering costs one visit rather than looping the rest of the day.
+      if bot.screenKind == MainMap and
+          pointRectDistanceSquared(
+            bot.playerFootX(),
+            bot.playerFootY(),
+            bot.resources.houses[house]
+          ) <= HouseGatherMaxRadius * HouseGatherMaxRadius:
+        bot.pitchedToday[house] = true
+      return bot.gatherAtHouseGoal(house)
   bot.gatherGoal()
 
 proc queueChat(bot: Bot, line: string) =
@@ -1523,6 +1546,7 @@ proc maybeInvite(bot: Bot) =
     house = name.houseIndexForPlayerName()
     line = bot.inviteLine(name, hostName)
   bot.lastInviteTick[house] = bot.frameTick
+  bot.pitchedToday[house] = true
   inc bot.invitesSent[house]
   bot.queueChat(line)
 
