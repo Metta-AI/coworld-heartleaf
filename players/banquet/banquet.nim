@@ -36,6 +36,8 @@ const
   HandshakeIntervalTicks = 48
   HandshakeConfirmSends = 6
   InviteCooldownTicks = 300
+  ChatQueueLimit = 2
+  ChatSpacingTicks = 24
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
   HouseGatherMaxRadius = 96
@@ -165,8 +167,7 @@ type
     desiredMask: uint8
     target: Point
     hasTarget: bool
-    pendingChat: string
-    hasPendingChat: bool
+    chatQueue: seq[string]
     lastChatSentTick: int
     # Banquet twin coordination and invitations.
     siblingHouses: array[HouseCount, bool]
@@ -704,8 +705,7 @@ proc resetGardenPlan(bot: Bot) =
   inc bot.dayIndex
   bot.gardenChecked = newSeq[bool](bot.resources.gardens.len)
   bot.currentGarden = -1
-  bot.pendingChat = ""
-  bot.hasPendingChat = false
+  bot.chatQueue.setLen(0)
   bot.path.setLen(0)
   bot.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
   for house in 0 ..< HouseCount:
@@ -1306,15 +1306,17 @@ proc role(bot: Bot): BotRole =
     return RoleHost
   RoleGuest
 
-proc inRendezvous(bot: Bot): bool =
-  ## Returns true while the sibling handshake is still worth sending.
-  ## The handshake rides along with gathering rather than taking a trip
-  ## of its own: every garden is stripped within the first few hours,
-  ## so a morning spent meeting is a whole day of food conceded, and
-  ## the gardens are where the other gnomes are anyway.
+proc handshakeWanted(bot: Bot): bool =
+  ## Returns true while the sibling token is still worth broadcasting.
+  ## It rides along with gathering rather than taking a trip of its
+  ## own: every garden is stripped within the first few hours, so a
+  ## morning spent meeting is a whole day of food conceded, and the
+  ## gardens are where the other gnomes are anyway. Once a twin is
+  ## found a few confirmations are enough; a seat that never finds one
+  ## stops calling after the opening days rather than all game.
   if bot.knownSiblingCount() > 0:
     return bot.tokensNearSibling < HandshakeConfirmSends
-  bot.minutes < RendezvousEndMinutes
+  bot.dayIndex <= 1 and bot.minutes < RendezvousEndMinutes
 
 proc tourTarget(bot: Bot): int =
   ## Returns the nearest house whose owner has not been pitched today.
@@ -1417,15 +1419,16 @@ proc banquetGoal(bot: Bot): Goal =
   bot.gatherGoal()
 
 proc queueChat(bot: Bot, line: string) =
-  ## Queues one chat line for sending on the next possible frame.
-  if bot.hasPendingChat or line.len == 0:
+  ## Queues one chat line, spaced out so a listener polling for speech
+  ## bubbles sees each one rather than only the last.
+  if bot.chatQueue.len >= ChatQueueLimit or line.len == 0:
     return
-  bot.pendingChat =
+  bot.chatQueue.add(
     if line.len > ChatMaxChars:
       line[0 ..< ChatMaxChars]
     else:
       line
-  bot.hasPendingChat = true
+  )
 
 proc siblingVisible(bot: Bot): bool =
   ## Returns true when any known sibling gnome is on screen now.
@@ -1445,7 +1448,9 @@ proc maybeHandshake(bot: Bot) =
   ## Broadcasts the sibling token during the morning meetup window.
   ## Sends with a sibling in view count toward the confirm quota that
   ## lets both twins leave the meetup around the same time.
-  if not bot.inRendezvous() or bot.playerName.len == 0:
+  if not bot.handshakeWanted() or bot.playerName.len == 0:
+    return
+  if bot.chatQueue.len > 0:
     return
   if bot.frameTick - bot.lastTokenTick < HandshakeIntervalTicks:
     return
@@ -1454,6 +1459,17 @@ proc maybeHandshake(bot: Bot) =
   if bot.siblingVisible():
     inc bot.tokensNearSibling
   bot.queueChat(SiblingToken & bot.playerName & " " & $bot.tokenSerial)
+
+proc shortInviteLine(bot: Bot, targetName, hostName: string): string =
+  ## Builds the same invitation in the village's abbreviated dialect.
+  ## Some listeners never speak a word all game and appear to read only
+  ## this short form, so it follows the spelled-out line as a second
+  ## pitch rather than replacing it.
+  if bot.minutes >= SummonFromMinutes:
+    return InviteToken & targetName[0 .. 0] & " come now! " &
+      InviteHouseClause & hostName[0 .. 0] & "'s house tonight! food!"
+  InviteToken & targetName[0 .. 0] & "! " & InviteHouseClause &
+    hostName[0 .. 0] & "'s house tonight! food!"
 
 proc inviteLine(bot: Bot, targetName, hostName: string): string =
   ## Builds one invitation to our real party at our real house.
@@ -1475,9 +1491,7 @@ proc maybeInvite(bot: Bot) =
   ## house is recruiting, not available — then by distance. Invitations
   ## run from early morning, hours before rival hosts start recruiting,
   ## because a listener's first accepted invitation is the binding one.
-  if bot.hasPendingChat or bot.playerName.len == 0:
-    return
-  if bot.inRendezvous():
+  if bot.chatQueue.len > 0 or bot.playerName.len == 0:
     return
   if bot.minutes < DayStartMinutes + 30 or
       bot.minutes >= DinnerEnterMinutes:
@@ -1524,19 +1538,22 @@ proc maybeInvite(bot: Bot) =
   bot.pitchedToday[house] = true
   inc bot.invitesSent[house]
   bot.queueChat(line)
+  bot.queueChat(bot.shortInviteLine(name, hostName))
 
 proc maybeSendPendingChat(bot: Bot, ws: WebSocket) =
   ## Sends one queued chat line when someone can hear it.
-  if not bot.hasPendingChat:
+  if bot.chatQueue.len == 0:
     return
   if bot.screenKind == OverlayScreen:
     return
   if bot.visibleOtherPlayerCount() == 0:
     return
-  ws.send(blobFromChat(bot.pendingChat), BinaryMessage)
-  bot.log("chat " & bot.pendingChat)
-  bot.pendingChat = ""
-  bot.hasPendingChat = false
+  if bot.frameTick - bot.lastChatSentTick < ChatSpacingTicks:
+    return
+  let line = bot.chatQueue[0]
+  bot.chatQueue.delete(0)
+  ws.send(blobFromChat(line), BinaryMessage)
+  bot.log("chat " & line)
   bot.lastChatSentTick = bot.frameTick
 
 proc goalReached(bot: Bot, goal: Goal): bool =
