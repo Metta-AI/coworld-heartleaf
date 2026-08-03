@@ -1465,11 +1465,16 @@ proc shortInviteLine(bot: Bot, targetName, hostName: string): string =
   ## Some listeners never speak a word all game and appear to read only
   ## this short form, so it follows the spelled-out line as a second
   ## pitch rather than replacing it.
+  if targetName.len == 0 or hostName.len == 0:
+    return ""
+  let
+    target = targetName[0 .. 0]
+    host = hostName[0 .. 0]
   if bot.minutes >= SummonFromMinutes:
-    return InviteToken & targetName[0 .. 0] & " come now! " &
-      InviteHouseClause & hostName[0 .. 0] & "'s house tonight! food!"
-  InviteToken & targetName[0 .. 0] & "! " & InviteHouseClause &
-    hostName[0 .. 0] & "'s house tonight! food!"
+    return InviteToken & target & " come now! " & InviteHouseClause &
+      host & "'s house tonight! food!"
+  InviteToken & target & "! " & InviteHouseClause & host &
+    "'s house tonight! food!"
 
 proc inviteLine(bot: Bot, targetName, hostName: string): string =
   ## Builds one invitation to our real party at our real house.
@@ -1486,11 +1491,12 @@ proc inviteLine(bot: Bot, targetName, hostName: string): string =
     "'s house tonight!"
 
 proc maybeInvite(bot: Bot) =
-  ## Invites one visible gnome to the host twin's dinner. Targets are
-  ## ranked by how promising they are — a gnome that advertises its own
-  ## house is recruiting, not available — then by distance. Invitations
-  ## run from early morning, hours before rival hosts start recruiting,
-  ## because a listener's first accepted invitation is the binding one.
+  ## Invites the nearest visible gnome to the host twin's dinner, one
+  ## target at a time and throttled per target. Invitations run from
+  ## early morning, hours before rival hosts start recruiting, because
+  ## a listener's first accepted invitation is the binding one. Gnomes
+  ## that host their own dinners are still invited: the most reliable
+  ## guest in the field advertises its own house all game.
   if bot.chatQueue.len > 0 or bot.playerName.len == 0:
     return
   if bot.minutes < DayStartMinutes + 30 or
