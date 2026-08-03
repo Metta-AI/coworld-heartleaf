@@ -172,7 +172,7 @@ type
     # Banquet twin coordination and invitations.
     siblingHouses: array[HouseCount, bool]
     invitesSent: array[HouseCount, int]
-    hasSpoken: array[HouseCount, bool]
+    speaksPlainly: array[HouseCount, bool]
     pitchedToday: array[HouseCount, bool]
     lastInviteTick: array[HouseCount, int]
     lastTokenTick: int
@@ -298,8 +298,12 @@ proc scanHeardChats(bot: Bot) =
     if playerIndex == bot.selfIndex or speaker == bot.playerName:
       continue
     let speakerHouse = speaker.houseIndexForPlayerName()
-    if speakerHouse >= 0 and speakerHouse < HouseCount:
-      bot.hasSpoken[speakerHouse] = true
+    if speakerHouse >= 0 and speakerHouse < HouseCount and
+        not text.startsWith(InviteToken) and
+        not text.startsWith(SiblingToken):
+      # Speaks in sentences rather than on the bot channel, so it reads
+      # invitations as language and the prefixed form only costs it.
+      bot.speaksPlainly[speakerHouse] = true
     if text.startsWith(SiblingToken):
       let parts = text.splitWhitespace()
       if parts.len >= 2 and parts[1] == speaker:
@@ -1545,9 +1549,10 @@ proc maybeInvite(bot: Bot) =
   bot.pitchedToday[house] = true
   inc bot.invitesSent[house]
   bot.queueChat(line)
-  if not bot.hasSpoken[house]:
-    # Only gnomes that never say anything appear to need the short
-    # form, and it costs a listener that reads names its whole evening.
+  if not bot.speaksPlainly[house]:
+    # Gnomes that never speak, and those that only ever speak on the
+    # bot channel, appear to read only the abbreviated form. Sending it
+    # to a gnome that reads sentences would cost it the whole evening.
     bot.queueChat(bot.shortInviteLine(name, hostName))
 
 proc maybeSendPendingChat(bot: Bot, ws: WebSocket) =
