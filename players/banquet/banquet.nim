@@ -1461,16 +1461,13 @@ proc maybeInvite(bot: Bot) =
     name = bot.visiblePlayerName(bestIndex)
     house = name.houseIndexForPlayerName()
   bot.lastInviteTick[house] = bot.frameTick
-  if bot.role() == RoleGuest:
-    if bot.minutes >= InviteUrgentMinutes:
-      bot.queueChat(name & "! Doors close 6:55! Eat at " & hostName & "'s!")
-    else:
-      bot.queueChat(name & "! Feast at " & hostName & "'s at 6! Come!")
+  # Always name the house by its owner, even when that owner is us. A
+  # listener has to resolve which house it was asked to, and "my house"
+  # names nothing once the speaker walks out of view.
+  if bot.minutes >= InviteUrgentMinutes:
+    bot.queueChat(name & "! Doors close 6:55! Eat at " & hostName & "'s!")
   else:
-    if bot.minutes >= InviteUrgentMinutes:
-      bot.queueChat(name & "! Dinner at my house! Doors close 6:55!")
-    else:
-      bot.queueChat(name & "! Dinner at my house at 6! All welcome!")
+    bot.queueChat(name & "! Feast at " & hostName & "'s at 6! Come!")
 
 proc maybeSendPendingChat(bot: Bot, ws: WebSocket) =
   ## Sends one queued chat line when someone can hear it.
