@@ -39,9 +39,11 @@ const
   # Sibling handshake chat token; must match the speaker's own name to
   # count, so third-party relays of the line cannot spoof a sibling.
   SiblingToken = "hl5 "
-  # The bot channel some listeners read. Emitting it anywhere a
-  # sentence-reading gnome can hear costs us that gnome's evening, so
-  # it is only ever used when none of them is on screen.
+  # The bot channel some gnomes speak on. We only ever listen for it,
+  # to tell a scripted gnome from one that talks: emitting it ourselves
+  # measured strictly worse everywhere it was tried, because the gnome
+  # that actually eats with us stops accepting invitations for the
+  # evening once it overhears the channel.
   DialectToken = "/hl! "
   # A gnome that has said many lines and only ever one of them is
   # running a template, not thinking; it is ranked last as a target and
@@ -1443,30 +1445,6 @@ proc maybeHandshake(bot: Bot) =
     inc bot.tokensNearSibling
   bot.queueChat(SiblingToken & bot.playerName & " " & $bot.tokenSerial)
 
-proc plainSpeakerVisible(bot: Bot): bool =
-  ## Returns true when a gnome we have heard speak in sentences is on
-  ## screen, and so within earshot of anything we say.
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    let playerIndex = objectId - PlayerObjectBase
-    if playerIndex == bot.selfIndex:
-      continue
-    let house = bot.visiblePlayerName(playerIndex).houseIndexForPlayerName()
-    if house >= 0 and house < HouseCount and bot.speaksPlainly[house]:
-      return true
-
-proc summonLine(targetName, hostName: string): string =
-  ## Builds the bot-channel summons, in the abbreviated shape its
-  ## readers expect, calling the guest over immediately rather than
-  ## booking it for later.
-  if targetName.len == 0 or hostName.len == 0:
-    return ""
-  DialectToken & targetName[0 .. 0] & " come now! Party at " &
-    hostName[0 .. 0] & "'s house tonight! food!"
-
 proc observeGuests(bot: Bot) =
   ## Records who actually turns up inside our own house. What a gnome
   ## does is worth more than how it talks: a gnome that has eaten at
@@ -1573,16 +1551,6 @@ proc maybeInvite(bot: Bot) =
       bot.queueChat(name & "! Dinner at my house! Doors close 6:55!")
     else:
       bot.queueChat(name & "! Dinner at my house at 6! All welcome!")
-  # The rival winning this league says one thing all game, on the bot
-  # channel: an order to come now rather than a booking for six. Its
-  # listeners obey and keep returning for the rest of the game, and it
-  # says nothing until the early afternoon while we are out from
-  # breakfast, so saying it first is the whole opening. A
-  # sentence-reader that overhears the channel stops accepting our
-  # invitations for the evening, and chat carries only to gnomes on our
-  # screen, so the order waits for a moment when none is watching.
-  if not bot.speaksPlainly[house] and not bot.plainSpeakerVisible():
-    bot.queueChat(summonLine(name, hostName))
 
 proc maybeSendPendingChat(bot: Bot, ws: WebSocket) =
   ## Sends one queued chat line when someone can hear it.
