@@ -22,16 +22,14 @@ const
   DefaultName = "banquet"
   UnknownHouse = -1
   # Banquet policy schedule (minutes after midnight).
-  HandshakeEndMinutes = 9 * 60 + 30
+  RendezvousEndMinutes = 12 * 60
   GatherUntilMinutes = 16 * 60 + 30
-  GuestTravelMinutes = 18 * 60 + 5
-  HostEnterMinutes = 18 * 60 + 20
-  GuestEnterMinutes = 18 * 60 + 25
-  DinnerHoldMinutes = 19 * 60 + 5
+  DinnerEnterMinutes = 18 * 60 + 15
   EveningGatherMinutes = 19 * 60 + 5
   InviteUrgentMinutes = 17 * 60
   # Chat cadence in frame ticks (24 ticks per real second).
   HandshakeIntervalTicks = 48
+  HandshakeConfirmSends = 6
   InviteCooldownTicks = 700
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
@@ -164,6 +162,7 @@ type
     lastInviteTick: array[HouseCount, int]
     lastTokenTick: int
     tokenSerial: int
+    tokensNearSibling: int
     mainWidth: int
     mainHeight: int
 
@@ -1293,12 +1292,14 @@ proc role(bot: Bot): BotRole =
 
 proc inRendezvous(bot: Bot): bool =
   ## Returns true while the morning sibling handshake meetup runs.
-  ## Day one always meets; day two retries only when nobody was found.
-  if bot.minutes >= HandshakeEndMinutes:
+  ## Hosted pods can join well after 8:00am, so the window runs to
+  ## noon; a bot leaves early once it has broadcast enough confirm
+  ## tokens with a sibling in view. Day two retries only when lonely.
+  if bot.dayIndex > 1 or bot.minutes >= RendezvousEndMinutes:
     return false
-  if bot.dayIndex == 0:
-    return true
-  bot.dayIndex == 1 and bot.knownSiblingCount() == 0
+  if bot.dayIndex == 1 and bot.knownSiblingCount() > 0:
+    return false
+  bot.tokensNearSibling < HandshakeConfirmSends
 
 proc rendezvousGoal(bot: Bot): Goal =
   ## Returns the map-center meetup goal for the sibling handshake.
@@ -1335,10 +1336,10 @@ proc gatherGoal(bot: Bot): Goal =
   Goal(kind: GoalIdle, screenKind: bot.screenKind)
 
 proc guestDinnerGoal(bot: Bot): Goal =
-  ## Returns the guest-side dinner goal: reach the host's house door,
-  ## then sit inside through the 6:55pm tally.
+  ## Returns the guest-side dinner goal: wait at the host's door from
+  ## late afternoon, then sit inside through the 6:55pm tally.
   let host = bot.hostHouse()
-  if bot.minutes >= GuestEnterMinutes:
+  if bot.minutes >= DinnerEnterMinutes:
     if bot.screenKind == HomeMap:
       if bot.currentHouse == host:
         return bot.firstDinerGoal()
@@ -1362,13 +1363,11 @@ proc banquetGoal(bot: Bot): Goal =
     return bot.ownHomeGoal()
   if bot.minutes >= EveningGatherMinutes:
     return bot.gatherGoal()
-  if bot.role() == RoleGuest:
-    if bot.minutes >= GuestTravelMinutes:
-      return bot.guestDinnerGoal()
-    return bot.gatherGoal()
-  if bot.minutes >= HostEnterMinutes:
-    return bot.ownHomeGoal()
   if bot.minutes >= GatherUntilMinutes:
+    if bot.role() == RoleGuest:
+      return bot.guestDinnerGoal()
+    if bot.minutes >= DinnerEnterMinutes:
+      return bot.ownHomeGoal()
     if bot.screenKind == HomeMap:
       return bot.exitGoal()
     return bot.gatherOwnHouseGoal()
@@ -1387,14 +1386,32 @@ proc queueChat(bot: Bot, line: string) =
       line
   bot.hasPendingChat = true
 
+proc siblingVisible(bot: Bot): bool =
+  ## Returns true when any known sibling gnome is on screen now.
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+      continue
+    let playerIndex = objectId - PlayerObjectBase
+    if playerIndex == bot.selfIndex:
+      continue
+    let house = bot.visiblePlayerName(playerIndex).houseIndexForPlayerName()
+    if house >= 0 and house < HouseCount and bot.siblingHouses[house]:
+      return true
+
 proc maybeHandshake(bot: Bot) =
   ## Broadcasts the sibling token during the morning meetup window.
+  ## Sends with a sibling in view count toward the confirm quota that
+  ## lets both twins leave the meetup around the same time.
   if not bot.inRendezvous() or bot.playerName.len == 0:
     return
   if bot.frameTick - bot.lastTokenTick < HandshakeIntervalTicks:
     return
   bot.lastTokenTick = bot.frameTick
   inc bot.tokenSerial
+  if bot.siblingVisible():
+    inc bot.tokensNearSibling
   bot.queueChat(SiblingToken & bot.playerName & " " & $bot.tokenSerial)
 
 proc maybeInvite(bot: Bot) =
@@ -1405,7 +1422,7 @@ proc maybeInvite(bot: Bot) =
   if bot.inRendezvous():
     return
   if bot.minutes < DayStartMinutes + 30 or
-      bot.minutes >= HostEnterMinutes:
+      bot.minutes >= DinnerEnterMinutes:
     return
   let hostName = bot.hostHouse().playerNameForHouse()
   var
@@ -1444,10 +1461,16 @@ proc maybeInvite(bot: Bot) =
     name = bot.visiblePlayerName(bestIndex)
     house = name.houseIndexForPlayerName()
   bot.lastInviteTick[house] = bot.frameTick
-  if bot.minutes >= InviteUrgentMinutes:
-    bot.queueChat(name & "! Doors close 6:55! Eat at " & hostName & "'s!")
+  if bot.role() == RoleGuest:
+    if bot.minutes >= InviteUrgentMinutes:
+      bot.queueChat(name & "! Doors close 6:55! Eat at " & hostName & "'s!")
+    else:
+      bot.queueChat(name & "! Feast at " & hostName & "'s at 6! Come!")
   else:
-    bot.queueChat(name & "! Feast at " & hostName & "'s at 6! Come!")
+    if bot.minutes >= InviteUrgentMinutes:
+      bot.queueChat(name & "! Dinner at my house! Doors close 6:55!")
+    else:
+      bot.queueChat(name & "! Dinner at my house at 6! All welcome!")
 
 proc maybeSendPendingChat(bot: Bot, ws: WebSocket) =
   ## Sends one queued chat line when someone can hear it.
