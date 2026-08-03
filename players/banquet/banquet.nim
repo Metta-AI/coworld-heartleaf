@@ -1573,18 +1573,14 @@ proc maybeInvite(bot: Bot) =
       bot.queueChat(name & "! Dinner at my house! Doors close 6:55!")
     else:
       bot.queueChat(name & "! Dinner at my house at 6! All welcome!")
-  # One gnome in this field wanders in and out of our house all day and
-  # is simply elsewhere at the tally; it reads only the bot channel. Any
-  # sentence-reader that overhears that channel stops accepting our
+  # The rival winning this league says one thing all game, on the bot
+  # channel: an order to come now rather than a booking for six. Its
+  # listeners obey and keep returning for the rest of the game, and it
+  # says nothing until the early afternoon while we are out from
+  # breakfast, so saying it first is the whole opening. A
+  # sentence-reader that overhears the channel stops accepting our
   # invitations for the evening, and chat carries only to gnomes on our
-  # screen, so the summons waits until none of them is watching.
-  # The rival that wins this league says one thing, on the bot channel,
-  # and it is an order to come now rather than a booking for six. Its
-  # listeners obey it and keep coming back for the rest of the game —
-  # but it does not say a word until the early afternoon, and we are
-  # out here from breakfast. Saying the same thing first is the whole
-  # opening. Sentence-readers must not overhear it, and chat only
-  # carries to gnomes on our screen, so we wait for a clear moment.
+  # screen, so the order waits for a moment when none is watching.
   if not bot.speaksPlainly[house] and not bot.plainSpeakerVisible():
     bot.queueChat(summonLine(name, hostName))
 
