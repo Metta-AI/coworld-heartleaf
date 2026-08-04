@@ -27,12 +27,6 @@ const
   DinnerEnterMinutes = 18 * 60 + 15
   EveningGatherMinutes = 19 * 60 + 5
   InviteUrgentMinutes = 17 * 60
-  ## The rival opens its recruiting at 2:22pm every game, and the gnome
-  ## that reads only the bot channel goes to whoever asks first. Our own
-  ## guest accepts a spoken invitation in the morning and will not
-  ## double-book, so by the early afternoon it is already committed and
-  ## cannot be talked away by anything overheard after that.
-  SummonFromMinutes = 13 * 60
   # Chat cadence in frame ticks (24 ticks per real second).
   HandshakeIntervalTicks = 48
   HandshakeConfirmSends = 6
@@ -1492,14 +1486,6 @@ proc targetRank(bot: Bot, house: int): int =
     return 3
   2
 
-proc summonLine(targetName, hostName: string): string =
-  ## The order in the shape the scripted gnomes read: come now, naming
-  ## the house, addressed by initial.
-  if targetName.len == 0 or hostName.len == 0:
-    return ""
-  DialectToken & targetName[0 .. 0] & " come now! Party at " &
-    hostName[0 .. 0] & "'s house tonight! food!"
-
 proc maybeInvite(bot: Bot) =
   ## Invites the nearest visible non-sibling gnome to the host's
   ## dinner, throttled per target so lines vary through the day.
@@ -1566,15 +1552,6 @@ proc maybeInvite(bot: Bot) =
       bot.queueChat(name & "! Dinner at my house! Doors close 6:55!")
     else:
       bot.queueChat(name & "! Dinner at my house at 6! All welcome!")
-  # Some gnomes read nothing but the bot channel, and one of them walks
-  # through our house all day without ever being there at the tally.
-  # The order is only dangerous in the morning, when it can take the
-  # single accept a sentence-reader has to give; by mid-afternoon ours
-  # accepted hours ago, and a commitment already made survives being
-  # shouted over — the rival broadcasts this very line from 2pm every
-  # game and our guest still comes.
-  if not bot.speaksPlainly[house] and bot.minutes >= SummonFromMinutes:
-    bot.queueChat(summonLine(name, bot.playerName))
 
 proc maybeSendPendingChat(bot: Bot, ws: WebSocket) =
   ## Sends one queued chat line when someone can hear it.
