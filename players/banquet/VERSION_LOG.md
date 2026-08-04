@@ -27,7 +27,17 @@ too slow to learn from.
 | v19 | summon the channel reader from 3pm, ungated | — | — |
 | v20 | summon from 1pm, ahead of the rival's 2:22pm | — | — |
 
+| **v24** | **skip plots a nearer gnome reaches first** | **151.9, 17/22 wins** | — |
+
 ## What the numbers taught us
+
+**Food is the half of the score we can still move.** Score is food times
+guests; the rival's guests arrive on a timer we cannot touch, but its food
+comes from the same thirty-nine plots we are walking to. Passing over a plot
+a visibly-nearer gnome will reach first — keeping it only as a fallback —
+raised us from 140.4 to 151.9 and dropped the rival from 150.6 to 136.0 on
+an identical roster, taking round wins from 3/22 to 17/22. A trip you lose
+is worse than no trip: you spend the walk and they get the food anyway.
 
 **A lone round is lost by exactly one guest.** Decoding a losing round:
 we recruited our usual guest all eight nights and scored 81, which is
