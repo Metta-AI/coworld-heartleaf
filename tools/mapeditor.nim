@@ -15,10 +15,20 @@
 ##   G            toggle the garden-to-house lines
 ##
 ## Usage:
-##   nim r tools/mapeditor.nim
+##   nim r -d:useCpu tools/mapeditor.nim
+##   nim r -d:useCpu tools/mapeditor.nim --shot:balance.png
+##
+## The window is drawn on the CPU with Pixie and handed to Windy as a
+## finished image, which Windy only accepts in its CPU mode — without
+## that define the window comes up empty. `--shot` renders one frame to
+## a file and exits, which needs no window at all.
+
+when not defined(useCpu):
+  {.error: "Build the map editor with -d:useCpu: it draws with Pixie " &
+    "and presents the finished image, which Windy only does in CPU mode.".}
 
 import
-  std/[algorithm, math, os, strformat, strutils],
+  std/[algorithm, math, os, parseopt, strformat, strutils],
   pixie, windy,
   bitworld/[aseprite, pixelfonts, resources],
   ../src/heartleaf/protocol
@@ -258,6 +268,11 @@ proc bottomLayerIndex(sprite: AsepriteSprite): int =
   0
 
 when isMainModule:
+  var shotPath = ""
+  for kind, key, value in getopt():
+    if kind == cmdLongOption and key == "shot":
+      shotPath = value
+
   var doc = loadDoc()
   var (gardens, houses) = collectPieces(doc)
   if gardens.len == 0 or houses.len == 0:
@@ -281,10 +296,14 @@ when isMainModule:
     windowHeight = max(mapHeight, 520)
     scaledMap = background.resize(mapWidth, mapHeight)
 
-  let window = newWindow(
-    "Heartleaf map editor",
-    ivec2(int32(windowWidth), int32(windowHeight))
-  )
+  let window =
+    if shotPath.len > 0:
+      nil
+    else:
+      newWindow(
+        "Heartleaf map editor",
+        ivec2(int32(windowWidth), int32(windowHeight))
+      )
 
   var
     dragging = -1
@@ -321,7 +340,7 @@ when isMainModule:
     (gardens, houses) = collectPieces(doc)
     status = "reloaded from disk"
 
-  proc drawFrame() =
+  proc composeFrame() =
     frame.fill(Parchment)
     frame.draw(scaledMap, translate(vec2(0, 0)))
     let veil = newImage(mapWidth, mapHeight)
@@ -422,7 +441,12 @@ when isMainModule:
     y += 22
     frame.drawPixelText(font, status, mapWidth + 16, y, rgba(70, 90, 170, 255), 1)
 
-    window.presentPixels(frame)
+  if shotPath.len > 0:
+    composeFrame()
+    createDir(shotPath.parentDir())
+    frame.writeFile(shotPath)
+    echo "wrote ", shotPath
+    quit(0)
 
   window.onFrame = proc() =
     let mouse = window.mousePos.vec2
@@ -455,7 +479,8 @@ when isMainModule:
     if window.buttonPressed[KeyG]:
       showLines = not showLines
 
-    drawFrame()
+    composeFrame()
+    window.presentPixels(frame)
 
   while not window.closeRequested:
     pollEvents()
