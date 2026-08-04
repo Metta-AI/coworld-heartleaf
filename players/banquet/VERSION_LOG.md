@@ -19,7 +19,10 @@ too slow to learn from.
 | v9 | follow-up only to gnomes that never speak | — | 65.0 |
 | v10 | **champion + name our own house, nothing else** | — | **38.3** |
 | v11–v14 | summons work, target ranking (inherit v10 wording) | — | — |
-| v15 | v2 wording restored + morning summons + ranking | pending | pending |
+| v15 | v2 wording restored + morning summons + ranking | 147.2 | 117.8 |
+| v16 | v15 without the summons | 129.8 | 114.3 |
+| v17 | faithful replica of the league leader, at our seat | — | 18.9 |
+| **v18** | v15 + farm the first morning instead of meeting up | 143.4 | **155.9** |
 
 ## What the numbers taught us
 
@@ -52,6 +55,20 @@ reading is that its opening-day order captured them and every later
 arrival only looks unprompted. And the twins were suspected of failing
 to pair once the meetup walk was removed — they paired nine nights out
 of nine.
+
+**The leader's advantage is its seat, not its play.** Swapping two
+entrants and changing no code, the same policy scored 187.8 in the
+leader's seat and 84.4 in ours; a faithful replica of the leader's
+behaviour, played from our seat, scored 18.9 — the worst result
+recorded here. Two gnomes walk into house index 6 at the same tick
+every day whatever anyone says, and that house also has nearly twice
+our garden within reach. Copying a winner without its position is not
+a strategy.
+
+**Careful with test rosters.** The solo figures above seat a known
+recruitable gnome in the empty chair, which is kinder than a real
+round, where the remaining chairs are filled at random. Read them as an
+upper bound and confirm against league rounds.
 
 ## Method
 
