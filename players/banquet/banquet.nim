@@ -30,12 +30,7 @@ const
   # Chat cadence in frame ticks (24 ticks per real second).
   HandshakeIntervalTicks = 48
   HandshakeConfirmSends = 6
-  ## A day is about 2600 ticks, so this asks each gnome roughly every
-  ## ninety minutes of village time rather than twice a day. A listener
-  ## takes the first invitation it can act on and then will not
-  ## double-book, so asking again costs nothing once it has accepted,
-  ## and matters on the days a second recruitable gnome fills a chair.
-  InviteCooldownTicks = 260
+  InviteCooldownTicks = 700
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
   HouseGatherMaxRadius = 96

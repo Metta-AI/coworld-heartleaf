@@ -98,6 +98,19 @@ like bad luck. Build the player from a clean tree, and when a version that
 should behave like its predecessor does not, compare what the two images
 contain before re-explaining the scores.
 
+**Controlled A/B, identical fixed rosters both arms:** asking each gnome
+every ninety village-minutes instead of twice a day scored 84.5 against
+88.1 over 21 and 22 episodes. That is noise, not an improvement — invite
+cadence is not where the remaining points are. Note both arms carried the
+edited-map build, so the comparison is valid between them and says nothing
+about the map.
+
+**A batch is only comparable to another with the same roster.** Filling
+spare chairs at random swings the result far harder than any policy change:
+the same code scored 143.5 with seven wins in one batch and 117.2 with one
+win in another. Fix the spare chairs to a stated mix and change one thing
+between arms, or the numbers measure the draw.
+
 ## Method
 
 Change one thing per version. Measure both seatings before promoting,
