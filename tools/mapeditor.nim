@@ -2,48 +2,47 @@
 ##
 ## Seats never rotate, so whichever house an entrant is given is the one
 ## it farms for its whole career — and the houses are not equally fed.
-## Moving a garden always takes from one door to give to another, which
-## is hard to judge by eye, so this shows the whole village at once:
-## every garden joined to the house nearest it, and a live table of what
-## each door can reach. Drag a garden, watch the table move, press S to
-## write the map back.
+## Moving a plot always takes from one door to give to another, which is
+## hard to judge by eye, so this shows the whole village at once: every
+## garden joined to the house nearest it, and a live table of what each
+## door can reach. Drag a garden, watch the table move, press S to write
+## the map back.
+##
+## Drawing runs on the GPU through Silky. The texture atlas is built at
+## startup out of `tools/theme`, `tools/fonts` and the map art itself,
+## so there is no generated atlas to keep in the repository.
 ##
 ## Controls:
-##   drag         move the garden under the cursor
+##   drag         pick up the garden under the cursor and move it
+##   arrow keys   nudge the held garden a pixel at a time
 ##   S            save data/map.resource in place
 ##   R            reload from disk, discarding changes
 ##   G            toggle the garden-to-house lines
 ##
 ## Usage:
-##   nim r -d:useCpu tools/mapeditor.nim
-##   nim r -d:useCpu tools/mapeditor.nim --shot:balance.png
-##
-## The window is drawn on the CPU with Pixie and handed to Windy as a
-## finished image, which Windy only accepts in its CPU mode — without
-## that define the window comes up empty. `--shot` renders one frame to
-## a file and exits, which needs no window at all.
-
-when not defined(useCpu):
-  {.error: "Build the map editor with -d:useCpu: it draws with Pixie " &
-    "and presents the finished image, which Windy only does in CPU mode.".}
+##   nim r tools/mapeditor.nim
 
 import
-  std/[algorithm, math, os, parseopt, strformat, strutils],
-  pixie, windy,
-  bitworld/[aseprite, pixelfonts, resources],
+  std/[algorithm, math, os, strformat, strutils],
+  pixie, silky,
+  bitworld/[aseprite, resources],
   ../src/heartleaf/protocol
 
 const
-  PanelWidth = 330
+  PanelWidth = 340
   ## What counts as within reach of a door. Every plot is stripped in
   ## the first two hours, so this is roughly what a gnome can take
   ## before the rush reaches it.
   NearRadius = 200.0
   ## How many of the closest gardens make up a day's haul.
   NearestCount = 6
-  GrabRadius = 14.0
-  Ink = rgba(25, 25, 25, 255)
-  Parchment = rgba(250, 249, 242, 255)
+  GrabRadius = 12.0
+  MapName = "heartleafmap"
+  AtlasSize = 4096
+  LineStep = 10.0
+  GardenSize = 9.0
+  HouseSize = 26.0
+  RowHeight = 40
 
 type
   Garden = object
@@ -71,8 +70,11 @@ type
     segments: seq[string]
     names: seq[string]
 
+proc toolsDir(): string =
+  currentSourcePath().parentDir()
+
 proc repoDir(): string =
-  currentSourcePath().parentDir().parentDir()
+  toolsDir().parentDir()
 
 proc resourcePath(): string =
   repoDir() / "data" / "map.resource"
@@ -157,8 +159,8 @@ proc collectPieces(doc: MapDoc): (seq[Garden], seq[House]) =
     if name == "garden":
       gardens.add(Garden(
         blockIndex: i,
-        pos: vec2(float(left), float(top)),
-        size: vec2(float(max(width, 1)), float(max(height, 1)))
+        pos: vec2(float32(left), float32(top)),
+        size: vec2(float32(max(width, 1)), float32(max(height, 1)))
       ))
     elif name.startsWith("house") and name.len > 5:
       try:
@@ -167,8 +169,8 @@ proc collectPieces(doc: MapDoc): (seq[Garden], seq[House]) =
           index: index,
           owner: index.playerNameForHouse(),
           center: vec2(
-            float(left) + float(max(width, 1)) / 2,
-            float(top) + float(max(height, 1)) / 2
+            float32(left) + float32(max(width, 1)) / 2,
+            float32(top) + float32(max(height, 1)) / 2
           )
         ))
       except ValueError:
@@ -182,9 +184,9 @@ proc center(garden: Garden): Vec2 =
 proc nearestHouse(houses: seq[House], at: Vec2): int =
   ## Returns the index into houses of the closest door.
   result = -1
-  var best = 1e9
+  var best = 1e9'f32
   for i, house in houses:
-    let distance = float(house.center.dist(at))
+    let distance = house.center.dist(at)
     if distance < best:
       best = distance
       result = i
@@ -226,40 +228,10 @@ proc scoreHouses(gardens: seq[Garden], houses: seq[House]): seq[HouseScore] =
       haul = 1.0 - (s.haulDistance - shortestHaul) / haulSpan
     s.rating = (reach + haul) / 2
 
-proc ratingColor(rating: float): ColorRGBA =
+proc ratingTint(rating: float): ColorRGBX =
+  ## Green for a well fed door, red for a starved one.
   let t = clamp(rating, 0.0, 1.0)
-  rgba(uint8(230 - t * 190), uint8(70 + t * 130), 70, 255)
-
-proc drawPixelText(
-  image: Image,
-  font: PixelFont,
-  text: string,
-  x, y: int,
-  ink: ColorRGBA,
-  scale = 1
-) =
-  ## Blits one run of pixel-font text into an image.
-  var
-    penX = x
-    penY = y
-  for ch in text:
-    if ch == '\n':
-      penX = x
-      penY += font.lineHeight() * scale
-      continue
-    let glyph = font.glyphAt(ch)
-    for gy in 0 ..< glyph.height:
-      for gx in 0 ..< glyph.width:
-        if not glyph.pixels[gy * glyph.width + gx]:
-          continue
-        for sy in 0 ..< scale:
-          for sx in 0 ..< scale:
-            let
-              px = penX + gx * scale + sx
-              py = penY + gy * scale + sy
-            if px >= 0 and py >= 0 and px < image.width and py < image.height:
-              image[px, py] = ink
-    penX += (glyph.width + font.spacing) * scale
+  rgbx(uint8(230 - t * 190), uint8(70 + t * 130), 70, 255)
 
 proc bottomLayerIndex(sprite: AsepriteSprite): int =
   for i, layer in sprite.layers:
@@ -268,11 +240,6 @@ proc bottomLayerIndex(sprite: AsepriteSprite): int =
   0
 
 when isMainModule:
-  var shotPath = ""
-  for kind, key, value in getopt():
-    if kind == cmdLongOption and key == "shot":
-      shotPath = value
-
   var doc = loadDoc()
   var (gardens, houses) = collectPieces(doc)
   if gardens.len == 0 or houses.len == 0:
@@ -280,46 +247,57 @@ when isMainModule:
 
   let
     mapSprite = readAseprite(repoDir() / "data" / "map.aseprite")
-    background = mapSprite.layerImage(mapSprite.bottomLayerIndex())
-    font = readTiny5Font()
+    mapImage = mapSprite.layerImage(mapSprite.bottomLayerIndex())
 
-  # Fit the map to something that comfortably fits a screen.
-  var scale = 1.0
-  while float(background.height) * scale > 900:
-    scale -= 0.1
-  scale = max(scale, 0.3)
+  # Fit the village to a comfortable window, then keep every screen
+  # coordinate a plain multiple of the map's own pixels.
+  var scale = 1.0'f32
+  while float(mapImage.height) * scale > 940:
+    scale -= 0.05
+  scale = max(scale, 0.3'f32)
 
   let
-    mapWidth = int(float(background.width) * scale)
-    mapHeight = int(float(background.height) * scale)
+    mapWidth = int(float(mapImage.width) * scale)
+    mapHeight = int(float(mapImage.height) * scale)
     windowWidth = mapWidth + PanelWidth
-    windowHeight = max(mapHeight, 520)
-    scaledMap = background.resize(mapWidth, mapHeight)
+    windowHeight = max(mapHeight, 560)
 
-  let window =
-    if shotPath.len > 0:
-      nil
-    else:
-      newWindow(
-        "Heartleaf map editor",
-        ivec2(int32(windowWidth), int32(windowHeight))
-      )
+  # Bake the atlas at startup: theme, font and the map art itself, so
+  # nothing generated has to live in the repository.
+  let
+    atlasPath = getTempDir() / "heartleaf-mapeditor-atlas.png"
+    fontPath = toolsDir() / "fonts" / "IBMPlexSans-Regular.ttf"
+    themeDir = toolsDir() / "theme"
+    builder = newAtlasBuilder(AtlasSize, 4)
+  builder.addDir(themeDir & "/", themeDir & "/")
+  builder.addFont(fontPath, "Default", 15.0)
+  builder.addFont(fontPath, "H1", 22.0)
+  if not builder.addImage(MapName, mapImage):
+    quit("the map art does not fit the atlas; raise AtlasSize")
+  builder.write(atlasPath)
+
+  let window = newWindow(
+    "Heartleaf map editor",
+    ivec2(int32(windowWidth), int32(windowHeight)),
+    vsync = true
+  )
+  makeContextCurrent(window)
+  loadExtensions()
+  let sk = newSilky(window, atlasPath)
 
   var
     dragging = -1
+    hovered = -1
     dragOffset = vec2(0, 0)
     showLines = true
-    status = "drag a garden, S saves, R reloads"
-    frame = newImage(windowWidth, windowHeight)
-
-  proc toMap(screen: Vec2): Vec2 =
-    screen / scale
+    status = "drag a garden — S saves, R reloads, G toggles lines"
 
   proc toScreen(mapPoint: Vec2): Vec2 =
     mapPoint * scale
 
   proc save() =
-    ## Writes every garden's current position back into its own block.
+    ## Writes every garden's position back into its own block, leaving
+    ## every other byte of the file alone.
     for garden in gardens:
       doc.segments[garden.blockIndex].writeIntProperty(
         "left", int(round(garden.pos.x))
@@ -338,139 +316,55 @@ when isMainModule:
   proc reload() =
     doc = loadDoc()
     (gardens, houses) = collectPieces(doc)
+    dragging = -1
     status = "reloaded from disk"
 
-  proc composeFrame() =
-    frame.fill(Parchment)
-    frame.draw(scaledMap, translate(vec2(0, 0)))
-    let veil = newImage(mapWidth, mapHeight)
-    veil.fill(rgba(250, 249, 242, 150))
-    frame.draw(veil, translate(vec2(0, 0)))
-
-    let scores = scoreHouses(gardens, houses)
-
-    if showLines:
-      for garden in gardens:
-        let nearest = houses.nearestHouse(garden.center())
-        if nearest < 0:
-          continue
-        let context = newContext(frame)
-        context.strokeStyle = scores[nearest].rating.ratingColor()
-        context.lineWidth = 1.5
-        context.strokeSegment(segment(
-          garden.center().toScreen(), houses[nearest].center.toScreen()
-        ))
-
+  proc pickGarden(at: Vec2): int =
+    ## Returns the garden nearest a map-space point, within reach.
+    result = -1
+    var best = GrabRadius / scale
     for i, garden in gardens:
-      let context = newContext(frame)
-      context.fillStyle =
-        if i == dragging:
-          rgba(255, 210, 60, 255)
-        else:
-          rgba(60, 150, 60, 235)
-      context.fillCircle(circle(garden.center().toScreen(), 5))
-
-    for i, house in houses:
-      let
-        context = newContext(frame)
-        at = house.center.toScreen()
-      context.fillStyle = scores[i].rating.ratingColor()
-      context.fillRect(rect(at - vec2(13, 13), vec2(26, 26)))
-      context.strokeStyle = Ink
-      context.lineWidth = 2
-      context.strokeRect(rect(at - vec2(13, 13), vec2(26, 26)))
-      let label = $(house.index + 1)
-      frame.drawPixelText(
-        font,
-        label,
-        int(at.x) - font.textWidth(label),
-        int(at.y) - font.height,
-        rgba(255, 255, 255, 255),
-        2
-      )
-
-    var ranked = scores
-    ranked.sort(proc(a, b: HouseScore): int = cmp(b.rating, a.rating))
-    var y = 16
-    frame.drawPixelText(font, "HOUSE BALANCE", mapWidth + 16, y, Ink, 2)
-    y += 26
-    frame.drawPixelText(
-      font,
-      &"within {int(NearRadius)}px, walk to {NearestCount}",
-      mapWidth + 16, y, rgba(95, 95, 95, 255), 1
-    )
-    y += 22
-    for s in ranked:
-      frame.drawPixelText(
-        font, &"{s.index + 1} {s.owner}", mapWidth + 16, y, Ink, 2
-      )
-      frame.drawPixelText(
-        font,
-        repeat('|', int(round(s.rating * 12))),
-        mapWidth + 110, y, s.rating.ratingColor(), 2
-      )
-      frame.drawPixelText(
-        font, &"{int(round(s.rating * 100)):>3}", mapWidth + 262, y, Ink, 2
-      )
-      y += 16
-      frame.drawPixelText(
-        font,
-        &"{s.nearCount} near, haul {int(round(s.haulDistance))}px",
-        mapWidth + 28, y, rgba(95, 95, 95, 255), 1
-      )
-      y += 20
-
-    y += 8
-    let
-      best = ranked[0]
-      worst = ranked[^1]
-      spread =
-        if worst.nearCount > 0:
-          float(best.nearCount) / float(worst.nearCount)
-        else:
-          0.0
-    frame.drawPixelText(
-      font, &"spread {spread:.2f}x gardens", mapWidth + 16, y, Ink, 1
-    )
-    y += 14
-    frame.drawPixelText(
-      font,
-      &"best {best.index + 1}, worst {worst.index + 1}",
-      mapWidth + 16, y, Ink, 1
-    )
-    y += 22
-    frame.drawPixelText(font, status, mapWidth + 16, y, rgba(70, 90, 170, 255), 1)
-
-  if shotPath.len > 0:
-    composeFrame()
-    createDir(shotPath.parentDir())
-    frame.writeFile(shotPath)
-    echo "wrote ", shotPath
-    quit(0)
+      let distance = garden.center().dist(at)
+      if distance <= best:
+        best = distance
+        result = i
 
   window.onFrame = proc() =
-    let mouse = window.mousePos.vec2
+    let
+      mouse = window.mousePos.vec2
+      overMap = mouse.x < float32(mapWidth)
+      atMap = mouse / scale
 
-    if window.buttonPressed[MouseLeft] and mouse.x < float(mapWidth):
-      let atMap = mouse.toMap()
-      var
-        best = -1
-        bestDistance = GrabRadius / scale
-      for i, garden in gardens:
-        let distance = float(garden.center().dist(atMap))
-        if distance <= bestDistance:
-          bestDistance = distance
-          best = i
-      if best >= 0:
-        dragging = best
-        dragOffset = gardens[best].pos - atMap
+    hovered =
+      if overMap:
+        pickGarden(atMap)
+      else:
+        -1
+
+    if window.buttonPressed[MouseLeft] and overMap:
+      let picked = pickGarden(atMap)
+      if picked >= 0:
+        dragging = picked
+        dragOffset = gardens[picked].pos - atMap
         status = "moving a garden"
-
     if window.buttonDown[MouseLeft] and dragging >= 0:
-      gardens[dragging].pos = mouse.toMap() + dragOffset
+      gardens[dragging].pos = atMap + dragOffset
     elif dragging >= 0:
+      gardens[dragging].pos = vec2(
+        round(gardens[dragging].pos.x), round(gardens[dragging].pos.y)
+      )
       dragging = -1
       status = "moved — press S to save"
+
+    if dragging >= 0:
+      if window.buttonPressed[KeyLeft]:
+        gardens[dragging].pos.x = gardens[dragging].pos.x - 1
+      if window.buttonPressed[KeyRight]:
+        gardens[dragging].pos.x = gardens[dragging].pos.x + 1
+      if window.buttonPressed[KeyUp]:
+        gardens[dragging].pos.y = gardens[dragging].pos.y - 1
+      if window.buttonPressed[KeyDown]:
+        gardens[dragging].pos.y = gardens[dragging].pos.y + 1
 
     if window.buttonPressed[KeyS]:
       save()
@@ -479,8 +373,104 @@ when isMainModule:
     if window.buttonPressed[KeyG]:
       showLines = not showLines
 
-    composeFrame()
-    window.presentPixels(frame)
+    let scores = scoreHouses(gardens, houses)
+
+    sk.beginUi(window, window.size)
+    ui:
+      rectangle "map":
+        box 0, 0, mapWidth, mapHeight
+        image MapName
+
+      rectangle "veil":
+        box 0, 0, mapWidth, mapHeight
+        tint rgbx(250, 249, 242, 150)
+
+      if showLines:
+        for gardenIndex, garden in gardens:
+          let nearest = houses.nearestHouse(garden.center())
+          if nearest < 0:
+            continue
+          let
+            fromPoint = garden.center().toScreen()
+            toPoint = houses[nearest].center.toScreen()
+            span = toPoint - fromPoint
+            steps = max(int(span.length / LineStep), 1)
+            shade = scores[nearest].rating.ratingTint()
+          for step in 1 ..< steps:
+            let at = fromPoint + span * (float32(step) / float32(steps))
+            rectangle "line" & $gardenIndex & "_" & $step:
+              box at.x - 1.5, at.y - 1.5, 3, 3
+              tint shade
+
+      for gardenIndex, garden in gardens:
+        let at = garden.center().toScreen()
+        rectangle "garden" & $gardenIndex:
+          box at.x - GardenSize / 2, at.y - GardenSize / 2,
+            GardenSize, GardenSize
+          if gardenIndex == dragging:
+            tint rgbx(255, 210, 60, 255)
+          elif gardenIndex == hovered:
+            tint rgbx(150, 235, 130, 255)
+          else:
+            tint rgbx(60, 150, 60, 235)
+
+      for houseIndex, house in houses:
+        let at = house.center.toScreen()
+        rectangle "house" & $houseIndex:
+          box at.x - HouseSize / 2, at.y - HouseSize / 2, HouseSize, HouseSize
+          tint scores[houseIndex].rating.ratingTint()
+          text "houselabel" & $houseIndex:
+            box 0, 5, HouseSize, 18
+            characters $(house.index + 1)
+
+      rectangle "panel":
+        box mapWidth, 0, PanelWidth, windowHeight
+        tint rgbx(250, 249, 242, 255)
+
+        text "title":
+          box 18, 14, PanelWidth - 36, 26
+          font "H1"
+          characters "House balance"
+        text "subtitle":
+          box 18, 44, PanelWidth - 36, 18
+          characters &"within {int(NearRadius)}px, walk to {NearestCount}"
+
+        var ranked = scores
+        ranked.sort(proc(a, b: HouseScore): int = cmp(b.rating, a.rating))
+        for row, s in ranked:
+          let y = 74 + row * RowHeight
+          text "name" & $row:
+            box 18, y, 120, 18
+            characters &"{s.index + 1}  {s.owner}"
+          rectangle "bar" & $row:
+            box 140, y + 4, 118 * s.rating, 10
+            tint s.rating.ratingTint()
+          text "value" & $row:
+            box 268, y, 54, 18
+            characters $int(round(s.rating * 100))
+          text "detail" & $row:
+            box 26, y + 18, PanelWidth - 44, 16
+            characters &"{s.nearCount} near, haul " &
+              &"{int(round(s.haulDistance))}px"
+
+        let
+          best = ranked[0]
+          worst = ranked[^1]
+          spread =
+            if worst.nearCount > 0:
+              float(best.nearCount) / float(worst.nearCount)
+            else:
+              0.0
+        text "spread":
+          box 18, 74 + ranked.len * RowHeight + 10, PanelWidth - 36, 18
+          characters &"spread {spread:.2f}x  best {best.index + 1}, " &
+            &"worst {worst.index + 1}"
+        text "status":
+          box 18, 74 + ranked.len * RowHeight + 32, PanelWidth - 36, 18
+          characters status
+
+    sk.endUi()
+    window.swapBuffers()
 
   while not window.closeRequested:
     pollEvents()
