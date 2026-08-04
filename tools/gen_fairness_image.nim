@@ -43,20 +43,15 @@ const
   ]
 
 type
-  Walk = object
-    ## One leg of a gnome's morning, and whether the plot was still
-    ## there when it arrived.
-    points: seq[Point]
-    won: bool
-
   Racer = object
     index: int
     owner: string
     at: Point
     travelled: float
     gardensWon: int
-    wastedTrips: int
-    walks: seq[Walk]
+    rerouted: int
+    ## Every position the gnome actually stood on, in order.
+    trail: seq[Point]
 
 proc repoDir(): string =
   currentSourcePath().parentDir().parentDir()
@@ -99,6 +94,28 @@ proc pathLength(points: seq[Point]): float =
       dx = float(points[i].x - points[i - 1].x)
       dy = float(points[i].y - points[i - 1].y)
     result += sqrt(dx * dx + dy * dy)
+
+proc joinFrom(start: Point, walk: seq[Point]): seq[Point] =
+  ## Puts the step out of where the gnome stands back on the front of a
+  ## route: the pathfinder reports waypoints from the first turn
+  ## onwards, so without this a trail starts partway along and the walk
+  ## reads as a jump.
+  const DensifyPixels = 4
+  result.add(start)
+  if walk.len > 0:
+    let
+      dx = walk[0].x - start.x
+      dy = walk[0].y - start.y
+      span = max(abs(dx), abs(dy))
+    var walked = DensifyPixels
+    while walked < span:
+      result.add(Point(
+        x: start.x + dx * walked div span,
+        y: start.y + dy * walked div span
+      ))
+      walked += DensifyPixels
+  for point in walk:
+    result.add(point)
 
 proc nearestPassable(nav: JumpPointSpace, x, y: int): Point =
   ## Returns the closest walkable pixel, so a door or plot sitting a
@@ -210,20 +227,26 @@ when isMainModule:
       owner: index.playerNameForHouse(),
       at: nav.nearestPassable(rect.x + rect.w div 2, rect.y + rect.h div 2)
     ))
+    racers[^1].trail.add(racers[^1].at)
   for point in gardenPoints:
     gardens.add(nav.nearestPassable(point.x, point.y))
   var taken = newSeq[bool](gardens.len)
 
-  ## Everyone walks at once, so the race runs on arrival times: the
-  ## first to reach a plot takes it, and whoever arrives second has
-  ## walked for nothing and chooses again from where it stands.
+  ## The morning runs a step at a time. Everyone starts at their door
+  ## and walks toward the nearest plot still going; reaching it picks
+  ## it up and takes it off the map. A gnome whose plot is taken while
+  ## it is still on its way turns for the next nearest one from where
+  ## it stands, so nobody ever finishes a walk to a plot that is gone.
   var
-    arrivalTime = newSeq[float](racers.len)
     targetOf = newSeq[int](racers.len)
     routeOf = newSeq[seq[Point]](racers.len)
+    cursorOf = newSeq[int](racers.len)
+  for racer in 0 ..< racers.len:
+    targetOf[racer] = -1
 
   proc chooseTarget(racer: int) =
-    ## Sends one gnome to the nearest plot nobody has taken yet.
+    ## Sends one gnome to the nearest plot nobody has taken yet,
+    ## starting from exactly where it stands.
     var
       bestGarden = -1
       bestRoute: seq[Point]
@@ -231,11 +254,13 @@ when isMainModule:
     for i, garden in gardens:
       if taken[i]:
         continue
-      let route = nav.findPath(
+      var route = nav.findPath(
         racers[racer].at.x, racers[racer].at.y, garden.x, garden.y
       ).toDensePath()
       if route.len == 0:
         continue
+      if route[0] != racers[racer].at:
+        route = joinFrom(racers[racer].at, route)
       let length = route.pathLength()
       if bestGarden < 0 or length < bestLength:
         bestGarden = i
@@ -243,40 +268,43 @@ when isMainModule:
         bestLength = length
     targetOf[racer] = bestGarden
     routeOf[racer] = bestRoute
-    arrivalTime[racer] =
-      if bestGarden < 0:
-        Inf
-      else:
-        racers[racer].travelled + bestLength
+    cursorOf[racer] = 0
 
   let started = epochTime()
-  for racer in 0 ..< racers.len:
-    chooseTarget(racer)
-
   var remaining = gardens.len
   while remaining > 0:
-    var next = -1
     for racer in 0 ..< racers.len:
       if targetOf[racer] < 0:
-        continue
-      if next < 0 or arrivalTime[racer] < arrivalTime[next]:
-        next = racer
-    if next < 0:
-      break
+        chooseTarget(racer)
 
-    let
-      garden = targetOf[next]
-      won = not taken[garden]
-    racers[next].travelled = arrivalTime[next]
-    racers[next].at = gardens[garden]
-    racers[next].walks.add(Walk(points: routeOf[next], won: won))
-    if won:
-      taken[garden] = true
-      inc racers[next].gardensWon
-      dec remaining
-    else:
-      inc racers[next].wastedTrips
-    chooseTarget(next)
+    var moved = false
+    for racer in 0 ..< racers.len:
+      if targetOf[racer] < 0 or routeOf[racer].len == 0:
+        continue
+      moved = true
+      if cursorOf[racer] < routeOf[racer].high:
+        inc cursorOf[racer]
+        let
+          step = routeOf[racer][cursorOf[racer]]
+          dx = float(step.x - racers[racer].at.x)
+          dy = float(step.y - racers[racer].at.y)
+        racers[racer].travelled += sqrt(dx * dx + dy * dy)
+        racers[racer].at = step
+        racers[racer].trail.add(step)
+      if cursorOf[racer] >= routeOf[racer].high:
+        if not taken[targetOf[racer]]:
+          taken[targetOf[racer]] = true
+          inc racers[racer].gardensWon
+          dec remaining
+        targetOf[racer] = -1
+
+    for racer in 0 ..< racers.len:
+      if targetOf[racer] >= 0 and taken[targetOf[racer]]:
+        targetOf[racer] = -1
+        inc racers[racer].rerouted
+
+    if not moved:
+      break
 
   echo &"raced {gardens.len} gardens over the walkable map in " &
     &"{epochTime() - started:.1f}s"
@@ -294,42 +322,26 @@ when isMainModule:
   image.draw(veil, translate(vec2(0, 0)))
 
   for racer in racers:
-    let hue = HouseHues[racer.index mod HouseHues.len]
-    for walk in racer.walks:
-      # Lay a dark stroke under the coloured one so a route stays
-      # legible over grass, path and hedge alike.
-      let
-        edge = newContext(image)
-        line = newContext(image)
-      edge.strokeStyle = rgba(0, 0, 0, 190)
-      edge.lineWidth =
-        if walk.won:
-          4.5
-        else:
-          2.6
-      line.strokeStyle =
-        if walk.won:
-          hue
-        else:
-          rgba(hue.r, hue.g, hue.b, 90)
-      line.lineWidth =
-        if walk.won:
-          2.4
-        else:
-          1.2
-      for i in 1 ..< walk.points.len:
-        let leg = segment(
-          vec2(float(walk.points[i - 1].x), float(walk.points[i - 1].y)) *
-            scaled,
-          vec2(float(walk.points[i].x), float(walk.points[i].y)) * scaled
-        )
-        edge.strokeSegment(leg)
-      for i in 1 ..< walk.points.len:
-        line.strokeSegment(segment(
-          vec2(float(walk.points[i - 1].x), float(walk.points[i - 1].y)) *
-            scaled,
-          vec2(float(walk.points[i].x), float(walk.points[i].y)) * scaled
-        ))
+    let
+      hue = HouseHues[racer.index mod HouseHues.len]
+      edge = newContext(image)
+      line = newContext(image)
+    # Lay a dark stroke under the coloured one so a trail stays legible
+    # over grass, path and hedge alike.
+    edge.strokeStyle = rgba(0, 0, 0, 190)
+    edge.lineWidth = 4.5
+    line.strokeStyle = hue
+    line.lineWidth = 2.4
+    for i in 1 ..< racer.trail.len:
+      edge.strokeSegment(segment(
+        vec2(float(racer.trail[i - 1].x), float(racer.trail[i - 1].y)) * scaled,
+        vec2(float(racer.trail[i].x), float(racer.trail[i].y)) * scaled
+      ))
+    for i in 1 ..< racer.trail.len:
+      line.strokeSegment(segment(
+        vec2(float(racer.trail[i - 1].x), float(racer.trail[i - 1].y)) * scaled,
+        vec2(float(racer.trail[i].x), float(racer.trail[i].y)) * scaled
+      ))
 
   for garden in gardens:
     let context = newContext(image)
@@ -394,7 +406,7 @@ when isMainModule:
     y += 17
     image.drawPixelText(
       font,
-      &"walked {int(racer.travelled)}px, {racer.wastedTrips} wasted",
+      &"walked {int(racer.travelled)}px, {racer.rerouted} turned back",
       panelX + 10, y, FadedInk, 1
     )
     y += 21
@@ -403,10 +415,10 @@ when isMainModule:
   image.writeFile(outPath)
 
   echo ""
-  echo "house  owner    won   walked  wasted"
+  echo "house  owner    won   walked  turned"
   for racer in ranked:
     echo &"{racer.index + 1:>5}  {racer.owner:<7} {racer.gardensWon:>4}  " &
-      &"{int(racer.travelled):>7}  {racer.wastedTrips:>6}"
+      &"{int(racer.travelled):>7}  {racer.rerouted:>6}"
   let
     best = ranked[0]
     worst = ranked[^1]

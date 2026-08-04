@@ -100,19 +100,15 @@ type
 
   Step = tuple[x, y: int]
 
-  Leg = object
-    ## One walk from where a gnome stood to a patch, and whether the
-    ## patch was still there when it arrived.
-    points: seq[Step]
-    won: bool
-
   HouseScore = object
     index: int
     owner: string
     gardensWon: int
     travelled: float
-    wastedTrips: int
-    legs: seq[Leg]
+    rerouted: int
+    ## Every position the gnome actually stood on, in order, so the
+    ## drawn trail is the walk itself rather than a summary of it.
+    trail: seq[Step]
     rating: float
 
   MapDoc = object
@@ -257,6 +253,26 @@ proc toDense(steps: openArray[PathStep]): seq[Step] =
       walked += DensifyPixels
     result.add(point)
 
+proc joinFrom(start: Step, walk: seq[Step]): seq[Step] =
+  ## Puts the step out of where the gnome stands back on the front of a
+  ## route, filling the gap so the trail is unbroken.
+  const DensifyPixels = 2
+  result.add(start)
+  if walk.len > 0:
+    let
+      dx = walk[0].x - start.x
+      dy = walk[0].y - start.y
+      span = max(abs(dx), abs(dy))
+    var walked = DensifyPixels
+    while walked < span:
+      result.add((
+        x: start.x + dx * walked div span,
+        y: start.y + dy * walked div span
+      ))
+      walked += DensifyPixels
+  for point in walk:
+    result.add(point)
+
 proc walkLength(points: seq[Step]): float =
   for i in 1 ..< points.len:
     let
@@ -290,19 +306,29 @@ proc raceForGardens(
   gardens: seq[Garden],
   houses: seq[House]
 ): seq[HouseScore] =
-  ## Runs the morning: every gnome leaves its door at once and heads for
-  ## the nearest patch nobody has taken, walking around the scenery
-  ## rather than through it. Whoever arrives first takes the patch; a
-  ## gnome that arrives second has spent the walk for nothing and picks
-  ## again from where it stands. It ends when no patch is left.
+  ## Runs the morning a step at a time. Everyone starts at their door
+  ## and walks toward the nearest patch still going; reaching it picks
+  ## it up and takes it off the map. If somebody else gets there first
+  ## while a gnome is still on its way, that gnome turns for the next
+  ## nearest patch from wherever it happens to be standing — it never
+  ## finishes a walk to a patch that is already gone.
   var
     scores: seq[HouseScore]
     standing: seq[Step]
     plots: seq[Step]
     taken: seq[bool]
+    route: seq[seq[Step]]
+    cursor: seq[int]
+    target: seq[int]
   for house in houses:
-    scores.add(HouseScore(index: house.index, owner: house.owner))
-    standing.add(nav.onWalkable(int(house.center.x), int(house.center.y)))
+    let door = nav.onWalkable(int(house.center.x), int(house.center.y))
+    scores.add(HouseScore(
+      index: house.index, owner: house.owner, trail: @[door]
+    ))
+    standing.add(door)
+    route.add(@[])
+    cursor.add(0)
+    target.add(-1)
   for garden in gardens:
     let middle = garden.center()
     plots.add(nav.onWalkable(int(middle.x), int(middle.y)))
@@ -310,12 +336,9 @@ proc raceForGardens(
   if scores.len == 0 or plots.len == 0:
     return scores
 
-  var
-    arrival = newSeq[float](scores.len)
-    target = newSeq[int](scores.len)
-    route = newSeq[seq[Step]](scores.len)
-
   proc aimAtNearest(racer: int) =
+    ## Points one gnome at the nearest patch still on the map, starting
+    ## from exactly where it stands.
     var
       bestPlot = -1
       bestRoute: seq[Step]
@@ -323,11 +346,13 @@ proc raceForGardens(
     for i, plot in plots:
       if taken[i]:
         continue
-      let walk = nav.findPath(
+      var walk = nav.findPath(
         standing[racer].x, standing[racer].y, plot.x, plot.y
       ).toDense()
       if walk.len == 0:
         continue
+      if walk[0] != standing[racer]:
+        walk = joinFrom(standing[racer], walk)
       let length = walk.walkLength()
       if bestPlot < 0 or length < bestLength:
         bestPlot = i
@@ -335,38 +360,49 @@ proc raceForGardens(
         bestLength = length
     target[racer] = bestPlot
     route[racer] = bestRoute
-    arrival[racer] =
-      if bestPlot < 0:
-        Inf
-      else:
-        scores[racer].travelled + bestLength
+    cursor[racer] = 0
 
-  for racer in 0 ..< scores.len:
-    aimAtNearest(racer)
+  var
+    remaining = plots.len
+    guard = 0
+  while remaining > 0 and guard < 400_000:
+    inc guard
 
-  var remaining = plots.len
-  while remaining > 0:
-    var next = -1
     for racer in 0 ..< scores.len:
       if target[racer] < 0:
+        aimAtNearest(racer)
+
+    var moved = false
+    for racer in 0 ..< scores.len:
+      if target[racer] < 0 or route[racer].len == 0:
         continue
-      if next < 0 or arrival[racer] < arrival[next]:
-        next = racer
-    if next < 0:
+      moved = true
+      if cursor[racer] < route[racer].high:
+        inc cursor[racer]
+        let step = route[racer][cursor[racer]]
+        let
+          dx = float(step.x - standing[racer].x)
+          dy = float(step.y - standing[racer].y)
+        scores[racer].travelled += sqrt(dx * dx + dy * dy)
+        standing[racer] = step
+        scores[racer].trail.add(step)
+      if cursor[racer] >= route[racer].high:
+        # Arrived. The patch is ours if nobody beat us to it this tick.
+        if not taken[target[racer]]:
+          taken[target[racer]] = true
+          inc scores[racer].gardensWon
+          dec remaining
+        target[racer] = -1
+
+    # Anyone still walking toward a patch that has just gone turns for
+    # the next nearest one from where they stand.
+    for racer in 0 ..< scores.len:
+      if target[racer] >= 0 and taken[target[racer]]:
+        target[racer] = -1
+        inc scores[racer].rerouted
+
+    if not moved:
       break
-    let
-      plot = target[next]
-      won = not taken[plot]
-    scores[next].travelled = arrival[next]
-    scores[next].legs.add(Leg(points: route[next], won: won))
-    standing[next] = plots[plot]
-    if won:
-      taken[plot] = true
-      inc scores[next].gardensWon
-      dec remaining
-    else:
-      inc scores[next].wastedTrips
-    aimAtNearest(next)
 
   var mostWon = 1
   for score in scores:
@@ -473,7 +509,7 @@ when isMainModule:
     panFrom = vec2(0, 0)
     panView = vec2(0, 0)
     status = "drag a garden, drag the ground to pan — S saves, R reloads"
-    scores = nav.raceForGardens(gardens, houses)
+    scores: seq[HouseScore]
 
   proc zoom(): float32 =
     ZoomLevels[zoomIndex]
@@ -502,10 +538,23 @@ when isMainModule:
     writeFile(resourcePath(), rebuilt)
     status = &"saved {gardens.len} gardens to data/map.resource"
 
+  proc rerace() =
+    ## Runs the morning again after the map changes, so both the
+    ## standings and the drawn trails match where the plots are now.
+    scores = nav.raceForGardens(gardens, houses)
+    echo ""
+    echo "house  owner    won   walked  turned"
+    for score in scores:
+      echo &"{score.index + 1:>5}  {score.owner:<7} {score.gardensWon:>4}  " &
+        &"{int(score.travelled):>7}  {score.rerouted:>6}"
+
+  rerace()
+
   proc reload() =
     doc = loadDoc()
     (gardens, houses) = collectPieces(doc)
     dragging = -1
+    rerace()
     status = "reloaded from disk"
 
   proc pickGarden(at: Vec2): int =
@@ -612,6 +661,7 @@ when isMainModule:
         round(gardens[dragging].pos.x), round(gardens[dragging].pos.y)
       )
       dragging = -1
+      rerace()
       status = "moved — press S to save"
 
     if dragging >= 0:
@@ -662,38 +712,22 @@ when isMainModule:
           tint VeilTint
 
         if showLines:
-          # Only the simulated walk, in the colour of the door it
-          # belongs to. Nothing is joined up that a gnome did not
-          # actually walk.
+          # The walk itself: every position the gnome stood on, in its
+          # door's colour, dark-edged so it reads over grass and hedge.
           for scoreIndex, score in scores:
             let hue = HouseHues[score.index mod HouseHues.len]
-            for legIndex, leg in score.legs:
-              if not leg.won:
-                continue
-              let tone = hue
-              var step = 0
-              while step < leg.points.len:
-                let
-                  at = toScreen(
-                    vec2(
-                      float32(leg.points[step].x), float32(leg.points[step].y)
-                    )
-                  )
-                  # Walk the dot from small to large along the leg, so the
-                  # direction of travel reads at a glance and a route that
-                  # doubles back past its own door cannot be mistaken for
-                  # one returning to it.
-                  grow = 1.0 + 2.0 * float32(step) / float32(
-                    max(leg.points.len - 1, 1)
-                  )
-                rectangle "edge" & $scoreIndex & "_" & $legIndex & "_" & $step:
-                  box at.x - grow / 2 - 1, at.y - grow / 2 - 1,
-                    grow + 2, grow + 2
-                  tint rgbx(0, 0, 0, 190)
-                rectangle "step" & $scoreIndex & "_" & $legIndex & "_" & $step:
-                  box at.x - grow / 2, at.y - grow / 2, grow, grow
-                  tint tone
-                step += 1
+            var step = 0
+            while step < score.trail.len:
+              let at = toScreen(vec2(
+                float32(score.trail[step].x), float32(score.trail[step].y)
+              ))
+              rectangle "edge" & $scoreIndex & "_" & $step:
+                box at.x - 2.5, at.y - 2.5, 5, 5
+                tint rgbx(0, 0, 0, 190)
+              rectangle "step" & $scoreIndex & "_" & $step:
+                box at.x - 1.5, at.y - 1.5, 3, 3
+                tint hue
+              step += 1
 
         for gardenIndex, garden in gardens:
           let at = garden.center().toScreen()
@@ -750,7 +784,7 @@ when isMainModule:
             box 26, y + 18, PanelWidth - 44, 16
             tint FadedInk
             characters &"walked {int(round(s.travelled))}px, " &
-              &"{s.wastedTrips} wasted"
+              &"{s.rerouted} turned back"
 
         let
           best = ranked[0]
