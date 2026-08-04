@@ -27,7 +27,12 @@ const
   DinnerEnterMinutes = 18 * 60 + 15
   EveningGatherMinutes = 19 * 60 + 5
   InviteUrgentMinutes = 17 * 60
-  SummonFromMinutes = 15 * 60
+  ## The rival opens its recruiting at 2:22pm every game, and the gnome
+  ## that reads only the bot channel goes to whoever asks first. Our own
+  ## guest accepts a spoken invitation in the morning and will not
+  ## double-book, so by the early afternoon it is already committed and
+  ## cannot be talked away by anything overheard after that.
+  SummonFromMinutes = 13 * 60
   # Chat cadence in frame ticks (24 ticks per real second).
   HandshakeIntervalTicks = 48
   HandshakeConfirmSends = 6
