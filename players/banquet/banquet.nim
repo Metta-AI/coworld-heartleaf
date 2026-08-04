@@ -1038,6 +1038,28 @@ proc initBot(name: string, slot: int): Bot =
   for i in 0 ..< HouseCount:
     result.lastInviteTick[i] = -InviteCooldownTicks
 
+proc rivalIsCloser(bot: Bot, target: Point, ourDistance: int): bool =
+  ## Returns true when a gnome we can see stands nearer this plot than
+  ## we do. Every plot on the map is taken each morning, so a trip to
+  ## one somebody else reaches first is time bought for them: the food
+  ## goes to them either way and we arrive to bare earth.
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+      continue
+    let playerIndex = objectId - PlayerObjectBase
+    if playerIndex == bot.selfIndex:
+      continue
+    let theirs = distanceSquared(
+      bot.objectFootX(objectState),
+      bot.objectFootY(objectState),
+      target.x,
+      target.y
+    )
+    if theirs * 4 < ourDistance * 3:
+      return true
+
 proc gardenGoal(bot: Bot): Goal =
   ## Returns a goal for the nearest garden that may still have food.
   result = Goal(kind: GoalIdle, screenKind: MainMap)
@@ -1102,6 +1124,8 @@ proc gardenGoal(bot: Bot): Goal =
     bestIndex = -1
     bestPathLen = high(int)
     bestDistance = high(int)
+    contestedIndex = -1
+    contestedPathLen = high(int)
   for i, rect in bot.resources.gardens:
     if i < bot.gardenChecked.len and bot.gardenChecked[i]:
       continue
@@ -1127,11 +1151,22 @@ proc gardenGoal(bot: Bot): Goal =
         target.x,
         target.y
       )
+    if bot.rivalIsCloser(target, distance):
+      # Somebody nearer will have it before we arrive; remember it as a
+      # fallback but look for a plot we can actually win.
+      if contestedIndex < 0 or path.len < contestedPathLen:
+        contestedIndex = i
+        contestedPathLen = path.len
+      continue
     if path.len < bestPathLen or
         (path.len == bestPathLen and distance < bestDistance):
       bestIndex = i
       bestPathLen = path.len
       bestDistance = distance
+  if bestIndex < 0:
+    # Everything in reach is contested, so take the nearest of those
+    # rather than stand still.
+    bestIndex = contestedIndex
   if bestIndex < 0:
     return
 
