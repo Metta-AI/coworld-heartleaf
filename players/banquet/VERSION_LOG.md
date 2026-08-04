@@ -89,6 +89,15 @@ recruitable gnome in the empty chair, which is kinder than a real
 round, where the remaining chairs are filled at random. Read them as an
 upper bound and confirm against league rounds.
 
+**The player ships the map with it.** `data/` is copied into the image and
+the bot reads `data/map.resource` at runtime to know where the gardens are,
+so a build made against an edited map sends the bot to plots the server does
+not have. Four gardens displaced by an average of 507px cost a rebuild of
+otherwise identical code a steady slide down the table, and it read exactly
+like bad luck. Build the player from a clean tree, and when a version that
+should behave like its predecessor does not, compare what the two images
+contain before re-explaining the scores.
+
 ## Method
 
 Change one thing per version. Measure both seatings before promoting,
