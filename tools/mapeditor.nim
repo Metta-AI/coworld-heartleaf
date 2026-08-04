@@ -232,20 +232,12 @@ proc collectPieces(doc: MapDoc): (seq[Garden], seq[House]) =
 proc center(garden: Garden): Vec2 =
   garden.pos + garden.size / 2
 
-proc nearestHouse(houses: seq[House], at: Vec2): int =
-  ## Returns the index into houses of the closest door.
-  result = -1
-  var best = 1e9'f32
-  for i, house in houses:
-    let distance = house.center.dist(at)
-    if distance < best:
-      best = distance
-      result = i
-
 proc toDense(steps: openArray[PathStep]): seq[Step] =
   ## Turns sparse jump points into the line a gnome actually walks, so
   ## the drawn route bends around the scenery instead of cutting corners.
-  const DensifyPixels = 4
+  ## A dot every couple of pixels, so the walk reads as a trail rather
+  ## than a dotted line.
+  const DensifyPixels = 2
   for step in steps:
     let point: Step = (x: step.x, y: step.y)
     if result.len == 0:
@@ -670,17 +662,15 @@ when isMainModule:
           tint VeilTint
 
         if showLines:
-          # The real walked route, one dot every few map pixels, in the
-          # colour of the door it belongs to. Solid where the gnome took
-          # the patch, faint where it arrived to bare earth.
+          # Only the simulated walk, in the colour of the door it
+          # belongs to. Nothing is joined up that a gnome did not
+          # actually walk.
           for scoreIndex, score in scores:
             let hue = HouseHues[score.index mod HouseHues.len]
             for legIndex, leg in score.legs:
-              let tone =
-                if leg.won:
-                  hue
-                else:
-                  rgbx(hue.r div 2, hue.g div 2, hue.b div 2, 110)
+              if not leg.won:
+                continue
+              let tone = hue
               var step = 0
               while step < leg.points.len:
                 let
@@ -703,23 +693,7 @@ when isMainModule:
                 rectangle "step" & $scoreIndex & "_" & $legIndex & "_" & $step:
                   box at.x - grow / 2, at.y - grow / 2, grow, grow
                   tint tone
-                step += 2
-
-        for gardenIndex, garden in gardens:
-            let nearest = houses.nearestHouse(garden.center())
-            if nearest < 0:
-              continue
-            let
-              fromPoint = garden.center().toScreen()
-              toPoint = houses[nearest].center.toScreen()
-              span = toPoint - fromPoint
-              steps = max(int(span.length / LineStep), 1)
-              shade = scores[nearest].rating.ratingTint()
-            for step in 1 ..< steps:
-              let at = fromPoint + span * (float32(step) / float32(steps))
-              rectangle "line" & $gardenIndex & "_" & $step:
-                box at.x - 1.5, at.y - 1.5, 3, 3
-                tint shade
+                step += 1
 
         for gardenIndex, garden in gardens:
           let at = garden.center().toScreen()
