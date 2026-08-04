@@ -14,6 +14,7 @@
 ##
 ## Controls:
 ##   drag         pick up the garden under the cursor and move it
+##   drag empty   pan the village; the window can be resized freely
 ##   arrow keys   nudge the held garden a pixel at a time
 ##   S            save data/map.resource in place
 ##   R            reload from disk, discarding changes
@@ -261,18 +262,11 @@ when isMainModule:
     mapSprite = readAseprite(repoDir() / "data" / "map.aseprite")
     mapImage = mapSprite.layerImage(mapSprite.bottomLayerIndex())
 
-  # Fit the village to a comfortable window, then keep every screen
-  # coordinate a plain multiple of the map's own pixels.
-  var scale = 1.0'f32
-  while float(mapImage.height) * scale > 940:
-    scale -= 0.05
-  scale = max(scale, 0.3'f32)
-
   let
-    mapWidth = int(float(mapImage.width) * scale)
-    mapHeight = int(float(mapImage.height) * scale)
-    windowWidth = mapWidth + PanelWidth
-    windowHeight = max(mapHeight, 560)
+    mapWidth = mapImage.width
+    mapHeight = mapImage.height
+    windowWidth = min(mapWidth + PanelWidth, 1500)
+    windowHeight = min(mapHeight, 1000)
 
   # Bake the atlas at startup: theme, font and the map art itself, so
   # nothing generated has to live in the repository.
@@ -284,9 +278,9 @@ when isMainModule:
   builder.addDir(themeDir & "/", themeDir & "/")
   builder.addFont(fontPath, "Default", 15.0)
   builder.addFont(fontPath, "H1", 22.0)
-  # Silky draws an atlas entry at the entry's own size, so the art is
-  # scaled to the size it will occupy before it is packed.
-  if not builder.addImage(MapName, mapImage.resize(mapWidth, mapHeight)):
+  # Silky draws an atlas entry at the size it was packed, so the art
+  # goes in at 1:1 and the view pans rather than scales.
+  if not builder.addImage(MapName, mapImage):
     quit("the map art does not fit the atlas; raise AtlasSize")
   builder.write(atlasPath)
 
@@ -304,10 +298,15 @@ when isMainModule:
     hovered = -1
     dragOffset = vec2(0, 0)
     showLines = true
-    status = "drag a garden — S saves, R reloads, G toggles lines"
+    ## Top-left map pixel currently shown at the top-left of the view.
+    view = vec2(0, 0)
+    panning = false
+    panFrom = vec2(0, 0)
+    panView = vec2(0, 0)
+    status = "drag a garden, drag the ground to pan — S saves, R reloads"
 
   proc toScreen(mapPoint: Vec2): Vec2 =
-    mapPoint * scale
+    mapPoint - view
 
   proc save() =
     ## Writes every garden's position back into its own block, leaving
@@ -336,7 +335,7 @@ when isMainModule:
   proc pickGarden(at: Vec2): int =
     ## Returns the garden nearest a map-space point, within reach.
     result = -1
-    var best = GrabRadius / scale
+    var best = GrabRadius
     for i, garden in gardens:
       let distance = garden.center().dist(at)
       if distance <= best:
@@ -344,10 +343,24 @@ when isMainModule:
         result = i
 
   window.onFrame = proc() =
+    # The window is resizable, so the layout is measured every frame:
+    # the panel keeps to the right edge and the view takes the rest.
     let
+      viewWidth = max(window.size.x.int - PanelWidth, 200)
+      viewHeight = max(window.size.y.int, 200)
       mouse = window.mousePos.vec2
-      overMap = mouse.x < float32(mapWidth)
-      atMap = mouse / scale
+      overMap = mouse.x < float32(viewWidth)
+      atMap = mouse + view
+
+    # Keep the village within reach of the view, so panning cannot
+    # strand it off screen when the window changes size.
+    proc clampView() =
+      let
+        maxX = max(float32(mapWidth - viewWidth), 0'f32)
+        maxY = max(float32(mapHeight - viewHeight), 0'f32)
+      view.x = clamp(view.x, 0'f32, maxX)
+      view.y = clamp(view.y, 0'f32, maxY)
+    clampView()
 
     hovered =
       if overMap:
@@ -361,6 +374,18 @@ when isMainModule:
         dragging = picked
         dragOffset = gardens[picked].pos - atMap
         status = "moving a garden"
+      else:
+        # Nothing under the cursor, so the drag moves the view instead.
+        panning = true
+        panFrom = mouse
+        panView = view
+
+    if panning:
+      if window.buttonDown[MouseLeft]:
+        view = panView - (mouse - panFrom)
+        clampView()
+      else:
+        panning = false
     if window.buttonDown[MouseLeft] and dragging >= 0:
       gardens[dragging].pos = atMap + dragOffset
     elif dragging >= 0:
@@ -391,55 +416,63 @@ when isMainModule:
 
     sk.beginUi(window, window.size)
     ui:
-      rectangle "map":
-        box 0, 0, mapWidth, mapHeight
-        image MapName
+      # Everything to do with the village lives inside the viewport, so
+      # it is clipped to the view and moves with the pan rather than
+      # spilling under the panel.
+      rectangle "viewport":
+        box 0, 0, viewWidth, viewHeight
+        tint Paper
+        clipContent true
 
-      rectangle "veil":
-        box 0, 0, mapWidth, mapHeight
-        tint VeilTint
+        rectangle "map":
+          box -view.x, -view.y, mapWidth, mapHeight
+          image MapName
 
-      if showLines:
+        rectangle "veil":
+          box -view.x, -view.y, mapWidth, mapHeight
+          tint VeilTint
+
+        if showLines:
+          for gardenIndex, garden in gardens:
+            let nearest = houses.nearestHouse(garden.center())
+            if nearest < 0:
+              continue
+            let
+              fromPoint = garden.center().toScreen()
+              toPoint = houses[nearest].center.toScreen()
+              span = toPoint - fromPoint
+              steps = max(int(span.length / LineStep), 1)
+              shade = scores[nearest].rating.ratingTint()
+            for step in 1 ..< steps:
+              let at = fromPoint + span * (float32(step) / float32(steps))
+              rectangle "line" & $gardenIndex & "_" & $step:
+                box at.x - 1.5, at.y - 1.5, 3, 3
+                tint shade
+
         for gardenIndex, garden in gardens:
-          let nearest = houses.nearestHouse(garden.center())
-          if nearest < 0:
-            continue
-          let
-            fromPoint = garden.center().toScreen()
-            toPoint = houses[nearest].center.toScreen()
-            span = toPoint - fromPoint
-            steps = max(int(span.length / LineStep), 1)
-            shade = scores[nearest].rating.ratingTint()
-          for step in 1 ..< steps:
-            let at = fromPoint + span * (float32(step) / float32(steps))
-            rectangle "line" & $gardenIndex & "_" & $step:
-              box at.x - 1.5, at.y - 1.5, 3, 3
-              tint shade
+          let at = garden.center().toScreen()
+          rectangle "garden" & $gardenIndex:
+            box at.x - GardenSize / 2, at.y - GardenSize / 2,
+              GardenSize, GardenSize
+            if gardenIndex == dragging:
+              tint rgbx(255, 210, 60, 255)
+            elif gardenIndex == hovered:
+              tint rgbx(150, 235, 130, 255)
+            else:
+              tint rgbx(60, 150, 60, 235)
 
-      for gardenIndex, garden in gardens:
-        let at = garden.center().toScreen()
-        rectangle "garden" & $gardenIndex:
-          box at.x - GardenSize / 2, at.y - GardenSize / 2,
-            GardenSize, GardenSize
-          if gardenIndex == dragging:
-            tint rgbx(255, 210, 60, 255)
-          elif gardenIndex == hovered:
-            tint rgbx(150, 235, 130, 255)
-          else:
-            tint rgbx(60, 150, 60, 235)
-
-      for houseIndex, house in houses:
-        let at = house.center.toScreen()
-        rectangle "house" & $houseIndex:
-          box at.x - HouseSize / 2, at.y - HouseSize / 2, HouseSize, HouseSize
-          tint scores[houseIndex].rating.ratingTint()
-          text "houselabel" & $houseIndex:
-            box 0, 5, HouseSize, 18
-            tint rgbx(255, 255, 255, 255)
-            characters $(house.index + 1)
+        for houseIndex, house in houses:
+          let at = house.center.toScreen()
+          rectangle "house" & $houseIndex:
+            box at.x - HouseSize / 2, at.y - HouseSize / 2, HouseSize, HouseSize
+            tint scores[houseIndex].rating.ratingTint()
+            text "houselabel" & $houseIndex:
+              box 0, 5, HouseSize, 18
+              tint rgbx(255, 255, 255, 255)
+              characters $(house.index + 1)
 
       rectangle "panel":
-        box mapWidth, 0, PanelWidth, windowHeight
+        box viewWidth, 0, PanelWidth, viewHeight
         tint Paper
 
         text "title":
