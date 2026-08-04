@@ -43,6 +43,18 @@ const
   GardenSize = 9.0
   HouseSize = 26.0
   RowHeight = 40
+  ## Tints are premultiplied, so a translucent wash has to carry its
+  ## colour already scaled by the alpha or it renders opaque.
+  VeilAlpha = 140
+  VeilTint = rgbx(
+    uint8(250 * VeilAlpha div 255),
+    uint8(249 * VeilAlpha div 255),
+    uint8(242 * VeilAlpha div 255),
+    VeilAlpha
+  )
+  Ink = rgbx(35, 35, 35, 255)
+  FadedInk = rgbx(105, 105, 105, 255)
+  Paper = rgbx(250, 249, 242, 255)
 
 type
   Garden = object
@@ -272,7 +284,9 @@ when isMainModule:
   builder.addDir(themeDir & "/", themeDir & "/")
   builder.addFont(fontPath, "Default", 15.0)
   builder.addFont(fontPath, "H1", 22.0)
-  if not builder.addImage(MapName, mapImage):
+  # Silky draws an atlas entry at the entry's own size, so the art is
+  # scaled to the size it will occupy before it is packed.
+  if not builder.addImage(MapName, mapImage.resize(mapWidth, mapHeight)):
     quit("the map art does not fit the atlas; raise AtlasSize")
   builder.write(atlasPath)
 
@@ -383,7 +397,7 @@ when isMainModule:
 
       rectangle "veil":
         box 0, 0, mapWidth, mapHeight
-        tint rgbx(250, 249, 242, 150)
+        tint VeilTint
 
       if showLines:
         for gardenIndex, garden in gardens:
@@ -421,18 +435,21 @@ when isMainModule:
           tint scores[houseIndex].rating.ratingTint()
           text "houselabel" & $houseIndex:
             box 0, 5, HouseSize, 18
+            tint rgbx(255, 255, 255, 255)
             characters $(house.index + 1)
 
       rectangle "panel":
         box mapWidth, 0, PanelWidth, windowHeight
-        tint rgbx(250, 249, 242, 255)
+        tint Paper
 
         text "title":
           box 18, 14, PanelWidth - 36, 26
           font "H1"
+          tint Ink
           characters "House balance"
         text "subtitle":
           box 18, 44, PanelWidth - 36, 18
+          tint FadedInk
           characters &"within {int(NearRadius)}px, walk to {NearestCount}"
 
         var ranked = scores
@@ -441,15 +458,18 @@ when isMainModule:
           let y = 74 + row * RowHeight
           text "name" & $row:
             box 18, y, 120, 18
+            tint Ink
             characters &"{s.index + 1}  {s.owner}"
           rectangle "bar" & $row:
             box 140, y + 4, 118 * s.rating, 10
             tint s.rating.ratingTint()
           text "value" & $row:
             box 268, y, 54, 18
+            tint Ink
             characters $int(round(s.rating * 100))
           text "detail" & $row:
             box 26, y + 18, PanelWidth - 44, 16
+            tint FadedInk
             characters &"{s.nearCount} near, haul " &
               &"{int(round(s.haulDistance))}px"
 
@@ -463,10 +483,12 @@ when isMainModule:
               0.0
         text "spread":
           box 18, 74 + ranked.len * RowHeight + 10, PanelWidth - 36, 18
+          tint Ink
           characters &"spread {spread:.2f}x  best {best.index + 1}, " &
             &"worst {worst.index + 1}"
         text "status":
           box 18, 74 + ranked.len * RowHeight + 32, PanelWidth - 36, 18
+          tint rgbx(70, 90, 170, 255)
           characters status
 
     sk.endUi()
