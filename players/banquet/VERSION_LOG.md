@@ -24,7 +24,26 @@ too slow to learn from.
 | v17 | faithful replica of the league leader, at our seat | — | 18.9 |
 | **v18** | v15 + farm the first morning instead of meeting up | 143.4 | **155.9** |
 
+| v19 | summon the channel reader from 3pm, ungated | — | — |
+| v20 | summon from 1pm, ahead of the rival's 2:22pm | — | — |
+
 ## What the numbers taught us
+
+**A lone round is lost by exactly one guest.** Decoding a losing round:
+we recruited our usual guest all eight nights and scored 81, which is
+nine food times one guest; the rival scored 124, seven food times two.
+Its two arrive on a timer because of its seat and cannot be taken. The
+only guest still winnable is the gnome that reads nothing but the bot
+channel — it does attend dinners, just other people's. The rival asks
+it at 2:22pm; asking later than that loses it every game, and asking
+before mid-morning costs the guest we already had, because ours has not
+committed yet and a bot-channel line overheard takes its one acceptance.
+
+**Test rosters must fill the spare chairs the way real rounds do.**
+Seating a known-recruitable gnome in the empty seat made lone-seat
+numbers look like 155 where live rounds gave 69–82. Fill spare chairs
+at random instead, or the ranking between versions is measured against
+a kinder field than the one being played.
 
 **The invitation wording is load-bearing, and not the way you would
 guess.** v10 is the champion with one string changed and nothing else.
