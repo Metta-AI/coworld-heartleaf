@@ -15,6 +15,7 @@
 ## Controls:
 ##   drag         pick up the garden under the cursor and move it
 ##   drag empty   pan the village; the window can be resized freely
+##   scroll       zoom about the cursor
 ##   arrow keys   nudge the held garden a pixel at a time
 ##   S            save data/map.resource in place
 ##   R            reload from disk, discarding changes
@@ -39,6 +40,11 @@ const
   NearestCount = 6
   GrabRadius = 12.0
   MapName = "heartleafmap"
+  ## An atlas entry is drawn at the size it was packed, so every zoom
+  ## step is packed separately at startup and zooming picks an entry
+  ## rather than rebuilding the atlas.
+  ZoomLevels = [0.5'f32, 0.75'f32, 1.0'f32, 1.5'f32, 2.0'f32]
+  DefaultZoom = 2
   AtlasSize = 4096
   LineStep = 10.0
   GardenSize = 9.0
@@ -278,9 +284,20 @@ when isMainModule:
   builder.addDir(themeDir & "/", themeDir & "/")
   builder.addFont(fontPath, "Default", 15.0)
   builder.addFont(fontPath, "H1", 22.0)
-  # Silky draws an atlas entry at the size it was packed, so the art
-  # goes in at 1:1 and the view pans rather than scales.
-  if not builder.addImage(MapName, mapImage):
+  # Pack the art once per zoom step. A level that will not fit is
+  # dropped rather than fatal, so the tool still opens on a small atlas.
+  var zoomAvailable: array[ZoomLevels.len, bool]
+  for i, level in ZoomLevels:
+    let
+      packed = mapImage.resize(
+        int(float32(mapImage.width) * level),
+        int(float32(mapImage.height) * level)
+      )
+      name = MapName & $i
+    zoomAvailable[i] = builder.addImage(name, packed)
+    if not zoomAvailable[i]:
+      echo "zoom ", level, "x does not fit the atlas; that step is disabled"
+  if not zoomAvailable[DefaultZoom]:
     quit("the map art does not fit the atlas; raise AtlasSize")
   builder.write(atlasPath)
 
@@ -300,13 +317,20 @@ when isMainModule:
     showLines = true
     ## Top-left map pixel currently shown at the top-left of the view.
     view = vec2(0, 0)
+    zoomIndex = DefaultZoom
     panning = false
     panFrom = vec2(0, 0)
     panView = vec2(0, 0)
     status = "drag a garden, drag the ground to pan — S saves, R reloads"
 
+  proc zoom(): float32 =
+    ZoomLevels[zoomIndex]
+
   proc toScreen(mapPoint: Vec2): Vec2 =
-    mapPoint - view
+    mapPoint * zoom() - view
+
+  proc toMap(screen: Vec2): Vec2 =
+    (screen + view) / zoom()
 
   proc save() =
     ## Writes every garden's position back into its own block, leaving
@@ -333,9 +357,11 @@ when isMainModule:
     status = "reloaded from disk"
 
   proc pickGarden(at: Vec2): int =
-    ## Returns the garden nearest a map-space point, within reach.
+    ## Returns the garden nearest a map-space point, within reach. The
+    ## grab radius is in screen pixels, so it stays the same size to the
+    ## hand however far the view is zoomed.
     result = -1
-    var best = GrabRadius
+    var best = GrabRadius / zoom()
     for i, garden in gardens:
       let distance = garden.center().dist(at)
       if distance <= best:
@@ -350,17 +376,37 @@ when isMainModule:
       viewHeight = max(window.size.y.int, 200)
       mouse = window.mousePos.vec2
       overMap = mouse.x < float32(viewWidth)
-      atMap = mouse + view
+      atMap = toMap(mouse)
 
     # Keep the village within reach of the view, so panning cannot
     # strand it off screen when the window changes size.
     proc clampView() =
       let
-        maxX = max(float32(mapWidth - viewWidth), 0'f32)
-        maxY = max(float32(mapHeight - viewHeight), 0'f32)
+        maxX = max(float32(mapWidth) * zoom() - float32(viewWidth), 0'f32)
+        maxY = max(float32(mapHeight) * zoom() - float32(viewHeight), 0'f32)
       view.x = clamp(view.x, 0'f32, maxX)
       view.y = clamp(view.y, 0'f32, maxY)
     clampView()
+
+    # Zoom about the cursor: whatever map point is under the pointer
+    # stays under it, which is what makes scrolling feel anchored.
+    if overMap and window.scrollDelta.y != 0:
+      let held = toMap(mouse)
+      var wanted = zoomIndex
+      if window.scrollDelta.y > 0:
+        wanted = min(zoomIndex + 1, ZoomLevels.high)
+      else:
+        wanted = max(zoomIndex - 1, 0)
+      while wanted != zoomIndex and not zoomAvailable[wanted]:
+        if wanted > zoomIndex: inc wanted else: dec wanted
+        if wanted < 0 or wanted > ZoomLevels.high:
+          wanted = zoomIndex
+      if wanted != zoomIndex:
+        zoomIndex = wanted
+        view = held * zoom() - mouse
+        clampView()
+        status = &"zoom {zoom():.2f}x"
+
 
     hovered =
       if overMap:
@@ -424,12 +470,16 @@ when isMainModule:
         tint Paper
         clipContent true
 
+        let
+          artWidth = float32(mapWidth) * zoom()
+          artHeight = float32(mapHeight) * zoom()
+
         rectangle "map":
-          box -view.x, -view.y, mapWidth, mapHeight
-          image MapName
+          box -view.x, -view.y, artWidth, artHeight
+          image MapName & $zoomIndex
 
         rectangle "veil":
-          box -view.x, -view.y, mapWidth, mapHeight
+          box -view.x, -view.y, artWidth, artHeight
           tint VeilTint
 
         if showLines:
