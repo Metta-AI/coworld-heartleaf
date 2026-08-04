@@ -683,11 +683,25 @@ when isMainModule:
                   rgbx(hue.r div 2, hue.g div 2, hue.b div 2, 110)
               var step = 0
               while step < leg.points.len:
-                let at = toScreen(
-                  vec2(float32(leg.points[step].x), float32(leg.points[step].y))
-                )
+                let
+                  at = toScreen(
+                    vec2(
+                      float32(leg.points[step].x), float32(leg.points[step].y)
+                    )
+                  )
+                  # Walk the dot from small to large along the leg, so the
+                  # direction of travel reads at a glance and a route that
+                  # doubles back past its own door cannot be mistaken for
+                  # one returning to it.
+                  grow = 1.0 + 2.0 * float32(step) / float32(
+                    max(leg.points.len - 1, 1)
+                  )
+                rectangle "edge" & $scoreIndex & "_" & $legIndex & "_" & $step:
+                  box at.x - grow / 2 - 1, at.y - grow / 2 - 1,
+                    grow + 2, grow + 2
+                  tint rgbx(0, 0, 0, 190)
                 rectangle "step" & $scoreIndex & "_" & $legIndex & "_" & $step:
-                  box at.x - 1.5, at.y - 1.5, 3, 3
+                  box at.x - grow / 2, at.y - grow / 2, grow, grow
                   tint tone
                 step += 2
 

@@ -296,19 +296,36 @@ when isMainModule:
   for racer in racers:
     let hue = HouseHues[racer.index mod HouseHues.len]
     for walk in racer.walks:
-      let context = newContext(image)
-      context.strokeStyle =
+      # Lay a dark stroke under the coloured one so a route stays
+      # legible over grass, path and hedge alike.
+      let
+        edge = newContext(image)
+        line = newContext(image)
+      edge.strokeStyle = rgba(0, 0, 0, 190)
+      edge.lineWidth =
+        if walk.won:
+          4.5
+        else:
+          2.6
+      line.strokeStyle =
         if walk.won:
           hue
         else:
-          rgba(hue.r, hue.g, hue.b, 60)
-      context.lineWidth =
+          rgba(hue.r, hue.g, hue.b, 90)
+      line.lineWidth =
         if walk.won:
-          2.0
+          2.4
         else:
-          1.0
+          1.2
       for i in 1 ..< walk.points.len:
-        context.strokeSegment(segment(
+        let leg = segment(
+          vec2(float(walk.points[i - 1].x), float(walk.points[i - 1].y)) *
+            scaled,
+          vec2(float(walk.points[i].x), float(walk.points[i].y)) * scaled
+        )
+        edge.strokeSegment(leg)
+      for i in 1 ..< walk.points.len:
+        line.strokeSegment(segment(
           vec2(float(walk.points[i - 1].x), float(walk.points[i - 1].y)) *
             scaled,
           vec2(float(walk.points[i].x), float(walk.points[i].y)) * scaled
