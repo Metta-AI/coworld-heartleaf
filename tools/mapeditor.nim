@@ -26,7 +26,7 @@
 
 import
   std/[algorithm, math, os, strformat, strutils],
-  pixie, silky,
+  pixie, silky, pathy,
   bitworld/[aseprite, resources],
   ../src/heartleaf/protocol
 
@@ -68,6 +68,18 @@ const
   Ink = rgbx(35, 35, 35, 255)
   FadedInk = rgbx(105, 105, 105, 255)
   Paper = rgbx(250, 249, 242, 255)
+  ## One hue per door, so a route can be traced back to whose it is.
+  HouseHues = [
+    rgbx(214, 64, 52, 255),
+    rgbx(232, 133, 38, 255),
+    rgbx(188, 160, 28, 255),
+    rgbx(96, 176, 62, 255),
+    rgbx(40, 160, 140, 255),
+    rgbx(58, 126, 214, 255),
+    rgbx(124, 88, 196, 255),
+    rgbx(198, 74, 156, 255),
+    rgbx(110, 110, 110, 255)
+  ]
 
 type
   Garden = object
@@ -82,11 +94,21 @@ type
     owner: string
     center: Vec2
 
+  Step = tuple[x, y: int]
+
+  Leg = object
+    ## One walk from where a gnome stood to a patch, and whether the
+    ## patch was still there when it arrived.
+    points: seq[Step]
+    won: bool
+
   HouseScore = object
     index: int
     owner: string
-    nearCount: int
-    haulDistance: float
+    gardensWon: int
+    travelled: float
+    wastedTrips: int
+    legs: seq[Leg]
     rating: float
 
   MapDoc = object
@@ -216,42 +238,146 @@ proc nearestHouse(houses: seq[House], at: Vec2): int =
       best = distance
       result = i
 
-proc scoreHouses(gardens: seq[Garden], houses: seq[House]): seq[HouseScore] =
-  ## Rates every door on what it can reach, relative to the rest.
+proc toDense(steps: openArray[PathStep]): seq[Step] =
+  ## Turns sparse jump points into the line a gnome actually walks, so
+  ## the drawn route bends around the scenery instead of cutting corners.
+  const DensifyPixels = 4
+  for step in steps:
+    let point: Step = (x: step.x, y: step.y)
+    if result.len == 0:
+      result.add(point)
+      continue
+    let
+      previous = result[^1]
+      dx = point.x - previous.x
+      dy = point.y - previous.y
+      span = max(abs(dx), abs(dy))
+    var walked = DensifyPixels
+    while walked < span:
+      result.add((
+        x: previous.x + dx * walked div span,
+        y: previous.y + dy * walked div span
+      ))
+      walked += DensifyPixels
+    result.add(point)
+
+proc walkLength(points: seq[Step]): float =
+  for i in 1 ..< points.len:
+    let
+      dx = float(points[i].x - points[i - 1].x)
+      dy = float(points[i].y - points[i - 1].y)
+    result += sqrt(dx * dx + dy * dy)
+
+proc onWalkable(nav: JumpPointSpace, x, y: int): Step =
+  ## Returns the closest walkable pixel, so a door or patch sitting a
+  ## pixel inside scenery still has somewhere to stand.
+  var best: Step = (
+    x: x.clamp(0, nav.path.width - 1),
+    y: y.clamp(0, nav.path.height - 1)
+  )
+  if nav.path.passable(best.x, best.y):
+    return best
+  for radius in 1 .. 64:
+    for dy in -radius .. radius:
+      for dx in -radius .. radius:
+        if abs(dx) != radius and abs(dy) != radius:
+          continue
+        let
+          px = (x + dx).clamp(0, nav.path.width - 1)
+          py = (y + dy).clamp(0, nav.path.height - 1)
+        if nav.path.passable(px, py):
+          return (x: px, y: py)
+  best
+
+proc raceForGardens(
+  nav: JumpPointSpace,
+  gardens: seq[Garden],
+  houses: seq[House]
+): seq[HouseScore] =
+  ## Runs the morning: every gnome leaves its door at once and heads for
+  ## the nearest patch nobody has taken, walking around the scenery
+  ## rather than through it. Whoever arrives first takes the patch; a
+  ## gnome that arrives second has spent the walk for nothing and picks
+  ## again from where it stands. It ends when no patch is left.
+  var
+    scores: seq[HouseScore]
+    standing: seq[Step]
+    plots: seq[Step]
+    taken: seq[bool]
   for house in houses:
-    var
-      score = HouseScore(index: house.index, owner: house.owner)
-      distances: seq[float]
-    for garden in gardens:
-      distances.add(float(house.center.dist(garden.center())))
-    distances.sort()
-    for distance in distances:
-      if distance <= NearRadius:
-        inc score.nearCount
-    let take = min(NearestCount, distances.len)
-    for i in 0 ..< take:
-      score.haulDistance += distances[i]
-    if take > 0:
-      score.haulDistance = score.haulDistance / float(take)
-    result.add(score)
+    scores.add(HouseScore(index: house.index, owner: house.owner))
+    standing.add(nav.onWalkable(int(house.center.x), int(house.center.y)))
+  for garden in gardens:
+    let middle = garden.center()
+    plots.add(nav.onWalkable(int(middle.x), int(middle.y)))
+    taken.add(false)
+  if scores.len == 0 or plots.len == 0:
+    return scores
 
   var
-    mostNear = 0
-    fewestNear = int.high
-    shortestHaul = 1e9
-    longestHaul = 0.0
-  for s in result:
-    mostNear = max(mostNear, s.nearCount)
-    fewestNear = min(fewestNear, s.nearCount)
-    shortestHaul = min(shortestHaul, s.haulDistance)
-    longestHaul = max(longestHaul, s.haulDistance)
-  for s in result.mitems:
+    arrival = newSeq[float](scores.len)
+    target = newSeq[int](scores.len)
+    route = newSeq[seq[Step]](scores.len)
+
+  proc aimAtNearest(racer: int) =
+    var
+      bestPlot = -1
+      bestRoute: seq[Step]
+      bestLength = 0.0
+    for i, plot in plots:
+      if taken[i]:
+        continue
+      let walk = nav.findPath(
+        standing[racer].x, standing[racer].y, plot.x, plot.y
+      ).toDense()
+      if walk.len == 0:
+        continue
+      let length = walk.walkLength()
+      if bestPlot < 0 or length < bestLength:
+        bestPlot = i
+        bestRoute = walk
+        bestLength = length
+    target[racer] = bestPlot
+    route[racer] = bestRoute
+    arrival[racer] =
+      if bestPlot < 0:
+        Inf
+      else:
+        scores[racer].travelled + bestLength
+
+  for racer in 0 ..< scores.len:
+    aimAtNearest(racer)
+
+  var remaining = plots.len
+  while remaining > 0:
+    var next = -1
+    for racer in 0 ..< scores.len:
+      if target[racer] < 0:
+        continue
+      if next < 0 or arrival[racer] < arrival[next]:
+        next = racer
+    if next < 0:
+      break
     let
-      reachSpan = float(max(mostNear - fewestNear, 1))
-      haulSpan = max(longestHaul - shortestHaul, 1.0)
-      reach = float(s.nearCount - fewestNear) / reachSpan
-      haul = 1.0 - (s.haulDistance - shortestHaul) / haulSpan
-    s.rating = (reach + haul) / 2
+      plot = target[next]
+      won = not taken[plot]
+    scores[next].travelled = arrival[next]
+    scores[next].legs.add(Leg(points: route[next], won: won))
+    standing[next] = plots[plot]
+    if won:
+      taken[plot] = true
+      inc scores[next].gardensWon
+      dec remaining
+    else:
+      inc scores[next].wastedTrips
+    aimAtNearest(next)
+
+  var mostWon = 1
+  for score in scores:
+    mostWon = max(mostWon, score.gardensWon)
+  for score in scores.mitems:
+    score.rating = score.gardensWon / mostWon
+  scores
 
 proc ratingTint(rating: float): ColorRGBX =
   ## Green for a well fed door, red for a starved one.
@@ -273,6 +399,23 @@ when isMainModule:
   let
     mapSprite = readAseprite(repoDir() / "data" / "map.aseprite")
     mapImage = mapSprite.layerImage(mapSprite.bottomLayerIndex())
+
+  let walkIndex = block:
+    var found = -1
+    for i, layer in mapSprite.layers:
+      if layer.name.normalize() in ["walkable", "walk"]:
+        found = i
+    found
+  if walkIndex < 0:
+    quit("map.aseprite has no walkable layer to walk around")
+  let walkImage = mapSprite.layerImage(walkIndex)
+  var walkMask = newSeq[bool](walkImage.width * walkImage.height)
+  for y in 0 ..< walkImage.height:
+    for x in 0 ..< walkImage.width:
+      walkMask[y * walkImage.width + x] = walkImage[x, y].a > 0
+  let nav = newJumpPointSpace(
+    walkMask, walkImage.width, walkImage.height, DiagonalPath
+  )
 
   let
     mapWidth = mapImage.width
@@ -334,6 +477,7 @@ when isMainModule:
     panFrom = vec2(0, 0)
     panView = vec2(0, 0)
     status = "drag a garden, drag the ground to pan — S saves, R reloads"
+    scores = nav.raceForGardens(gardens, houses)
 
   proc zoom(): float32 =
     ZoomLevels[zoomIndex]
@@ -482,8 +626,6 @@ when isMainModule:
     if window.buttonPressed[KeyG]:
       showLines = not showLines
 
-    let scores = scoreHouses(gardens, houses)
-
     sk.beginUi(window, window.size)
     ui:
       # Everything to do with the village lives inside the viewport, so
@@ -507,7 +649,28 @@ when isMainModule:
           tint VeilTint
 
         if showLines:
-          for gardenIndex, garden in gardens:
+          # The real walked route, one dot every few map pixels, in the
+          # colour of the door it belongs to. Solid where the gnome took
+          # the patch, faint where it arrived to bare earth.
+          for scoreIndex, score in scores:
+            let hue = HouseHues[score.index mod HouseHues.len]
+            for legIndex, leg in score.legs:
+              let tone =
+                if leg.won:
+                  hue
+                else:
+                  rgbx(hue.r div 2, hue.g div 2, hue.b div 2, 110)
+              var step = 0
+              while step < leg.points.len:
+                let at = toScreen(
+                  vec2(float32(leg.points[step].x), float32(leg.points[step].y))
+                )
+                rectangle "step" & $scoreIndex & "_" & $legIndex & "_" & $step:
+                  box at.x - 1.5, at.y - 1.5, 3, 3
+                  tint tone
+                step += 2
+
+        for gardenIndex, garden in gardens:
             let nearest = houses.nearestHouse(garden.center())
             if nearest < 0:
               continue
@@ -553,14 +716,14 @@ when isMainModule:
           box 18, 14, PanelWidth - 36, 26
           font "H1"
           tint Ink
-          characters "House balance"
+          characters "Patches won"
         text "subtitle":
           box 18, 44, PanelWidth - 36, 18
           tint FadedInk
-          characters &"within {int(NearRadius)}px, walk to {NearestCount}"
+          characters "all nine walk at once, nearest patch first"
 
         var ranked = scores
-        ranked.sort(proc(a, b: HouseScore): int = cmp(b.rating, a.rating))
+        ranked.sort(proc(a, b: HouseScore): int = cmp(b.gardensWon, a.gardensWon))
         for row, s in ranked:
           let y = 74 + row * RowHeight
           text "name" & $row:
@@ -569,30 +732,30 @@ when isMainModule:
             characters &"{s.index + 1}  {s.owner}"
           rectangle "bar" & $row:
             box 140, y + 4, 118 * s.rating, 10
-            tint s.rating.ratingTint()
+            tint HouseHues[s.index mod HouseHues.len]
           text "value" & $row:
             box 268, y, 54, 18
             tint Ink
-            characters $int(round(s.rating * 100))
+            characters $s.gardensWon
           text "detail" & $row:
             box 26, y + 18, PanelWidth - 44, 16
             tint FadedInk
-            characters &"{s.nearCount} near, haul " &
-              &"{int(round(s.haulDistance))}px"
+            characters &"walked {int(round(s.travelled))}px, " &
+              &"{s.wastedTrips} wasted"
 
         let
           best = ranked[0]
           worst = ranked[^1]
           spread =
-            if worst.nearCount > 0:
-              float(best.nearCount) / float(worst.nearCount)
+            if worst.gardensWon > 0:
+              best.gardensWon / worst.gardensWon
             else:
               0.0
         text "spread":
           box 18, 74 + ranked.len * RowHeight + 10, PanelWidth - 36, 18
           tint Ink
-          characters &"spread {spread:.2f}x  best {best.index + 1}, " &
-            &"worst {worst.index + 1}"
+          characters &"spread {spread:.2f}x  even would be " &
+            &"{gardens.len div max(houses.len, 1)} each"
         text "status":
           box 18, 74 + ranked.len * RowHeight + 32, PanelWidth - 36, 18
           tint rgbx(70, 90, 170, 255)
