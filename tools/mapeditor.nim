@@ -19,7 +19,8 @@
 ##   arrow keys   nudge the held garden a pixel at a time
 ##   S            save data/map.resource in place
 ##   R            reload from disk, discarding changes
-##   G            toggle the garden-to-house lines
+##   G            toggle the walked routes
+##   C            centre the village in the window
 ##
 ## Usage:
 ##   nim r tools/mapeditor.nim
@@ -39,6 +40,9 @@ const
   ## How many of the closest gardens make up a day's haul.
   NearestCount = 6
   GrabRadius = 12.0
+  ## How much of the village must stay on screen while panning, so it
+  ## can never be lost off an edge entirely.
+  KeepOnScreen = 90'f32
   MapName = "heartleafmap"
   ## An atlas entry is drawn at the size it was packed, so every zoom
   ## step is packed separately at startup and zooming picks an entry
@@ -537,11 +541,20 @@ when isMainModule:
     # Keep the village within reach of the view, so panning cannot
     # strand it off screen when the window changes size.
     proc clampView() =
+      # The view may go anywhere, including past the edges, so a map
+      # smaller than the window can sit in the middle of it instead of
+      # being stuck against the top-left corner. The only limit is that
+      # a corner of the village has to stay on screen, so it can always
+      # be dragged back into view.
       let
-        maxX = max(float32(mapWidth) * zoom() - float32(viewWidth), 0'f32)
-        maxY = max(float32(mapHeight) * zoom() - float32(viewHeight), 0'f32)
-      view.x = clamp(view.x, 0'f32, maxX)
-      view.y = clamp(view.y, 0'f32, maxY)
+        artWidth = float32(mapWidth) * zoom()
+        artHeight = float32(mapHeight) * zoom()
+      view.x = clamp(
+        view.x, KeepOnScreen - float32(viewWidth), artWidth - KeepOnScreen
+      )
+      view.y = clamp(
+        view.y, KeepOnScreen - float32(viewHeight), artHeight - KeepOnScreen
+      )
     clampView()
 
     # Zoom about the cursor: whatever map point is under the pointer
@@ -625,6 +638,14 @@ when isMainModule:
       reload()
     if window.buttonPressed[KeyG]:
       showLines = not showLines
+    if window.buttonPressed[KeyC]:
+      # Put the village back in the middle of whatever window it is in.
+      view = vec2(
+        (float32(mapWidth) * zoom() - float32(viewWidth)) / 2,
+        (float32(mapHeight) * zoom() - float32(viewHeight)) / 2
+      )
+      status = "centred"
+
 
     sk.beginUi(window, window.size)
     ui:
