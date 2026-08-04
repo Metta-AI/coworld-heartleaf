@@ -43,9 +43,15 @@ const
   ## An atlas entry is drawn at the size it was packed, so every zoom
   ## step is packed separately at startup and zooming picks an entry
   ## rather than rebuilding the atlas.
-  ZoomLevels = [0.5'f32, 0.75'f32, 1.0'f32, 1.5'f32, 2.0'f32]
+  ZoomLevels = [
+    0.5'f32, 0.7'f32, 1.0'f32, 1.4'f32, 2.0'f32, 2.8'f32, 4.0'f32
+  ]
   DefaultZoom = 2
-  AtlasSize = 4096
+  ## Scroll travel needed before the view steps a level. A notch of a
+  ## wheel reports about one, and a trackpad reports fractions, so this
+  ## keeps both from racing through the range.
+  ZoomScrollStep = 2.5'f32
+  AtlasSize = 6144
   LineStep = 10.0
   GardenSize = 9.0
   HouseSize = 26.0
@@ -286,15 +292,18 @@ when isMainModule:
   builder.addFont(fontPath, "H1", 22.0)
   # Pack the art once per zoom step. A level that will not fit is
   # dropped rather than fatal, so the tool still opens on a small atlas.
+  ## Largest first: the packer places blocks in the order it is given
+  ## them, and the biggest one cannot find a gap once the small ones
+  ## have been scattered across the sheet.
   var zoomAvailable: array[ZoomLevels.len, bool]
-  for i, level in ZoomLevels:
+  for i in countdown(ZoomLevels.high, 0):
     let
+      level = ZoomLevels[i]
       packed = mapImage.resize(
         int(float32(mapImage.width) * level),
         int(float32(mapImage.height) * level)
       )
-      name = MapName & $i
-    zoomAvailable[i] = builder.addImage(name, packed)
+    zoomAvailable[i] = builder.addImage(MapName & $i, packed)
     if not zoomAvailable[i]:
       echo "zoom ", level, "x does not fit the atlas; that step is disabled"
   if not zoomAvailable[DefaultZoom]:
@@ -318,6 +327,9 @@ when isMainModule:
     ## Top-left map pixel currently shown at the top-left of the view.
     view = vec2(0, 0)
     zoomIndex = DefaultZoom
+    ## Scroll travel banked since the last step, so a step needs a
+    ## deliberate roll rather than a twitch.
+    zoomScroll = 0'f32
     panning = false
     panFrom = vec2(0, 0)
     panView = vec2(0, 0)
@@ -391,14 +403,26 @@ when isMainModule:
     # Zoom about the cursor: whatever map point is under the pointer
     # stays under it, which is what makes scrolling feel anchored.
     if overMap and window.scrollDelta.y != 0:
-      let held = toMap(mouse)
-      var wanted = zoomIndex
-      if window.scrollDelta.y > 0:
-        wanted = min(zoomIndex + 1, ZoomLevels.high)
-      else:
-        wanted = max(zoomIndex - 1, 0)
+      zoomScroll += window.scrollDelta.y
+    elif window.scrollDelta.y == 0 and abs(zoomScroll) < ZoomScrollStep:
+      # Let a half-finished roll decay so it does not bank forever.
+      zoomScroll = zoomScroll * 0.92'f32
+
+    if overMap and abs(zoomScroll) >= ZoomScrollStep:
+      let
+        held = toMap(mouse)
+        stepUp = zoomScroll > 0
+      zoomScroll = 0
+      var wanted =
+        if stepUp:
+          min(zoomIndex + 1, ZoomLevels.high)
+        else:
+          max(zoomIndex - 1, 0)
       while wanted != zoomIndex and not zoomAvailable[wanted]:
-        if wanted > zoomIndex: inc wanted else: dec wanted
+        if stepUp:
+          inc wanted
+        else:
+          dec wanted
         if wanted < 0 or wanted > ZoomLevels.high:
           wanted = zoomIndex
       if wanted != zoomIndex:
