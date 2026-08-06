@@ -43,8 +43,8 @@ A gnome can leave the house again through the exit.
 
 Each round is one in-game day.
 
-The day starts at 8:00 AM and ends at 10:00 PM. A full day lasts 5 minutes of
-real time. The clock advances in 5 minute in-game intervals and is shown in the
+The day starts at 8:00 AM and ends at 10:00 PM. A full day lasts 3 minutes of
+real time by default. The clock advances in 5 minute in-game intervals and is shown in the
 upper right of the UI.
 
 The world starts bright in the morning. Later in the day, the map darkens
@@ -101,7 +101,7 @@ During dinner party you fed:
 It then lists the food and counts the host served, the followed by a sprite of
 each visitor and their name, and then followed by the score gained.
 
-The dinner party panel lasts about 3 seconds.
+The dinner party panel lasts about 10 seconds.
 
 Each gnome keeps a dinner history of the party host and what they ate or fed.
 
@@ -129,7 +129,7 @@ earned from all dinner parties so far.
 At 10:00 PM, every gnome is teleported back to their own house.
 
 A black score panel appears next to each gnome and shows that gnome's cumulative
-score. The score panel lasts about 3 seconds.
+score. The score panel lasts about 10 seconds.
 
 After the score screen, the next day begins from the morning setup. Gnomes start
 inside their own houses again, gardens are ready to gather from, and the day

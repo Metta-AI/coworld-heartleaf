@@ -7,7 +7,7 @@ and cumulative score.
 ## Day Cycle
 
 Each round is one in-game day. The day starts at 8:00 AM and ends at
-10:00 PM. A full day lasts 5 minutes of real time.
+10:00 PM. A full day lasts 3 minutes of real time by default.
 
 Gnomes spend the day collecting vegetables from garden plots. Gardens
 with food show an exclamation marker. A gnome collects food by standing
