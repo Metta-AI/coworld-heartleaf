@@ -32,9 +32,9 @@ const
   DefaultName = "host_villager"
   UnknownHouse = -1
   # Host-always policy schedule (minutes after midnight).
-  GatherUntilMinutes = 16 * 60 + 30
-  HostEnterMinutes = 18 * 60 + 10
-  EveningGatherMinutes = 19 * 60
+  GatherUntilMinutes = 15 * 60 + 35
+  HostEnterMinutes = 17 * 60 + 15
+  EveningGatherMinutes = 18 * 60 + 5
   # Chat cadence in frame ticks (24 ticks per real second).
   ChatIntervalTicks = 240
   ChatReplyIntervalTicks = 72
@@ -954,17 +954,17 @@ proc clockAnnouncement(minutes: int): string =
     let hours = (DinnerMinutes - minutes) div 60
     if hours <= 0:
       "It is " & clock & ". Dinner starts within the hour! Be INSIDE " &
-        "your dinner house before it is served at 6:55pm - if you are " &
+        "your dinner house before it is served at 6:00pm - if you are " &
         "outside when it is served you miss dinner entirely."
     elif hours == 1:
       "It is " & clock & " (1 hour till dinner). Settle on a dinner " &
-        "house now; you must be inside it before 6:55pm."
+        "house now; you must be inside it before 6:00pm."
     else:
       "It is " & clock & " (" & $hours & " hours till dinner)."
   elif minutes < DinnerMinutes + 60:
-    "It is " & clock & ". It is dinner time! Dinner is served at " &
-      "6:55pm sharp. Get inside the dinner house NOW and STAY inside - " &
-      "anyone outside at 6:55pm misses dinner and scores nothing."
+    "It is " & clock & ". Dinner was served at 6:00pm sharp - anyone " &
+      "outside then missed it. The evening is for gathering food " &
+      "for tomorrow."
   elif minutes < DayEndMinutes:
     let hours = (DayEndMinutes - minutes) div 60
     if hours <= 1:
@@ -1619,7 +1619,7 @@ proc visiblePlayersText(bot: Bot): string =
 proc hostGoal(bot: Bot): Goal =
   ## Returns the deterministic host-always goal for the current clock.
   ## Gather all morning, anchor visibly at the own door before dinner,
-  ## sit inside through the 6:55pm tally, then bank food for tomorrow.
+  ## sit inside through the 6:00pm tally, then bank food for tomorrow.
   if not bot.localized or bot.navForCurrentMap() == nil:
     return Goal(kind: GoalIdle, screenKind: bot.screenKind)
   if bot.screenKind == OverlayScreen:

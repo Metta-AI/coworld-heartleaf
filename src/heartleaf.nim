@@ -37,7 +37,7 @@ const
   DayTicks = DayRealMinutes * 60 * TicksPerSecond
   ScoreScreenTicks = 10 * TicksPerSecond
   DinnerScreenTicks = 10 * TicksPerSecond
-  DinnerTallyMinutes = DinnerMinutes + 55
+  DinnerTallyMinutes = DinnerMinutes
   DefaultDaySeconds = DayRealMinutes * 60
   DayStepMinutes = 5
   DayTotalMinutes = DayEndMinutes - DayStartMinutes
