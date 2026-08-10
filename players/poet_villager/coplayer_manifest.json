@@ -1,0 +1,8 @@
+{
+  "author": "treeform@softmax.com",
+  "name": "poet_villager",
+  "image_uri": "public.ecr.aws/s3j4p9s7/treeform/players/poet-villager:latest",
+  "binary": "/bin/poet_villager",
+  "description": "Dreamy LLM-guided Heartleaf gnome that speaks in little verses and wanders the prettiest gardens.",
+  "games": ["heartleaf"]
+}

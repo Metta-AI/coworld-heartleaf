@@ -1,0 +1,8 @@
+{
+  "author": "treeform@softmax.com",
+  "name": "curious_villager",
+  "image_uri": "public.ecr.aws/s3j4p9s7/treeform/players/curious-villager:latest",
+  "binary": "/bin/curious_villager",
+  "description": "Curious LLM-guided Heartleaf gnome that asks endless questions and investigates every corner of the village.",
+  "games": ["heartleaf"]
+}

@@ -1,0 +1,8 @@
+{
+  "author": "treeform@softmax.com",
+  "name": "grumpy_villager",
+  "image_uri": "public.ecr.aws/s3j4p9s7/treeform/players/grumpy-villager:latest",
+  "binary": "/bin/grumpy_villager",
+  "description": "Grumpy LLM-guided Heartleaf gnome that complains about everything but secretly never misses a dinner.",
+  "games": ["heartleaf"]
+}
