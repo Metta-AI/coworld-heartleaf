@@ -2219,3 +2219,8 @@ proc hostVillagerMain*(defaultName = DefaultName, soul: string) =
   if slot < 0 and url.len > 0:
     slot = url.slotFromUrl()
   runBot(address, port, name, token, slot, url, soul, url.len > 0)
+
+const SoulMarkdown = staticRead("soul.md")
+
+when isMainModule:
+  hostVillagerMain(DefaultName, SoulMarkdown)

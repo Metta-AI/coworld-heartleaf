@@ -66,25 +66,26 @@ const
   ReplayMismatchLayerKind = 5
   MapLayerFlags = 1
   UiLayerFlags = 2
-  ReplayPanelHeight = 20
-  ReplayScrubberWidth = 240
+  ReplayPanelHeight = 27
+  ReplayScrubberWidth = 300
   ReplayScrubberHeight = 5
+  ReplayControlsBgAlpha = 204'u8
   ReplayScrubberTrackY = 2
-  ReplayScrubberY = 8
-  TransportX = 2
-  TransportY = 1
+  ReplayScrubberY = 15
+  ReplayTickTextY = 4
+  TransportButtonsX = 6
+  TransportRowY = 4
   TransportButtonWidth = 12
   TransportButtonStride = 14
   TransportButtonCount = 4
   TransportRowHeight = 7
-  TransportSpeedY = 8
   TransportSpeedStride = 18
   TransportSpeedWidth = 16
   TransportSpeedLabels = ["1X", "2X", "3X", "4X", "8X", "16X"]
   TransportSpeedValues = [1, 2, 3, 4, 8, 16]
   TransportSpeedCommands = ['1', '2', '3', '4', '8', '6']
-  TransportWidth = TransportSpeedStride * TransportSpeedLabels.len
-  TransportHeight = TransportSpeedY + TransportRowHeight
+  SpeedRowX =
+    ViewportWidth - TransportSpeedStride * TransportSpeedLabels.len - 6
   ReplayMismatchPadX = 4
   ReplayMismatchPadY = 3
   InventoryColumns = 8
@@ -142,10 +143,44 @@ const
   ReplayScrubberSpriteId = 8401
   ReplayControlsSpriteId = 8402
   ReplayMismatchSpriteId = 8403
+  ReplayPanelBgSpriteId = 8404
+  GnomeOutlineSpriteBase = 8500
+  TrailDotSpriteBase = 8600
   ReplayTickObjectId = 20_400
   ReplayScrubberObjectId = 20_401
   ReplayControlsObjectId = 20_402
   ReplayMismatchObjectId = 20_403
+  ReplayPanelBgObjectId = 20_404
+  HouseGnomeObjectBase = 21_000
+  HouseGnomeBorderObjectBase = 21_100
+  PlayerBorderObjectId = 21_200
+  InsetBottomObjectId = 21_300
+  InsetOverhangObjectId = 21_301
+  InsetPlayerObjectBase = 21_400
+  InsetPlayerBorderObjectBase = 21_500
+  HouseGnomeZ = 20_500
+  InsetBottomZ = 31_000
+  InsetPlayerZBase = 31_100
+  InsetOverhangZ = 31_500
+  InsetNameZ = 31_600
+  InsetChatZ = 31_601
+  OutlinePad = 1
+  TrailObjectBase = 24_000
+  TrailZ = 50
+  TrailSampleTicks = 6
+  TrailMaxPoints = 5
+  ChatBannerSpriteId = 8700
+  ChatBannerObjectId = 25_000
+  ChatFeedShowFrames = 96
+  ChatFeedMaxItems = 400
+  ChatBannerMaxHearers = 4
+  ChatBannerHearerOverlap = 14
+  PortraitGridColumns = 3
+  ChatBannerPortraitMargin = 10
+  ChatBannerPortraitY = 2
+  ChatBannerTextGap = 8
+  ChatBannerAreaHeight = 64
+  ReplayBarTotalHeight = ChatBannerAreaHeight + ReplayPanelHeight
   GlobalPanelScoreSpriteBase = 8200
   GlobalPanelNameSpriteBase = 8300
   GlobalPanelScoreObjectBase = 20_100
@@ -159,6 +194,7 @@ const
   NameMaxChars = 14
   ChatLifetimeTicks = 5 * 24
   ChatPad = 3
+  ChatWrapChars = 20
   ChatPointerHeight = 3
   ChatGapY = 3
   NamePadX = 2
@@ -234,6 +270,19 @@ type
     rect: Rect
     inventory: FoodCounts
 
+  TrailPoint = object
+    x, y: int
+    mapIndex: int
+
+  ChatFeedPerson = object
+    name: string
+    gnomeIndex: int
+
+  ChatFeedItem = object
+    speaker: ChatFeedPerson
+    hearers: seq[ChatFeedPerson]
+    message: string
+
   House = object
     rect: Rect
     valid: bool
@@ -300,6 +349,12 @@ type
     scoreTicks: int
     dinnerDone: bool
     playerInitPacket: seq[uint8]
+    trails: seq[seq[TrailPoint]]  ## viewer-only history, never hashed
+    chatBanner: RgbaSprite
+    portraits: seq[RgbaSprite]
+    chatFeed: seq[ChatFeedItem]   ## viewer-only delay chat, never hashed
+    chatFeedIndex: int
+    chatFeedFrames: int
 
   KeyframeState = object
     ## Dynamic simulation state stored in one replay keyframe. Static
@@ -318,6 +373,10 @@ type
   PlayerViewerState = ref object
     initialized: bool
     selectedPlayerIndex: int
+    selectedHouseNumber: int  ## 0 = none, 1..HouseCount = house interior view
+    pendingMapClick: bool
+    pendingMapClickX: int
+    pendingMapClickY: int
     spriteCache: seq[SpriteCacheEntry]
     mouseX: int
     mouseY: int
@@ -568,6 +627,48 @@ proc loadFoodSprites(path: string): FoodSprites =
     FoodSpriteSize
   )
 
+proc loadChatBanner(path: string): RgbaSprite =
+  ## Loads and crops the delay-chat banner art to its solid bounds.
+  if not fileExists(path):
+    return newRgbaSprite(0, 0)
+  let
+    full = imageRgbaSprite(readAsepriteImage(path))
+    bounds = full.solidBounds()
+  if not bounds.found:
+    return newRgbaSprite(0, 0)
+  result = newRgbaSprite(
+    bounds.maxX - bounds.minX + 1,
+    bounds.maxY - bounds.minY + 1
+  )
+  for y in 0 ..< result.height:
+    for x in 0 ..< result.width:
+      result.putPixel(
+        x,
+        y,
+        full.rgbaSpriteAt(bounds.minX + x, bounds.minY + y)
+      )
+
+proc loadPortraits(dataRoot: string): seq[RgbaSprite] =
+  ## Loads the gnome profile portraits used by the delay chat banner
+  ## from a 3x3 grid sheet.
+  let path = dataRoot / "gnome_faces.aseprite"
+  if not fileExists(path):
+    return
+  let image = readAsepriteImage(path)
+  if image.width mod PortraitGridColumns != 0:
+    raise newException(
+      HeartleafError,
+      "Gnome faces sheet width must be a multiple of " &
+        $PortraitGridColumns & "."
+    )
+  let cellSize = image.width div PortraitGridColumns
+  for i in 0 ..< HouseCount:
+    result.add(image.cellRgbaSprite(
+      i mod PortraitGridColumns,
+      i div PortraitGridColumns,
+      cellSize
+    ))
+
 proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   ## Initializes the Heartleaf simulation.
   result = SimServer()
@@ -597,6 +698,9 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   if result.gnomes.len == 0:
     raise newException(HeartleafError, "Gnome sheet has no gnomes.")
   result.textFont = readPixelFont(tiny5Path)
+  result.chatBanner = loadChatBanner(dataRoot / "chatbanner.aseprite")
+  result.portraits = loadPortraits(dataRoot)
+  result.chatFeedIndex = -1
   result.players = @[]
   result.dayNumber = 1
   result.playerInitPacket.addSpriteProtocolInit(
@@ -721,13 +825,31 @@ proc blitChatText(
   ## Blits white Tiny5 text into a sprite.
   sim.blitTinyText(target, text, x, y, rgba(255, 255, 255, 255))
 
+proc chatBubbleLines(text: string): seq[string] =
+  ## Splits one chat message on the first space after the wrap width.
+  result = @[text]
+  if text.len <= ChatWrapChars:
+    return
+  var breakAt = -1
+  for i in ChatWrapChars ..< text.len:
+    if text[i] == ' ':
+      breakAt = i
+      break
+  if breakAt <= 0 or breakAt >= text.len - 1:
+    return
+  result = @[text[0 ..< breakAt], text[breakAt + 1 .. ^1]]
+
 proc speechBubbleSprite(sim: SimServer, text: string): RgbaSprite =
   ## Builds one speech bubble sprite for a player message.
   let
-    textWidth = max(6, sim.chatTextWidth(text))
+    lines = chatBubbleLines(text)
     lineHeight = sim.textFont.height
+  var textWidth = 6
+  for line in lines:
+    textWidth = max(textWidth, sim.chatTextWidth(line))
+  let
     bodyWidth = textWidth + ChatPad * 2
-    bodyHeight = lineHeight + ChatPad * 2
+    bodyHeight = lineHeight * lines.len + ChatPad * 2
     fill = rgba(TextBackR, TextBackG, TextBackB, 255)
   result = newRgbaSprite(bodyWidth, bodyHeight + ChatPointerHeight)
   result.fillRect(0, 0, bodyWidth, bodyHeight, fill)
@@ -736,7 +858,13 @@ proc speechBubbleSprite(sim: SimServer, text: string): RgbaSprite =
     let span = ChatPointerHeight - y - 1
     for x in pointerX - span .. pointerX + span:
       result.putPixel(x, bodyHeight + y, fill)
-  sim.blitChatText(result, text, ChatPad, ChatPad)
+  for i, line in lines:
+    sim.blitChatText(
+      result,
+      line,
+      ChatPad + (textWidth - sim.chatTextWidth(line)) div 2,
+      ChatPad + i * lineHeight
+    )
 
 proc nameTagSprite(sim: SimServer, text: string): RgbaSprite =
   ## Builds one compact player name tag sprite.
@@ -1662,6 +1790,148 @@ proc addScreenOverlay(
     spriteId
   )
 
+const
+  OutlineWhite = ColorRGBA(r: 255, g: 255, b: 255, a: 255)
+  OutlineYellow = ColorRGBA(
+    r: GlobalPanelSelectedR,
+    g: GlobalPanelSelectedG,
+    b: GlobalPanelSelectedB,
+    a: 255
+  )
+  TrailColors = [
+    ColorRGBA(r: 235, g: 90, b: 80, a: 220),
+    ColorRGBA(r: 245, g: 150, b: 60, a: 220),
+    ColorRGBA(r: 250, g: 220, b: 80, a: 220),
+    ColorRGBA(r: 120, g: 210, b: 90, a: 220),
+    ColorRGBA(r: 90, g: 220, b: 210, a: 220),
+    ColorRGBA(r: 100, g: 150, b: 250, a: 220),
+    ColorRGBA(r: 175, g: 110, b: 250, a: 220),
+    ColorRGBA(r: 245, g: 120, b: 200, a: 220),
+    ColorRGBA(r: 245, g: 245, b: 245, a: 220)
+  ]
+
+proc gnomeOutlineSprite(
+  sim: SimServer,
+  gnomeIndex: int,
+  direction: Direction,
+  color: ColorRGBA
+): RgbaSprite =
+  ## Builds a 1px pixel outline hugging one gnome frame's silhouette.
+  let frame = sim.gnomes[gnomeIndex].frames[direction]
+  result = newRgbaSprite(
+    frame.width + OutlinePad * 2,
+    frame.height + OutlinePad * 2
+  )
+  for y in 0 ..< result.height:
+    for x in 0 ..< result.width:
+      if frame.rgbaSpriteAt(x - OutlinePad, y - OutlinePad).a > 0:
+        continue
+      block neighbors:
+        for dy in -1 .. 1:
+          for dx in -1 .. 1:
+            if frame.rgbaSpriteAt(
+              x - OutlinePad + dx,
+              y - OutlinePad + dy
+            ).a > 0:
+              result.putPixel(x, y, color)
+              break neighbors
+
+proc gnomeOutlineSpriteId(
+  gnomeIndex: int,
+  direction: Direction,
+  yellow: bool
+): int =
+  ## Returns the sprite id for one cached gnome outline variant.
+  GnomeOutlineSpriteBase +
+    (gnomeIndex * DirectionCount + ord(direction)) * 2 +
+    ord(yellow)
+
+proc addGnomeOutline(
+  packet: var seq[uint8],
+  sim: SimServer,
+  cache: var seq[SpriteCacheEntry],
+  gnomeIndex: int,
+  direction: Direction,
+  yellow: bool,
+  objectId,
+  screenX,
+  screenY,
+  z: int
+) =
+  ## Appends one silhouette outline object behind a gnome sprite.
+  let
+    spriteId = gnomeOutlineSpriteId(gnomeIndex, direction, yellow)
+    color =
+      if yellow:
+        OutlineYellow
+      else:
+        OutlineWhite
+  packet.addRgbaSpriteCached(
+    cache,
+    spriteId,
+    sim.gnomeOutlineSprite(gnomeIndex, direction, color),
+    "gnome outline " & $gnomeIndex & " " & directionLabel(direction) &
+      (if yellow: " yellow" else: " white")
+  )
+  packet.addObject(
+    objectId,
+    screenX - OutlinePad,
+    screenY - OutlinePad,
+    z,
+    MapLayerId,
+    spriteId
+  )
+
+proc trailDotSprite(color: ColorRGBA): RgbaSprite =
+  ## Builds one 5x5 round trail dot with a dark rim.
+  let
+    fill = ColorRGBA(r: color.r, g: color.g, b: color.b, a: 255)
+    rim = ColorRGBA(
+      r: fill.r div 3,
+      g: fill.g div 3,
+      b: fill.b div 3,
+      a: 255
+    )
+  result = newRgbaSprite(5, 5)
+  for y in 0 ..< 5:
+    for x in 0 ..< 5:
+      if (x == 0 or x == 4) and (y == 0 or y == 4):
+        continue
+      result.putPixel(x, y, rim)
+  for y in 1 .. 3:
+    for x in 1 .. 3:
+      result.putPixel(x, y, fill)
+
+proc addTrailObjects(
+  packet: var seq[uint8],
+  sim: SimServer,
+  cache: var seq[SpriteCacheEntry]
+) =
+  ## Appends per-player movement trail dots on the main map.
+  for i, trail in sim.trails:
+    if trail.len == 0:
+      continue
+    let
+      colorIndex = i mod TrailColors.len
+      spriteId = TrailDotSpriteBase + colorIndex
+    packet.addRgbaSpriteCached(
+      cache,
+      spriteId,
+      trailDotSprite(TrailColors[colorIndex]),
+      "trail dot " & $colorIndex
+    )
+    for j, point in trail:
+      if point.mapIndex != MainMapIndex:
+        continue
+      packet.addObject(
+        TrailObjectBase + i * TrailMaxPoints + j,
+        point.x - 2,
+        point.y - 2,
+        TrailZ,
+        MapLayerId,
+        spriteId
+      )
+
 proc addPlayerObjects(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1670,7 +1940,8 @@ proc addPlayerObjects(
   cameraX,
   cameraY,
   viewportWidth,
-  viewportHeight: int
+  viewportHeight: int,
+  highlightIndex = -1
 ) =
   ## Appends all player sprite objects for one map.
   for i, player in sim.players:
@@ -1696,6 +1967,18 @@ proc addPlayerObjects(
       MapLayerId,
       playerSpriteId(player.gnomeIndex, player.direction)
     )
+    if i == highlightIndex:
+      packet.addGnomeOutline(
+        sim,
+        cache,
+        player.gnomeIndex,
+        player.direction,
+        yellow = true,
+        PlayerBorderObjectId,
+        screenX,
+        screenY,
+        player.y + 99
+      )
     let nameY = packet.addNameTag(
       sim,
       cache,
@@ -1718,6 +2001,119 @@ proc addPlayerObjects(
       viewportWidth,
       viewportHeight
     )
+
+proc addHouseGnomeObjects(
+  packet: var seq[uint8],
+  sim: SimServer,
+  cache: var seq[SpriteCacheEntry]
+) =
+  ## Draws gnomes who are inside a house on the outside map at that
+  ## house, outlined white for guests and yellow for the house owner.
+  var houseSlots: array[HouseCount, int]
+  for i, player in sim.players:
+    let houseIndex = player.mapIndex - HomeMapIndexBase
+    if houseIndex < 0 or houseIndex >= HouseCount:
+      continue
+    if not sim.houses[houseIndex].valid:
+      continue
+    let
+      rect = sim.houses[houseIndex].rect
+      stride = GnomeSpriteSize + OutlinePad * 2 + 2
+      columns = max(1, rect.w div stride)
+      slot = houseSlots[houseIndex]
+      x = rect.x + (slot mod columns) * stride
+      y = rect.y + (slot div columns) * stride - GnomeSpriteSize
+      isOwner = player.homeFlag == HomeMapIndexBase + houseIndex
+    inc houseSlots[houseIndex]
+    packet.addObject(
+      HouseGnomeObjectBase + i,
+      x,
+      y,
+      HouseGnomeZ + slot * 2 + 1,
+      MapLayerId,
+      playerSpriteId(player.gnomeIndex, DirDown)
+    )
+    packet.addGnomeOutline(
+      sim,
+      cache,
+      player.gnomeIndex,
+      DirDown,
+      yellow = isOwner,
+      HouseGnomeBorderObjectBase + i,
+      x,
+      y,
+      HouseGnomeZ + slot * 2
+    )
+
+proc addHouseInsetView(
+  packet: var seq[uint8],
+  sim: SimServer,
+  cache: var seq[SpriteCacheEntry],
+  houseIndex: int
+) =
+  ## Draws one house interior centered over the global map view.
+  let
+    homeMap = sim.homeMaps[houseIndex]
+    tintIndex = sim.dayTintIndex()
+    insetX = max(0, (sim.mainMap.width - homeMap.width) div 2)
+    insetY = max(0, (sim.mainMap.height - homeMap.height) div 2)
+    mapIndex = houseIndex.homeMapIndex()
+  packet.addObject(
+    InsetBottomObjectId,
+    insetX,
+    insetY,
+    InsetBottomZ,
+    MapLayerId,
+    homeBottomSpriteId(tintIndex)
+  )
+  for i, player in sim.players:
+    if player.mapIndex != mapIndex:
+      continue
+    let
+      screenX = insetX + player.x
+      screenY = insetY + player.y
+    packet.addObject(
+      InsetPlayerObjectBase + i,
+      screenX,
+      screenY,
+      clamp(
+        InsetPlayerZBase + player.y,
+        InsetPlayerZBase,
+        InsetOverhangZ - 1
+      ),
+      MapLayerId,
+      playerSpriteId(player.gnomeIndex, player.direction)
+    )
+    let nameY = packet.addNameTag(
+      sim,
+      cache,
+      player,
+      i,
+      screenX,
+      screenY,
+      InsetNameZ,
+      sim.mainMap.width,
+      sim.mainMap.height
+    )
+    packet.addSpeechBubble(
+      sim,
+      cache,
+      player,
+      i,
+      screenX,
+      nameY,
+      InsetChatZ,
+      sim.mainMap.width,
+      sim.mainMap.height
+    )
+  packet.addObject(
+    InsetOverhangObjectId,
+    insetX,
+    insetY,
+    InsetOverhangZ,
+    MapLayerId,
+    homeOverhangSpriteId(tintIndex)
+  )
 
 proc addGardenObjects(
   packet: var seq[uint8],
@@ -1823,7 +2219,8 @@ proc addPlayerView(
   packet: var seq[uint8],
   sim: SimServer,
   playerIndex: int,
-  cache: var seq[SpriteCacheEntry]
+  cache: var seq[SpriteCacheEntry],
+  highlight = false
 ): bool =
   ## Appends one selected player's map and UI view.
   if playerIndex < 0 or playerIndex >= sim.players.len:
@@ -1875,7 +2272,12 @@ proc addPlayerView(
     cameraX,
     cameraY,
     ViewportWidth,
-    ViewportHeight
+    ViewportHeight,
+    highlightIndex =
+      if highlight:
+        playerIndex
+      else:
+        -1
   )
   packet.addObject(
     OverhangObjectId,
@@ -1916,6 +2318,7 @@ proc addGlobalWorldView(
     sim.mainMap.width,
     sim.mainMap.height
   )
+  packet.addTrailObjects(sim, cache)
   packet.addPlayerObjects(
     sim,
     cache,
@@ -1925,6 +2328,7 @@ proc addGlobalWorldView(
     sim.mainMap.width,
     sim.mainMap.height
   )
+  packet.addHouseGnomeObjects(sim, cache)
   packet.addObject(
     OverhangObjectId,
     0,
@@ -1955,34 +2359,34 @@ proc buildPlayerPacket(
   discard result.addPlayerView(sim, playerIndex, nextState.spriteCache)
 
 proc replayCommandAt(layer, x, y: int): char =
-  ## Returns the replay transport command under a UI coordinate.
-  if layer != ReplayBottomLeftLayerId:
+  ## Returns the replay transport command under a UI coordinate. The
+  ## transport buttons and speed labels share one row on the center bar.
+  if layer != ReplayCenterBottomLayerId:
     return '\0'
-  let
-    localX = x - TransportX
-    localY = y - TransportY
-  if localX < 0:
+  let localY = y - ChatBannerAreaHeight - TransportRowY
+  if localY < 0 or localY >= TransportRowHeight:
     return '\0'
-  if localY >= 0 and localY < TransportRowHeight:
-    let index = localX div TransportButtonStride
-    if index < 0 or index >= TransportButtonCount:
-      return '\0'
-    if localX - index * TransportButtonStride >= TransportButtonWidth:
+  let buttonX = x - TransportButtonsX
+  if buttonX >= 0 and
+      buttonX < TransportButtonCount * TransportButtonStride:
+    let index = buttonX div TransportButtonStride
+    if buttonX - index * TransportButtonStride >= TransportButtonWidth:
       return '\0'
     case index
     of 0: return '<'
     of 1: return ' '
     of 2: return 'e'
     else: return 'r'
-  if localY >= TransportSpeedY and localY < TransportSpeedY +
-      TransportRowHeight:
-    let index = localX div TransportSpeedStride
-    if index < 0 or index >= TransportSpeedCommands.len:
-      return '\0'
-    if localX - index * TransportSpeedStride >= TransportSpeedWidth:
+  let speedX = x - SpeedRowX
+  if speedX >= 0 and
+      speedX < TransportSpeedCommands.len * TransportSpeedStride:
+    let index = speedX div TransportSpeedStride
+    if speedX - index * TransportSpeedStride >= TransportSpeedWidth:
       return '\0'
     return TransportSpeedCommands[index]
   '\0'
+
+const ReplayControlsBg = ColorRGBA(r: 0, g: 0, b: 0, a: ReplayControlsBgAlpha)
 
 proc replayScrubTickAt(
   layer, x, y, maxTick: int,
@@ -1994,7 +2398,7 @@ proc replayScrubTickAt(
   let
     scrubberX = max(0, (ViewportWidth - ReplayScrubberWidth) div 2)
     localX = x - scrubberX
-    localY = y - ReplayScrubberY
+    localY = y - ChatBannerAreaHeight - ReplayScrubberY
   if requireInside and (
       localX < 0 or localX >= ReplayScrubberWidth or
       localY < 0 or localY >= ReplayScrubberHeight
@@ -2005,13 +2409,14 @@ proc replayScrubTickAt(
   let clampedX = clamp(localX, 0, ReplayScrubberWidth - 1)
   clamp((clampedX * maxTick) div (ReplayScrubberWidth - 1), 0, maxTick)
 
-proc buildReplayScrubberSprite(tick, maxTick: int): RgbaSprite =
-  ## Builds the compact replay scrubber sprite.
+proc buildReplayScrubberSprite(tick, maxTick, dayTicks: int): RgbaSprite =
+  ## Builds the compact replay scrubber sprite with dinner-time pips.
   result = newRgbaSprite(ReplayScrubberWidth, ReplayScrubberHeight)
   let
     track = rgba(90, 90, 90, 255)
     knob = rgba(255, 255, 255, 255)
     knobEdge = rgba(180, 180, 180, 255)
+    pip = rgba(255, 196, 64, 255)
     knobX =
       if maxTick > 0:
         clamp(
@@ -2023,6 +2428,19 @@ proc buildReplayScrubberSprite(tick, maxTick: int): RgbaSprite =
         0
   for x in 0 ..< ReplayScrubberWidth:
     result.putPixel(x, ReplayScrubberTrackY, track)
+  if maxTick > 0 and dayTicks > 0:
+    let dinnerOffset =
+      dayTicks * (DinnerMinutes - DayStartMinutes) div DayTotalMinutes
+    var dinnerTick = dinnerOffset
+    while dinnerTick <= maxTick:
+      let x = clamp(
+        (dinnerTick * (ReplayScrubberWidth - 1)) div maxTick,
+        0,
+        ReplayScrubberWidth - 1
+      )
+      for y in 0 ..< ReplayScrubberHeight:
+        result.putPixel(x, y, pip)
+      dinnerTick += dayTicks
   for x in 0 .. knobX:
     result.putPixel(x, ReplayScrubberTrackY, knob)
   for y in 0 ..< ReplayScrubberHeight:
@@ -2038,8 +2456,8 @@ proc buildReplayControlsSprite(
   looping: bool,
   speed: int
 ): RgbaSprite =
-  ## Builds the replay transport controls sprite from text buttons.
-  result = newRgbaSprite(TransportWidth, TransportHeight)
+  ## Builds the one-row transport buttons and speed labels sprite.
+  result = newRgbaSprite(ViewportWidth, TransportRowHeight)
   let
     bright = rgba(255, 255, 255, 255)
     dim = rgba(128, 128, 128, 255)
@@ -2055,7 +2473,13 @@ proc buildReplayControlsSprite(
         if looping: bright else: dim
       else:
         bright
-    sim.blitTinyText(result, label, i * TransportButtonStride, 0, color)
+    sim.blitTinyText(
+      result,
+      label,
+      TransportButtonsX + i * TransportButtonStride,
+      0,
+      color
+    )
   for i, label in TransportSpeedLabels:
     let color =
       if TransportSpeedValues[i] == speed:
@@ -2065,13 +2489,14 @@ proc buildReplayControlsSprite(
     sim.blitTinyText(
       result,
       label,
-      i * TransportSpeedStride,
-      TransportSpeedY,
+      SpeedRowX + i * TransportSpeedStride,
+      0,
       color
     )
 
 proc addReplayControlLayers(packet: var seq[uint8]) =
-  ## Adds the fixed UI layers used by the replay timing controls.
+  ## Adds the fixed UI layer shared by the delay chat banner and the
+  ## replay timing controls.
   packet.addLayer(
     ReplayCenterBottomLayerId,
     ReplayCenterBottomLayerKind,
@@ -2080,17 +2505,7 @@ proc addReplayControlLayers(packet: var seq[uint8]) =
   packet.addViewport(
     ReplayCenterBottomLayerId,
     ViewportWidth,
-    ReplayPanelHeight
-  )
-  packet.addLayer(
-    ReplayBottomLeftLayerId,
-    ReplayBottomLeftLayerKind,
-    UiLayerFlags
-  )
-  packet.addViewport(
-    ReplayBottomLeftLayerId,
-    ViewportWidth,
-    ReplayPanelHeight
+    ReplayBarTotalHeight
   )
 
 proc addReplayMismatchWarning(
@@ -2157,6 +2572,22 @@ proc addReplayControls(
 ) =
   ## Adds the replay timing controls for one replay viewer frame.
   packet.addReplayControlLayers()
+  var panelBg = newRgbaSprite(ViewportWidth, ReplayPanelHeight)
+  panelBg.fillRect(0, 0, panelBg.width, panelBg.height, ReplayControlsBg)
+  packet.addRgbaSpriteCached(
+    cache,
+    ReplayPanelBgSpriteId,
+    panelBg,
+    "replay panel bg"
+  )
+  packet.addObject(
+    ReplayPanelBgObjectId,
+    0,
+    ChatBannerAreaHeight,
+    -1,
+    ReplayCenterBottomLayerId,
+    ReplayPanelBgSpriteId
+  )
   let
     controlTick = max(0, replayTick)
     controlMaxTick = max(controlTick, replayMaxTick)
@@ -2164,7 +2595,11 @@ proc addReplayControls(
       "TICK " & $controlTick,
       rgba(GlobalPanelTextR, GlobalPanelTextG, GlobalPanelTextB, 255)
     )
-    scrubber = buildReplayScrubberSprite(controlTick, controlMaxTick)
+    scrubber = buildReplayScrubberSprite(
+      controlTick,
+      controlMaxTick,
+      sim.dayTicks
+    )
     controls = sim.buildReplayControlsSprite(playing, looping, replaySpeed)
   packet.addRgbaSpriteCached(
     cache,
@@ -2175,7 +2610,7 @@ proc addReplayControls(
   packet.addObject(
     ReplayTickObjectId,
     max(0, (ViewportWidth - tickText.width) div 2),
-    0,
+    ChatBannerAreaHeight + ReplayTickTextY,
     0,
     ReplayCenterBottomLayerId,
     ReplayTickSpriteId
@@ -2189,7 +2624,7 @@ proc addReplayControls(
   packet.addObject(
     ReplayScrubberObjectId,
     max(0, (ViewportWidth - ReplayScrubberWidth) div 2),
-    ReplayScrubberY,
+    ChatBannerAreaHeight + ReplayScrubberY,
     0,
     ReplayCenterBottomLayerId,
     ReplayScrubberSpriteId
@@ -2202,13 +2637,154 @@ proc addReplayControls(
   )
   packet.addObject(
     ReplayControlsObjectId,
-    TransportX,
-    TransportY,
     0,
-    ReplayBottomLeftLayerId,
+    ChatBannerAreaHeight + TransportRowY,
+    0,
+    ReplayCenterBottomLayerId,
     ReplayControlsSpriteId
   )
   packet.addReplayMismatchWarning(sim, cache, mismatchTick)
+
+proc flippedHorizontal(sprite: RgbaSprite): RgbaSprite =
+  ## Returns one horizontally mirrored sprite.
+  result = newRgbaSprite(sprite.width, sprite.height)
+  for y in 0 ..< sprite.height:
+    for x in 0 ..< sprite.width:
+      result.putPixel(sprite.width - 1 - x, y, sprite.rgbaSpriteAt(x, y))
+
+proc blitSprite(target: var RgbaSprite, source: RgbaSprite, ox, oy: int) =
+  ## Blits non-transparent source pixels into a target sprite.
+  for y in 0 ..< source.height:
+    for x in 0 ..< source.width:
+      let color = source.rgbaSpriteAt(x, y)
+      if color.a > 0:
+        target.putPixel(ox + x, oy + y, color)
+
+proc bannerPortrait(sim: SimServer, gnomeIndex: int): RgbaSprite =
+  ## Returns the profile portrait for one gnome index.
+  if sim.portraits.len == 0:
+    return newRgbaSprite(0, 0)
+  sim.portraits[gnomeIndex mod sim.portraits.len]
+
+proc bannerMessageLines(
+  sim: SimServer,
+  text: string,
+  maxWidth: int
+): seq[string] =
+  ## Greedily wraps banner text into pixel-width limited lines.
+  var line = ""
+  for word in text.splitWhitespace():
+    let candidate =
+      if line.len == 0:
+        word
+      else:
+        line & " " & word
+    if line.len > 0 and sim.chatTextWidth(candidate) > maxWidth:
+      result.add(line)
+      line = word
+    else:
+      line = candidate
+  if line.len > 0:
+    result.add(line)
+
+proc chatBannerSprite(sim: SimServer, item: ChatFeedItem): RgbaSprite =
+  ## Builds the delay-chat banner: the flipped speaker on the left, the
+  ## message in the middle, overlapping hearers on the right, and
+  ## global-view style name tags along the bottom.
+  result = sim.chatBanner
+  if result.width == 0:
+    return
+  let
+    ink = ColorRGBA(r: 0x94, g: 0x5C, b: 0x29, a: 255)
+    speakerPortrait =
+      sim.bannerPortrait(item.speaker.gnomeIndex).flippedHorizontal()
+  result.blitSprite(
+    speakerPortrait,
+    ChatBannerPortraitMargin,
+    ChatBannerPortraitY
+  )
+  let speakerTag = sim.nameTagSprite(item.speaker.name)
+  result.blitSprite(
+    speakerTag,
+    ChatBannerPortraitMargin + speakerPortrait.width div 2 -
+      speakerTag.width div 2,
+    result.height - speakerTag.height - 2
+  )
+  var
+    hearerX = result.width - ChatBannerPortraitMargin
+    tagSpots: seq[tuple[centerX: int, name: string]]
+  for h in 0 ..< min(item.hearers.len, ChatBannerMaxHearers):
+    let portrait = sim.bannerPortrait(item.hearers[h].gnomeIndex)
+    if portrait.width == 0:
+      continue
+    let step =
+      if tagSpots.len == 0:
+        portrait.width
+      else:
+        portrait.width - ChatBannerHearerOverlap
+    hearerX -= step
+    result.blitSprite(portrait, hearerX, ChatBannerPortraitY)
+    tagSpots.add((hearerX + portrait.width div 2, item.hearers[h].name))
+  for spot in tagSpots:
+    let tag = sim.nameTagSprite(spot.name)
+    result.blitSprite(
+      tag,
+      spot.centerX - tag.width div 2,
+      result.height - tag.height - 2
+    )
+  let
+    textLeft =
+      ChatBannerPortraitMargin + speakerPortrait.width + ChatBannerTextGap
+    maxWidth = max(20, hearerX - ChatBannerTextGap - textLeft)
+    lines = sim.bannerMessageLines(item.message, maxWidth)
+    lineHeight = sim.textFont.height + 1
+    blockTop = max(
+      ChatBannerPortraitY,
+      (result.height - 8 - lines.len * lineHeight) div 2
+    )
+  for i, line in lines:
+    sim.blitTinyText(
+      result,
+      line,
+      textLeft + (maxWidth - sim.chatTextWidth(line)) div 2,
+      blockTop + i * lineHeight,
+      ink
+    )
+
+proc addChatBanner(
+  packet: var seq[uint8],
+  sim: SimServer,
+  cache: var seq[SpriteCacheEntry],
+  declareLayer: bool
+) =
+  ## Appends the paced delay-chat banner at the top of the center bar.
+  ## The replay controls declare the shared layer; standalone (live
+  ## global view) callers declare it here instead.
+  if sim.chatFeedIndex < 0 or sim.chatFeedIndex >= sim.chatFeed.len:
+    return
+  let banner = sim.chatBannerSprite(sim.chatFeed[sim.chatFeedIndex])
+  if banner.width == 0:
+    return
+  if declareLayer:
+    packet.addLayer(
+      ReplayCenterBottomLayerId,
+      ReplayCenterBottomLayerKind,
+      UiLayerFlags
+    )
+    packet.addViewport(
+      ReplayCenterBottomLayerId,
+      ViewportWidth,
+      ChatBannerAreaHeight
+    )
+  packet.addRgbaSpriteCached(cache, ChatBannerSpriteId, banner, "chat banner")
+  packet.addObject(
+    ChatBannerObjectId,
+    max(0, (ViewportWidth - banner.width) div 2),
+    0,
+    0,
+    ReplayCenterBottomLayerId,
+    ChatBannerSpriteId
+  )
 
 proc buildGlobalPacket(
   sim: SimServer,
@@ -2233,6 +2809,30 @@ proc buildGlobalPacket(
     nextState.initialized = true
 
   result.addClearObjects()
+  if nextState.pendingMapClick:
+    nextState.pendingMapClick = false
+    let
+      clickX = nextState.pendingMapClickX
+      clickY = nextState.pendingMapClickY
+    if nextState.selectedPlayerIndex >= 0:
+      nextState.selectedPlayerIndex = -1
+    elif nextState.selectedHouseNumber > 0 and
+        nextState.selectedHouseNumber <= HouseCount:
+      let
+        homeMap = sim.homeMaps[nextState.selectedHouseNumber - 1]
+        inset = Rect(
+          x: max(0, (sim.mainMap.width - homeMap.width) div 2),
+          y: max(0, (sim.mainMap.height - homeMap.height) div 2),
+          w: homeMap.width,
+          h: homeMap.height
+        )
+      if not inset.contains(clickX, clickY):
+        nextState.selectedHouseNumber = 0
+    else:
+      for i, house in sim.houses:
+        if house.valid and house.rect.contains(clickX, clickY):
+          nextState.selectedHouseNumber = i + 1
+          break
   let selectedIndex = nextState.selectedGlobalPlayerIndex(sim)
   nextState.selectedPlayerIndex = selectedIndex
   if selectedIndex >= 0:
@@ -2240,10 +2840,18 @@ proc buildGlobalPacket(
     discard result.addPlayerView(
       sim,
       selectedIndex,
-      nextState.spriteCache
+      nextState.spriteCache,
+      highlight = true
     )
   else:
     result.addGlobalWorldView(sim, nextState.spriteCache)
+    if nextState.selectedHouseNumber > 0 and
+        nextState.selectedHouseNumber <= HouseCount:
+      result.addHouseInsetView(
+        sim,
+        nextState.spriteCache,
+        nextState.selectedHouseNumber - 1
+      )
   result.addGlobalScorePanel(sim, nextState.spriteCache, selectedIndex)
   if replayControls:
     result.addReplayControls(
@@ -2256,6 +2864,7 @@ proc buildGlobalPacket(
       replayLooping,
       replayMismatchTick
     )
+  result.addChatBanner(sim, nextState.spriteCache, declareLayer = not replayControls)
 
 proc updateDirection(player: var Player, input: InputState) =
   ## Updates the player's facing direction from held input.
@@ -2611,6 +3220,83 @@ proc startScoreScreen(sim: SimServer) =
   for i in 0 ..< sim.players.len:
     sim.teleportPlayerToOwnHome(i)
 
+proc replayChatVisibleTo(sim: SimServer, speaker, viewer: Player): bool =
+  ## Whether `viewer` would see `speaker`'s current speech bubble — the
+  ## in-game "hearing range". Chat has no explicit radius: a bubble is only
+  ## delivered to a viewer when it lands inside that viewer's viewport (the
+  ## camera follows the viewer, clamped at map edges). This mirrors the exact
+  ## geometry of `addNameTag` + `addSpeechBubble` on the render path.
+  if speaker.message.len == 0 or speaker.messageTicks <= 0:
+    return false
+  if speaker.mapIndex != viewer.mapIndex:  # a house wall blocks the bubble
+    return false
+  let
+    cameraX = sim.cameraXFor(viewer)
+    cameraY = sim.cameraYFor(viewer)
+    screenX = speaker.x - cameraX
+    screenY = speaker.y - cameraY
+    tag = sim.nameTagSprite(speaker.playerName)
+    nameY = screenY - tag.height - NameGapY
+    bubble = sim.speechBubbleSprite(speaker.message)
+    bubbleX = screenX + GnomeSpriteSize div 2 - bubble.width div 2
+    bubbleY = nameY - bubble.height - ChatGapY
+  rectVisible(bubbleX, bubbleY, bubble.width, bubble.height,
+    ViewportWidth, ViewportHeight)
+
+proc replayChatAudience*(sim: SimServer, speakerSlot: int): seq[int] =
+  ## Slots of the OTHER players who would currently see `speakerSlot`'s chat
+  ## bubble — everyone in hearing range at this tick. Empty when the speaker
+  ## has no active message. Evaluate it on the tick the message is set; the
+  ## bubble then lingers (`ChatLifetimeTicks`), so someone who walks up later
+  ## can also see it — this captures the audience at the moment of speaking.
+  if speakerSlot < 0 or speakerSlot >= sim.players.len:
+    return @[]
+  let speaker = sim.players[speakerSlot]
+  for slot, viewer in sim.players:
+    if slot != speakerSlot and sim.replayChatVisibleTo(speaker, viewer):
+      result.add(slot)
+
+proc captureChatFeed(sim: SimServer) =
+  ## Queues freshly spoken chats with their audience for the delay chat.
+  ## Messages nobody heard are skipped.
+  for i, player in sim.players:
+    if player.message.len == 0 or player.messageTicks != ChatLifetimeTicks:
+      continue
+    let audience = sim.replayChatAudience(i)
+    if audience.len == 0:
+      continue
+    var item = ChatFeedItem(
+      speaker: ChatFeedPerson(
+        name: player.playerName,
+        gnomeIndex: player.gnomeIndex
+      ),
+      message: player.message
+    )
+    for slot in audience:
+      item.hearers.add(ChatFeedPerson(
+        name: sim.players[slot].playerName,
+        gnomeIndex: sim.players[slot].gnomeIndex
+      ))
+    sim.chatFeed.add(item)
+  while sim.chatFeed.len > ChatFeedMaxItems and sim.chatFeedIndex > 0:
+    sim.chatFeed.delete(0)
+    dec sim.chatFeedIndex
+
+proc advanceChatFeed*(sim: SimServer) =
+  ## Advances the paced delay-chat cursor by one render frame. Queued
+  ## messages each stay up long enough to be read, however fast the
+  ## simulation is running.
+  if sim.chatFeedIndex < 0:
+    if sim.chatFeed.len > 0:
+      sim.chatFeedIndex = 0
+      sim.chatFeedFrames = 0
+    return
+  inc sim.chatFeedFrames
+  if sim.chatFeedFrames >= ChatFeedShowFrames and
+      sim.chatFeedIndex + 1 < sim.chatFeed.len:
+    inc sim.chatFeedIndex
+    sim.chatFeedFrames = 0
+
 proc step*(sim: SimServer, inputs: openArray[InputState]) =
   ## Advances the Heartleaf simulation by one tick.
   inc sim.tickCount
@@ -2621,6 +3307,7 @@ proc step*(sim: SimServer, inputs: openArray[InputState]) =
       sim.startDay()
     return
 
+  sim.captureChatFeed()
   for i in 0 ..< sim.players.len:
     let input =
       if i < inputs.len:
@@ -2635,6 +3322,17 @@ proc step*(sim: SimServer, inputs: openArray[InputState]) =
   for i in 0 ..< sim.players.len:
     sim.moveAxis(sim.players[i], true)
     sim.moveAxis(sim.players[i], false)
+  if sim.tickCount mod TrailSampleTicks == 0:
+    while sim.trails.len < sim.players.len:
+      sim.trails.add(@[])
+    for i, player in sim.players:
+      sim.trails[i].add(TrailPoint(
+        x: player.playerFootX(),
+        y: player.playerFootY(),
+        mapIndex: player.mapIndex
+      ))
+      if sim.trails[i].len > TrailMaxPoints:
+        sim.trails[i].delete(0)
   sim.updateMessages()
   inc sim.dayTick
   if not sim.dinnerDone and sim.currentDayMinutes() >= DinnerTallyMinutes:
@@ -2826,6 +3524,10 @@ proc seekReplay*(replay: var ReplayPlayer, sim: SimServer, tick: int) =
   let keyframe = replay.keyframes[replay.replayKeyframeIndex(tick)]
   sim.restoreKeyframe(keyframe.simBytes)
   replay.restoreReplayKeyframeCursors(keyframe)
+  sim.trails.setLen(0)
+  sim.chatFeed.setLen(0)
+  sim.chatFeedIndex = -1
+  sim.chatFeedFrames = 0
   while sim.tickCount < tick and replay.hashIndex < replay.data.hashes.len:
     replay.stepReplay(sim)
 
@@ -2930,7 +3632,35 @@ proc globalPanelClickedPlayer(message: Message): int =
       if row >= 0 and row < HouseCount:
         return row
     of SpriteClientChatMessage, SpriteClientInputMessage,
-        SpriteClientReadyMessage, SpriteClientDebugSpriteMessage:
+        SpriteClientReadyMessage, SpriteClientDebugSpriteMessage,
+        SpriteClientSpritesOffMessage:
+      discard
+
+proc globalMapClickAt(message: Message): tuple[hit: bool, x, y: int] =
+  ## Returns the map-layer click position in one viewer message.
+  result = (false, 0, 0)
+  if message.kind != BinaryMessage:
+    return
+  var
+    x = 0
+    y = 0
+    layer = -1
+  for item in message.data.parseSpriteClientMessages():
+    case item.kind
+    of SpriteClientMouseMoveMessage:
+      x = item.x
+      y = item.y
+      layer =
+        if item.hasLayer:
+          item.layer
+        else:
+          -1
+    of SpriteClientMouseButtonMessage:
+      if layer == MapLayerId and item.button == 1'u8 and item.down:
+        return (true, x, y)
+    of SpriteClientChatMessage, SpriteClientInputMessage,
+        SpriteClientReadyMessage, SpriteClientDebugSpriteMessage,
+        SpriteClientSpritesOffMessage:
       discard
 
 proc applyReplayViewerMessage(state: PlayerViewerState, data: string) =
@@ -2959,7 +3689,7 @@ proc applyReplayViewerMessage(state: PlayerViewerState, data: string) =
       for ch in item.text:
         state.replayCommands.add(ch)
     of SpriteClientInputMessage, SpriteClientReadyMessage,
-        SpriteClientDebugSpriteMessage:
+        SpriteClientDebugSpriteMessage, SpriteClientSpritesOffMessage:
       discard
 
 proc drainReplayViewerInput(
@@ -3281,6 +4011,19 @@ proc websocketHandler(
                 -1
               else:
                 clickedPlayer
+    let mapClick = message.globalMapClickAt()
+    if mapClick.hit:
+      {.gcsafe.}:
+        withLock appState.lock:
+          var state: PlayerViewerState
+          if websocket in appState.globalViewers:
+            state = appState.globalViewers[websocket]
+          elif websocket in appState.replayViewers:
+            state = appState.replayViewers[websocket]
+          if state != nil:
+            state.pendingMapClick = true
+            state.pendingMapClickX = mapClick.x
+            state.pendingMapClickY = mapClick.y
     if message.kind == BinaryMessage:
       {.gcsafe.}:
         withLock appState.lock:
@@ -3457,6 +4200,7 @@ proc runServerLoop*(
 
     let wasScoring = sim.scoreTicks > 0
     sim.step(inputs)
+    sim.advanceChatFeed()
     replayWriter.writeHash(uint32(sim.tickCount), sim.gameHash())
     if not wasScoring and sim.scoreTicks > 0:
       sim.writeArtifacts(runtimeConfig)
@@ -3728,42 +4472,6 @@ proc snapshotReplayGardens*(sim: SimServer): seq[ReplayGardenSnapshot] =
       foodTotal: foodTotal
     ))
 
-proc replayChatVisibleTo(sim: SimServer, speaker, viewer: Player): bool =
-  ## Whether `viewer` would see `speaker`'s current speech bubble — the
-  ## in-game "hearing range". Chat has no explicit radius: a bubble is only
-  ## delivered to a viewer when it lands inside that viewer's viewport (the
-  ## camera follows the viewer, clamped at map edges). This mirrors the exact
-  ## geometry of `addNameTag` + `addSpeechBubble` on the render path.
-  if speaker.message.len == 0 or speaker.messageTicks <= 0:
-    return false
-  if speaker.mapIndex != viewer.mapIndex:  # a house wall blocks the bubble
-    return false
-  let
-    cameraX = sim.cameraXFor(viewer)
-    cameraY = sim.cameraYFor(viewer)
-    screenX = speaker.x - cameraX
-    screenY = speaker.y - cameraY
-    tag = sim.nameTagSprite(speaker.playerName)
-    nameY = screenY - tag.height - NameGapY
-    bubble = sim.speechBubbleSprite(speaker.message)
-    bubbleX = screenX + GnomeSpriteSize div 2 - bubble.width div 2
-    bubbleY = nameY - bubble.height - ChatGapY
-  rectVisible(bubbleX, bubbleY, bubble.width, bubble.height,
-    ViewportWidth, ViewportHeight)
-
-proc replayChatAudience*(sim: SimServer, speakerSlot: int): seq[int] =
-  ## Slots of the OTHER players who would currently see `speakerSlot`'s chat
-  ## bubble — everyone in hearing range at this tick. Empty when the speaker
-  ## has no active message. Evaluate it on the tick the message is set; the
-  ## bubble then lingers (`ChatLifetimeTicks`), so someone who walks up later
-  ## can also see it — this captures the audience at the moment of speaking.
-  if speakerSlot < 0 or speakerSlot >= sim.players.len:
-    return @[]
-  let speaker = sim.players[speakerSlot]
-  for slot, viewer in sim.players:
-    if slot != speakerSlot and sim.replayChatVisibleTo(speaker, viewer):
-      result.add(slot)
-
 proc runReplayServerLoop*(
   host = DefaultHost,
   port = DefaultPort,
@@ -3879,6 +4587,7 @@ proc runReplayServerLoop*(
             replay.replayMaxTick() > 0:
           replay.seekReplay(sim, 0)
           replay.playing = true
+    sim.advanceChatFeed()
 
     for i in 0 ..< viewerSockets.len:
       var nextState: PlayerViewerState
