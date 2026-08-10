@@ -17,6 +17,8 @@
 import
   std/[json, os, sequtils, strutils, tables],
   ../src/heartleaf,
+  ../src/heartleaf/common,
+  ../src/heartleaf/protocol,
   ../src/replays
 
 type
@@ -30,7 +32,7 @@ type
     snapshotEvery: int
 
 const
-  SchemaVersion = "heartleaf-replay/v1"
+  SchemaVersion = "heartleaf-replay/v2"
   UsageText =
     "Usage: expand_replay [--format jsonl|text] " &
     "[--snapshot-every N] <replay.(json|bitreplay)>"
@@ -115,8 +117,17 @@ proc harvestedFoods(
       let name = if slot < foodNames.len: foodNames[slot] else: "food" & $slot
       result.add(%*{"food": name, "count": gained})
 
+proc dayMinutes(sim: SimServer): int =
+  ## The in-game wall-clock minute of day, matching the HUD clock: the day
+  ## runs DayStartMinutes..DayEndMinutes in 5-minute steps over dayTicks.
+  const StepMinutes = 5
+  let day = sim.replaySimDay()
+  let stepCount = (DayEndMinutes - DayStartMinutes) div StepMinutes
+  DayStartMinutes +
+    min(stepCount, day.dayTick * stepCount div max(1, day.dayTicks)) * StepMinutes
+
 proc eventRow(
-  tick, day, slot: int,
+  tick, day, minutes, slot: int,
   name, user, kind: string,
   extra: JsonNode
 ): JsonNode =
@@ -125,6 +136,8 @@ proc eventRow(
     "type": "event",
     "tick": tick,
     "day": day,
+    "minutes": minutes,
+    "clock": clockName(minutes),
     "kind": kind,
     "slot": slot,
     "name": name,
@@ -167,6 +180,7 @@ proc main() =
 
   proc processTick(tick: int) =
     let day = sim.replaySimDay().dayNumber
+    let minutes = sim.dayMinutes()
     let players = snapshotReplayPlayers(sim)
     var nameBySlot = initTable[int, string]()
     for snapshot in players:
@@ -182,7 +196,7 @@ proc main() =
 
       if not hadPrior:
         config.emit(
-          eventRow(tick, day, snapshot.slot, snapshot.playerName,
+          eventRow(tick, day, minutes, snapshot.slot, snapshot.playerName,
             snapshot.username, "join",
             %*{"home": snapshot.homeIndex}),
           "t" & $tick & " join " & snapshot.playerName)
@@ -190,7 +204,7 @@ proc main() =
       # Harvest: inventory grew.
       if snapshot.inventoryTotal > before.inventoryTotal:
         config.emit(
-          eventRow(tick, day, snapshot.slot, snapshot.playerName,
+          eventRow(tick, day, minutes, snapshot.slot, snapshot.playerName,
             snapshot.username, "harvest",
             %*{
               "amount": snapshot.inventoryTotal - before.inventoryTotal,
@@ -204,7 +218,7 @@ proc main() =
       if snapshot.houseIndex != before.houseIndex:
         if snapshot.houseIndex >= 0:
           config.emit(
-            eventRow(tick, day, snapshot.slot, snapshot.playerName,
+            eventRow(tick, day, minutes, snapshot.slot, snapshot.playerName,
               snapshot.username, "enter_house",
               %*{"house": snapshot.houseIndex,
                  "own": snapshot.houseIndex == snapshot.homeIndex}),
@@ -212,7 +226,7 @@ proc main() =
               $snapshot.houseIndex)
         elif before.houseIndex >= 0:
           config.emit(
-            eventRow(tick, day, snapshot.slot, snapshot.playerName,
+            eventRow(tick, day, minutes, snapshot.slot, snapshot.playerName,
               snapshot.username, "exit_house",
               %*{"house": before.houseIndex,
                  "own": before.houseIndex == snapshot.homeIndex}),
@@ -227,7 +241,7 @@ proc main() =
         for slot in sim.replayChatAudience(snapshot.slot):
           heardBy.add(%*{"slot": slot, "name": nameBySlot.getOrDefault(slot)})
         config.emit(
-          eventRow(tick, day, snapshot.slot, snapshot.playerName,
+          eventRow(tick, day, minutes, snapshot.slot, snapshot.playerName,
             snapshot.username, "chat",
             %*{
               "text": snapshot.message,
@@ -240,7 +254,7 @@ proc main() =
       # Score: hosting reward accrued.
       if snapshot.score > before.score:
         config.emit(
-          eventRow(tick, day, snapshot.slot, snapshot.playerName,
+          eventRow(tick, day, minutes, snapshot.slot, snapshot.playerName,
             snapshot.username, "score",
             %*{"amount": snapshot.score - before.score,
                "total": snapshot.score}),
@@ -250,7 +264,7 @@ proc main() =
       # Dinner: a completed dinner was recorded this tick.
       if snapshot.dinnerCount > before.dinnerCount:
         config.emit(
-          eventRow(tick, day, snapshot.slot, snapshot.playerName,
+          eventRow(tick, day, minutes, snapshot.slot, snapshot.playerName,
             snapshot.username, "dinner",
             %*{
               "host": snapshot.lastDinnerHost,
@@ -268,7 +282,7 @@ proc main() =
     for slot, before in previous.pairs:
       if slot notin seen:
         config.emit(
-          eventRow(tick, day, slot, before.playerName, before.username,
+          eventRow(tick, day, minutes, slot, before.playerName, before.username,
             "leave", newJObject()),
           "t" & $tick & " leave " & before.playerName)
     for slot in toSeq(previous.keys):
@@ -281,7 +295,8 @@ proc main() =
       for snapshot in players:
         rows.add(playerRow(snapshot))
       config.emit(
-        %*{"type": "tick", "tick": tick, "day": day, "players": rows},
+        %*{"type": "tick", "tick": tick, "day": day, "minutes": minutes,
+           "clock": clockName(minutes), "players": rows},
         "")
 
   processTick(0)
