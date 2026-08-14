@@ -102,5 +102,5 @@ jobs:
               raise SystemExit(f"::error::{name}:{version} not found after upload")
           if not match.get("canonical"):
               raise SystemExit(f"::error::{name}:{version} uploaded but is not canonical")
-          print(f"{name}:{version} is canonical ({match['id']})")
+          print("%s:%s is canonical (%s)" % (name, version, match["id"]))
           ' "$COWORLD_NAME" "${{ steps.version.outputs.version }}"
