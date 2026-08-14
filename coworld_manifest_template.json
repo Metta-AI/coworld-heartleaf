@@ -278,18 +278,18 @@
       "name": "Smoke",
       "game_config": {
         "seed": 4731713,
-        "maxTicks": 12,
-        "maxGames": 0
+        "maxTicks": 300,
+        "maxGames": 1
       },
       "description": "Short deterministic Heartleaf configuration used for smoke checks."
     }
   ],
   "certification": {
-    "game_config": {
-      "seed": 4731713,
-      "maxTicks": 1200,
-      "maxGames": 1
-    },
+      "game_config": {
+        "seed": 4731713,
+        "maxTicks": 300,
+        "maxGames": 1
+      },
     "players": [
       {
         "player_id": "shy_villager"

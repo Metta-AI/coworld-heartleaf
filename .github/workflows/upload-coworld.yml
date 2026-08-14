@@ -84,6 +84,7 @@ jobs:
         run: |
           uvx --from "$COWORLD_CLI" coworld upload-coworld tmp/coworld_manifest.json \
             --server https://softmax.com/api \
+            --timeout-seconds 180 \
             --wait-hosted-smoke \
             --hosted-smoke-timeout-seconds 1800
 
