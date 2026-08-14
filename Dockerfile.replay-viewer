@@ -24,16 +24,9 @@ RUN nimby sync nimby.lock -g
 COPY . .
 RUN nimby sync nimby.lock -g
 
-RUN BITWORLD_ROOT="" && \
-  for d in /root/.nimble/pkgs2/bitworld-*; do \
-    if [ -d "$d/client/dist" ]; then \
-      BITWORLD_ROOT="$d"; \
-    fi; \
-  done && \
-  test -n "$BITWORLD_ROOT" && \
-  test -f "$BITWORLD_ROOT/client/dist/atlas.png" && \
+RUN test -f /root/.nimby/pkgs/bitworld/client/dist/atlas.png && \
   mkdir -p /workspace && \
-  ln -sfn "$BITWORLD_ROOT" /workspace/bitworld
+  ln -sfn /root/.nimby/pkgs/bitworld /workspace/bitworld
 
 RUN nim c -d:emscripten wasm/replay_viewer.nim && \
   mkdir -p wasm/dist/bundle && \

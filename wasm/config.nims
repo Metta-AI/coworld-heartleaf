@@ -9,9 +9,13 @@ const
 
 proc findBitworldRoot(): string =
   ## Returns the bitworld checkout that contains client/dist.
-  let sibling = RepoDir / ".." / "bitworld"
-  if dirExists(sibling / "client" / "dist"):
-    return sibling
+  let candidates = [
+    RepoDir / ".." / "bitworld",
+    getHomeDir() / ".nimby" / "pkgs" / "bitworld"
+  ]
+  for candidate in candidates:
+    if dirExists(candidate / "client" / "dist"):
+      return candidate
   let nimblePkgs = getHomeDir() / ".nimble" / "pkgs2"
   if dirExists(nimblePkgs):
     for kind, path in walkDir(nimblePkgs):
@@ -20,7 +24,7 @@ proc findBitworldRoot(): string =
           dirExists(path / "client" / "dist"):
         return path
   echo "bitworld client/dist not found"
-  echo "Need ../bitworld or a nimble pkgs2 bitworld package"
+  echo "Need ../bitworld, ~/.nimby/pkgs/bitworld, or a nimble package"
   quit 1
 
 let BitworldRoot = findBitworldRoot()
