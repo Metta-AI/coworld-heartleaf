@@ -946,6 +946,10 @@ proc log(bot: Bot, text: string) =
   ## Writes one bot activity log line.
   echo bot.logName(), ": ", text, " (", bot.clockText(), ")"
 
+proc dayNumber(bot: Bot): int =
+  ## Returns the one-based day of the current game.
+  bot.dayIndex + 1
+
 
 proc clockAnnouncement(minutes: int): string =
   ## Returns one hourly clock line for the conversation history.
@@ -1235,19 +1239,47 @@ proc parseInventoryCount(label: string): int =
   except ValueError:
     result = 0
 
+proc inventoryCountAt(bot: Bot, foodIndex: int): int =
+  ## Returns how many of one named food this bot is carrying.
+  let countObjectId = InventoryCountObjectBase + foodIndex
+  if countObjectId < bot.objects.len and
+      bot.objects[countObjectId].present:
+    let sprite = bot.spriteInfo(bot.objects[countObjectId].spriteId)
+    if sprite != nil:
+      return sprite.label.parseInventoryCount()
+  let iconObjectId = InventoryObjectBase + foodIndex
+  if iconObjectId < bot.objects.len and bot.objects[iconObjectId].present:
+    return 1
+
 proc inventoryTotal(bot: Bot): int =
   ## Returns how many food items this bot is carrying.
   for foodIndex in 0 ..< FoodVeggieSlots:
-    let countObjectId = InventoryCountObjectBase + foodIndex
-    if countObjectId < bot.objects.len and
-        bot.objects[countObjectId].present:
-      let sprite = bot.spriteInfo(bot.objects[countObjectId].spriteId)
-      if sprite != nil:
-        result += sprite.label.parseInventoryCount()
-        continue
-    let iconObjectId = InventoryObjectBase + foodIndex
-    if iconObjectId < bot.objects.len and bot.objects[iconObjectId].present:
-      inc result
+    result += bot.inventoryCountAt(foodIndex)
+
+proc collectedFoodsText(bot: Bot): string =
+  ## Returns named foods in this bot's inventory for the LLM prompt.
+  for foodIndex in 0 ..< FoodVeggieSlots:
+    let count = bot.inventoryCountAt(foodIndex)
+    if count <= 0:
+      continue
+    if result.len > 0:
+      result.add(", ")
+    result.add(foodIndex.foodName())
+    if count > 1:
+      result.add(" x" & $count)
+  if result.len == 0:
+    result = "none"
+
+proc lookingForFoodsText(bot: Bot): string =
+  ## Returns named foods this bot has not eaten yet this game.
+  if LookingForObjectId < bot.objects.len and
+      bot.objects[LookingForObjectId].present:
+    let sprite = bot.spriteInfo(bot.objects[LookingForObjectId].spriteId)
+    if sprite != nil and sprite.label.startsWith(LookingForLabelPrefix):
+      let rest = sprite.label[LookingForLabelPrefix.len .. ^1].strip()
+      if rest.len > 0:
+        return rest
+  FoodNames.join(", ")
 
 proc gardensExhausted(bot: Bot): bool =
   ## Returns true when the bot has checked every known garden.
@@ -1667,9 +1699,15 @@ proc chatUserPrompt(bot: Bot): string =
   result =
     "Current Heartleaf state:\n" &
     "clock=" & bot.minutes.clockName() & "\n" &
+    "day=" & $bot.dayNumber & "\n" &
     "yourName=" & bot.playerName & "\n" &
     "yourHouse=" & bot.playerName & "'s house\n" &
     "yourFoodTotal=" & $bot.inventoryTotal() & "\n" &
+    "foodCollected=" & bot.collectedFoodsText() & "\n" &
+    "foodLookingFor=" & bot.lookingForFoodsText() & "\n" &
+    "foodTalk=name foods from foodCollected when pitching dinner; " &
+    "if someone asks for a food you hold, say you have it and invite " &
+    "them to your party; never say food numbers\n" &
     "phase=" & phase & "\n" &
     "visiblePlayers:\n" & bot.visiblePlayersText() & "\n" &
     "Say one chat line out loud now (max " & $ChatMaxChars &

@@ -33,6 +33,9 @@ const
   DecisionRetryTicks = 24
   DecisionStuckTicks = RepathStuckTicks * 2
   HighFoodForInvites = 6
+  EarlyHostUntilDay = 3
+  LateHostFromDay = 8
+  PushyInviteCount = 3
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
   HostPrepMinutes = 15 * 60
@@ -972,33 +975,52 @@ proc log(bot: Bot, text: string) =
   ## Writes one bot activity log line.
   echo bot.logName(), ": ", text, " (", bot.clockText(), ")"
 
+proc dayNumber(bot: Bot): int =
+  ## Returns the one-based day of the current game.
+  bot.dayIndex + 1
 
-proc clockAnnouncement(minutes: int): string =
+proc isEarlyHostDay(bot: Bot): bool =
+  ## Returns true on days when hosting wastes a small pantry.
+  bot.dayNumber <= EarlyHostUntilDay
+
+proc isLateHostDay(bot: Bot): bool =
+  ## Returns true on the last two days of a typical nine-day game.
+  bot.dayNumber >= LateHostFromDay
+
+proc clockAnnouncement(bot: Bot): string =
   ## Returns one hourly clock line for the conversation history.
-  let clock = minutes.clockName()
+  let
+    clock = bot.minutes.clockName()
+    dayPrefix = "Day " & $bot.dayNumber & ". "
+    minutes = bot.minutes
   if minutes < DinnerMinutes:
     let hours = (DinnerMinutes - minutes) div 60
     if hours <= 0:
-      "It is " & clock & ". Dinner starts within the hour! Be INSIDE " &
+      dayPrefix & "It is " & clock &
+        ". Dinner starts within the hour! Be INSIDE " &
         "your dinner house before it is served at 6:00pm - if you are " &
         "outside when it is served you miss dinner entirely."
     elif hours == 1:
-      "It is " & clock & " (1 hour till dinner). Settle on a dinner " &
+      dayPrefix & "It is " & clock &
+        " (1 hour till dinner). Settle on a dinner " &
         "house now; you must be inside it before 6:00pm."
     else:
-      "It is " & clock & " (" & $hours & " hours till dinner)."
+      dayPrefix & "It is " & clock &
+        " (" & $hours & " hours till dinner)."
   elif minutes < DinnerMinutes + 60:
-    "It is " & clock & ". Dinner was served at 6:00pm sharp - anyone " &
+    dayPrefix & "It is " & clock &
+      ". Dinner was served at 6:00pm sharp - anyone " &
       "outside then missed it. The evening is for gathering food " &
       "for tomorrow."
   elif minutes < DayEndMinutes:
     let hours = (DayEndMinutes - minutes) div 60
     if hours <= 1:
-      "It is " & clock & " (night falls within the hour)."
+      dayPrefix & "It is " & clock & " (night falls within the hour)."
     else:
-      "It is " & clock & " (" & $hours & " hours till night time)."
+      dayPrefix & "It is " & clock &
+        " (" & $hours & " hours till night time)."
   else:
-    "It is " & clock & ". It is night time."
+    dayPrefix & "It is " & clock & ". It is night time."
 
 proc maybeRecordClock(bot: Bot) =
   ## Records one clock line in the conversation every game hour.
@@ -1010,7 +1032,7 @@ proc maybeRecordClock(bot: Bot) =
   bot.lastClockHour = hour
   bot.chatHistory.add(ConversationMessage(
     role: "user",
-    content: "Clock: " & bot.minutes.clockAnnouncement()
+    content: "Clock: " & bot.clockAnnouncement()
   ))
 
 proc resetGardenPlan(bot: Bot) =
@@ -1270,19 +1292,47 @@ proc parseInventoryCount(label: string): int =
   except ValueError:
     result = 0
 
+proc inventoryCountAt(bot: Bot, foodIndex: int): int =
+  ## Returns how many of one named food this bot is carrying.
+  let countObjectId = InventoryCountObjectBase + foodIndex
+  if countObjectId < bot.objects.len and
+      bot.objects[countObjectId].present:
+    let sprite = bot.spriteInfo(bot.objects[countObjectId].spriteId)
+    if sprite != nil:
+      return sprite.label.parseInventoryCount()
+  let iconObjectId = InventoryObjectBase + foodIndex
+  if iconObjectId < bot.objects.len and bot.objects[iconObjectId].present:
+    return 1
+
 proc inventoryTotal(bot: Bot): int =
   ## Returns how many food items this bot is carrying.
   for foodIndex in 0 ..< FoodVeggieSlots:
-    let countObjectId = InventoryCountObjectBase + foodIndex
-    if countObjectId < bot.objects.len and
-        bot.objects[countObjectId].present:
-      let sprite = bot.spriteInfo(bot.objects[countObjectId].spriteId)
-      if sprite != nil:
-        result += sprite.label.parseInventoryCount()
-        continue
-    let iconObjectId = InventoryObjectBase + foodIndex
-    if iconObjectId < bot.objects.len and bot.objects[iconObjectId].present:
-      inc result
+    result += bot.inventoryCountAt(foodIndex)
+
+proc collectedFoodsText(bot: Bot): string =
+  ## Returns named foods in this bot's inventory for the LLM prompt.
+  for foodIndex in 0 ..< FoodVeggieSlots:
+    let count = bot.inventoryCountAt(foodIndex)
+    if count <= 0:
+      continue
+    if result.len > 0:
+      result.add(", ")
+    result.add(foodIndex.foodName())
+    if count > 1:
+      result.add(" x" & $count)
+  if result.len == 0:
+    result = "none"
+
+proc lookingForFoodsText(bot: Bot): string =
+  ## Returns named foods this bot has not eaten yet this game.
+  if LookingForObjectId < bot.objects.len and
+      bot.objects[LookingForObjectId].present:
+    let sprite = bot.spriteInfo(bot.objects[LookingForObjectId].spriteId)
+    if sprite != nil and sprite.label.startsWith(LookingForLabelPrefix):
+      let rest = sprite.label[LookingForLabelPrefix.len .. ^1].strip()
+      if rest.len > 0:
+        return rest
+  FoodNames.join(", ")
 
 proc gardensExhausted(bot: Bot): bool =
   ## Returns true when the bot has checked every known garden.
@@ -1595,6 +1645,8 @@ proc socialRandom(bot: Bot, salt, limit: int): int =
 
 proc hostWaitDuration(bot: Bot): int =
   ## Returns how long this bot should try hosting today.
+  if bot.isEarlyHostDay():
+    return 0
   let food = bot.inventoryTotal()
   if food >= StrongHostFood:
     return MaxHostWaitMinutes
@@ -1635,6 +1687,8 @@ proc shouldHostOwnHouse(bot: Bot): bool =
   if bot.hostCommitted:
     bot.partyHouse = bot.homeIndex
     return true
+  if bot.isEarlyHostDay():
+    return false
   if bot.minutes >= LatePartySearchMinutes:
     return false
   let food = bot.inventoryTotal()
@@ -1706,10 +1760,78 @@ proc acceptsPartyCrowd(bot: Bot, houseIndex, crowd: int): bool =
   let salt = 1000 + houseIndex * 17 + bot.minutes div 15
   return bot.socialRandom(salt, 100) < chance
 
+proc isHostInviteMessage(message: string): bool =
+  ## Returns true when chat text invites people to this bot's house.
+  let lower = message.toLowerAscii()
+  lower.contains("my house") or
+    lower.contains("my place") or
+    lower.contains("come to my") or
+    lower.contains("party at my") or
+    lower.contains("meet at my")
+
+proc chatSpeaker(content: string): string =
+  ## Returns the speaker name prefix of one transcript line.
+  let at = content.find(": ")
+  if at <= 0:
+    return ""
+  content[0 ..< at]
+
+proc chatBody(content: string): string =
+  ## Returns the spoken text of one transcript line.
+  let at = content.find(": ")
+  if at < 0:
+    return content
+  content[at + 2 .. ^1]
+
+proc mentionCount(bot: Bot, houseIndex: int): int =
+  ## Returns how often this bot has talked with one house owner.
+  if houseIndex < 0 or houseIndex >= HouseCount:
+    return 0
+  if houseIndex == bot.homeIndex:
+    return 0
+  let
+    name = houseIndex.playerNameForHouse()
+    prefix = name & ": "
+  for message in bot.chatHistory:
+    if message.content.startsWith(prefix):
+      inc result
+    elif message.role == "assistant" and
+        message.content.contains(name):
+      inc result
+
+proc likedHouseIndex(bot: Bot): int =
+  ## Returns the house of the gnome this bot has talked with most.
+  result = UnknownHouse
+  var bestCount = 0
+  for houseIndex in 0 ..< HouseCount:
+    if houseIndex == bot.homeIndex:
+      continue
+    let count = bot.mentionCount(houseIndex)
+    if count > bestCount:
+      bestCount = count
+      result = houseIndex
+
+proc inviteCountFrom(bot: Bot, name: string): int =
+  ## Returns how many dinner pitches this bot heard from one gnome.
+  if name.len == 0:
+    return 0
+  for message in bot.chatHistory:
+    if message.content.chatSpeaker() != name:
+      continue
+    if message.content.chatBody().isHostInviteMessage():
+      inc result
+
+proc isPushyHost(bot: Bot, name: string): bool =
+  ## Returns true when one gnome has pitched dinner over and over.
+  name.len > 0 and bot.inviteCountFrom(name) >= PushyInviteCount
+
 proc visiblePartyScore(bot: Bot, houseIndex, crowd: int): int =
   ## Returns a score for a visible candidate dinner house.
   let distance = bot.playerDistanceSquared(bot.resources.houses[houseIndex])
-  result = crowd * 10_000 - distance div 16
+  result =
+    bot.mentionCount(houseIndex) * 1_000_000 +
+    crowd * 10_000 -
+    distance div 16
   if houseIndex == bot.partyHouse:
     result += 2_000
 
@@ -1717,10 +1839,13 @@ proc bestVisiblePartyHouse(bot: Bot, relaxed = false): int =
   ## Returns the best visible house party this bot is willing to join.
   result = UnknownHouse
   var bestScore = low(int)
-  for houseIndex in 0 ..< HouseCount:
+  for step in 0 ..< HouseCount:
+    let houseIndex = (bot.homeIndex + 1 + step) mod HouseCount
     if not bot.resources.houseValid[houseIndex]:
       continue
     if houseIndex == bot.homeIndex:
+      continue
+    if bot.isPushyHost(houseIndex.playerNameForHouse()):
       continue
     if not bot.houseOwnerPresent(houseIndex):
       continue
@@ -1922,15 +2047,6 @@ proc mentionedHouseIndex(message: string): int =
         lower.contains(owner & " house"):
       return i
 
-proc isHostInviteMessage(message: string): bool =
-  ## Returns true when chat text invites people to this bot's house.
-  let lower = message.toLowerAscii()
-  lower.contains("my house") or
-    lower.contains("my place") or
-    lower.contains("come to my") or
-    lower.contains("party at my") or
-    lower.contains("meet at my")
-
 proc isAttendanceMessage(message: string): bool =
   ## Returns true when chat text confirms attendance at a party.
   let lower = message.toLowerAscii()
@@ -1955,18 +2071,27 @@ proc inferSocialCommitment(bot: Bot, decision: LlmDecision): LlmDecision =
     let targetHouse = result.targetName.houseIndexForPlayerName()
     if targetHouse >= 0:
       result.houseIndex = targetHouse
+  if result.houseIndex >= 0 and
+      bot.isPushyHost(result.houseIndex.playerNameForHouse()):
+    result.commitParty = false
+    if result.action == LlmGoToParty:
+      result.houseIndex = UnknownHouse
   if result.action != LlmSayToPerson:
     return
   if result.message.isHostInviteMessage():
     result.commitParty = true
     result.houseIndex = bot.homeIndex
     return
+  if bot.isPushyHost(result.targetName):
+    result.commitParty = false
+    return
   if result.commitParty or result.message.isAttendanceMessage():
     if result.houseIndex < 0:
       let targetHouse = result.targetName.houseIndexForPlayerName()
       if targetHouse >= 0:
         result.houseIndex = targetHouse
-    if result.houseIndex >= 0:
+    if result.houseIndex >= 0 and
+        not bot.isPushyHost(result.houseIndex.playerNameForHouse()):
       result.commitParty = true
 
 proc timePhase(bot: Bot): int =
@@ -2070,7 +2195,8 @@ proc visibleChatsSignature(bot: Bot): string =
 
 proc houseCrowdsText(bot: Bot): string =
   ## Returns visible house crowd facts for the LLM prompt.
-  for houseIndex in 0 ..< HouseCount:
+  for step in 0 ..< HouseCount:
+    let houseIndex = (bot.homeIndex + 1 + step) mod HouseCount
     if not bot.resources.houseValid[houseIndex]:
       continue
     if result.len > 0:
@@ -2112,39 +2238,64 @@ proc decisionStateSignature(bot: Bot): string =
     "|chats=" & bot.visibleChatsSignature() &
     "|crowds=" & bot.houseCrowdsSignature() &
     "|commit=" & $bot.committedPartyHouse &
-    "|commitCompany=" & $bot.commitmentHasCompany()
+    "|commitCompany=" & $bot.commitmentHasCompany() &
+    "|looking=" & bot.lookingForFoodsText() &
+    "|day=" & $bot.dayNumber
 
 proc llmUserPrompt(bot: Bot): string =
   ## Builds one current-state prompt for the LLM.
-  let commitment =
-    if bot.committedPartyHouse >= 0:
-      bot.committedPartyHouse.playerNameForHouse() & "'s house"
-    else:
-      "none"
-  let commitmentIndex =
-    if bot.committedPartyHouse >= 0:
-      $(bot.committedPartyHouse + 1)
-    else:
-      "none"
-  let currentHouse =
-    if bot.currentHouse >= 0:
-      $(bot.currentHouse + 1)
-    else:
-      "none"
-  let currentHouseOwner =
-    if bot.currentHouse >= 0:
-      bot.currentHouse.playerNameForHouse()
-    else:
-      "none"
+  let
+    commitment =
+      if bot.committedPartyHouse >= 0:
+        bot.committedPartyHouse.playerNameForHouse() & "'s house"
+      else:
+        "none"
+    commitmentIndex =
+      if bot.committedPartyHouse >= 0:
+        $(bot.committedPartyHouse + 1)
+      else:
+        "none"
+    currentHouse =
+      if bot.currentHouse >= 0:
+        $(bot.currentHouse + 1)
+      else:
+        "none"
+    currentHouseOwner =
+      if bot.currentHouse >= 0:
+        bot.currentHouse.playerNameForHouse()
+      else:
+        "none"
+    hostingHint =
+      if bot.isEarlyHostDay():
+        "today is an early day; visit and keep your pantry; hosting " &
+        "now is a sacrifice; if nobody is hosting, take one for the team"
+      elif bot.isLateHostDay():
+        "today is a late day; prefer hosting with a full pantry for " &
+        "food times guests"
+      else:
+        "middle day; visit unless your pantry is huge or nobody else " &
+        "will host"
   result =
     "Current Heartleaf state:\n" &
     "timeMinutes=" & $bot.minutes & "\n" &
+    "day=" & $bot.dayNumber & "\n" &
+    "hostingStrategy=days 1-3 prefer visiting and gathering; hosting " &
+    "early empties your pantry for a small score; last two days " &
+    "prefer hosting for food times guests; if nobody is hosting " &
+    "tonight, take one for the team so people can eat\n" &
+    "todayHosting=" & hostingHint & "\n" &
     "map=" & bot.screenKind.screenNameForPrompt() & "\n" &
     "homeOwner=" & bot.homeIndex.playerNameForHouse() & "\n" &
     "homeHouseIndex=" & $(bot.homeIndex + 1) & "\n" &
     "currentHouseOwner=" & currentHouseOwner & "\n" &
     "currentHouseIndex=" & currentHouse & "\n" &
     "foodTotal=" & $bot.inventoryTotal() & "\n" &
+    "foodCollected=" & bot.collectedFoodsText() & "\n" &
+    "foodLookingFor=" & bot.lookingForFoodsText() & "\n" &
+    "foodTalk=use food names from foodCollected and foodLookingFor; " &
+    "ask nearby gnomes if they have one foodLookingFor; if you hold a " &
+    "food someone asked for, invite them to your party; never say " &
+    "food numbers\n" &
     "partyCommitment=" & commitment & "\n" &
     "partyCommitmentHouseIndex=" & commitmentIndex & "\n" &
     "strategyFoodLowAt=" & $LowHostFood & "\n" &
@@ -2162,6 +2313,11 @@ proc llmUserPrompt(bot: Bot): string =
     "rules=before partyPrepStartsAt gather food; after partyPrepStartsAt " &
     "do not keep gathering; after dinnerStartsAt choose go_to_party " &
     "unless already safely home or honoring another commitment\n" &
+    "partyChoice=go_to_party at the house of the gnome you like most; " &
+    "set houseIndex to that owner's house and targetName to their name; " &
+    "never pick houseIndex 1 or Ivan just because they are listed first; " &
+    "a gnome who keeps pitching dinner, even with new words, is pushy; " &
+    "do not go to a pushy gnome's house\n" &
     "visiblePlayers:\n" & bot.visiblePlayersText() & "\n" &
     "visibleHouseCrowds:\n" & bot.houseCrowdsText() & "\n" &
     "gardenMarkers=" & bot.gardenMarkersText() & "\n" &
@@ -2172,6 +2328,11 @@ proc llmUserPrompt(bot: Bot): string =
 
 proc partyFallbackHouse(bot: Bot): int =
   ## Returns a deterministic party target for deadline guardrails.
+  if bot.committedPartyHouse >= 0:
+    return bot.committedPartyHouse
+  let likedHouse = bot.likedHouseIndex()
+  if likedHouse >= 0 and not bot.isPushyHost(likedHouse.playerNameForHouse()):
+    return likedHouse
   result = bot.bestVisiblePartyHouse(true)
   if result >= 0:
     return
@@ -2194,7 +2355,9 @@ proc partyTimeDecision(bot: Bot, reason: string): LlmDecision =
 proc prepTimeDecision(bot: Bot, reason: string): LlmDecision =
   ## Returns a pre-dinner social decision when gathering must stop.
   let partyHouse = bot.bestVisiblePartyHouse(true)
-  if partyHouse >= 0 or bot.inventoryTotal() <= LowHostFood:
+  if partyHouse >= 0 or
+      bot.inventoryTotal() <= LowHostFood or
+      bot.isEarlyHostDay():
     return bot.partyTimeDecision(reason)
   LlmDecision(
     valid: true,
@@ -2248,6 +2411,7 @@ proc enforceTimePolicy(bot: Bot, decision: LlmDecision): LlmDecision =
     return
   if bot.minutes >= HostPrepMinutes and
       bot.inventoryTotal() >= HighFoodForInvites and
+      not bot.isEarlyHostDay() and
       decision.action == LlmKeepGatheringPlants and
       bot.committedPartyHouse < 0:
     result = LlmDecision(
@@ -2276,13 +2440,15 @@ proc fallbackDecision(bot: Bot): LlmDecision =
   elif bot.minutes >= HouseEnterMinutes:
     result = bot.prepTimeDecision("fallback party planning")
   elif bot.minutes >= HostPrepMinutes and
-      bot.inventoryTotal() >= HighFoodForInvites:
+      bot.inventoryTotal() >= HighFoodForInvites and
+      not bot.isEarlyHostDay():
     result.action = LlmStandAtHouseGarden
     result.houseIndex = bot.homeIndex
     result.reason = "fallback host preparation"
   elif bot.shouldGather():
     result.action = LlmKeepGatheringPlants
-  elif bot.inventoryTotal() >= HighFoodForInvites:
+  elif bot.inventoryTotal() >= HighFoodForInvites and
+      not bot.isEarlyHostDay():
     result.action = LlmStandAtHouseGarden
     result.houseIndex = bot.homeIndex
   else:
@@ -3038,3 +3204,7 @@ proc talkingVillagerMain*(defaultName = DefaultName, soul: string) =
   if slot < 0 and url.len > 0:
     slot = url.slotFromUrl()
   runBot(address, port, name, token, slot, url, soul, url.len > 0)
+
+when isMainModule:
+  const ExampleSoulMarkdown = staticRead("soul.md")
+  talkingVillagerMain(DefaultName, ExampleSoulMarkdown)

@@ -104,9 +104,19 @@ proc boolField(node: JsonNode, name: string): bool =
 proc houseField(node: JsonNode, name: string): int =
   ## Reads one optional one-based house index as a zero-based index.
   result = UnknownHouse
-  if not node.hasKey(name) or node[name].kind != JInt:
+  if not node.hasKey(name):
     return
-  let value = node[name].getInt()
+  var value = 0
+  case node[name].kind
+  of JInt:
+    value = node[name].getInt()
+  of JString:
+    try:
+      value = parseInt(node[name].getStr().strip())
+    except ValueError:
+      return
+  else:
+    return
   if value >= 1 and value <= HouseCount:
     result = value - 1
 

@@ -67,17 +67,29 @@ Multiple dinner parties can happen at the same time in different houses. In a
 full 9 gnome game, the evening might create 3 parties with 3 hosts and 2 guests
 each, or any other mix based on where the gnomes choose to gather.
 
-The visitors in a house eat from that house's host. Food is multiplicative. Each
-visitor gets the full amount of everything the host collected.
+The gnomes in a house eat from that house's host pantry. Host score is
+counted first from the food that was there when dinner started:
+
+```text
+host score = (food items in the host inventory) x (number of visitors)
+```
+
+Then every gnome at the party, including the host, eats from that pantry
+in 3 rounds. One random seating order is used for all rounds. Each gnome
+takes 1 bite per round from the host inventory only.
+
+- New type they have not eaten this game: +3
+- Random leftover they have already eaten: +1
+- Host pantry empty: 0
 
 Example:
 
-If the host has 3 apples, 1 pear, and 2 potatoes, then every visitor at that
-party eats 3 apples, 1 pear, and 2 potatoes.
+If the host has 20 food items and 1 guest, the host gains 20 for
+feeding. The host and guest then take 3 bites each, so the guest should
+score at least +3 when any food remains.
 
-The host loses all hosted food after dinner. Visitors keep their own inventory,
-so they can still use it if they are also hosting a separate dinner party in
-their own house.
+The host loses all hosted food after dinner. Visitors keep their own
+inventory, so they can still use it if they host later.
 
 ## Dinner Results
 
@@ -107,19 +119,11 @@ Each gnome keeps a dinner history of the party host and what they ate or fed.
 
 ## Scoring
 
-Score comes from feeding other gnomes.
+A host scores food items times visitors, counted before anyone eats, plus
+whatever that host ate at the table.
 
-A host scores:
-
-```text
-Total hosted food items x number of visitors
-```
-
-If a host has 1 food item and feeds 3 visitors, the host gains 3 score. If a
-host has 6 total food items and feeds 2 visitors, the host gains 12 score.
-
-Visitors do not gain score for eating. Their benefit is that they can eat at
-someone else's party while keeping their own inventory for hosting.
+A guest scores only from eating: +3 for a new type, +1 for a leftover,
+0 if the pantry is empty. One dinner is at most 9 eating points.
 
 The end-of-day score is cumulative. It shows the total score each gnome has
 earned from all dinner parties so far.

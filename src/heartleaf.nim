@@ -1,12 +1,17 @@
 import
-  std/[json, locks, math, monotimes, os, random, strutils,
-    tables, times],
-  curly, flatty, jsony, mummy, pixie,
-  bitworld/aseprite, bitworld/client as bitworldClient,
-  bitworld/pixelfonts, bitworld/spriteprotocol, bitworld/resources,
-  bitworld/runtime, bitworld/sprites,
+  std/[json, math, os, random, strutils, tables, times],
+  flatty, jsony, pixie,
+  bitworld/aseprite, bitworld/pixelfonts, bitworld/spriteprotocol,
+  bitworld/resources, bitworld/sprites,
   heartleaf/common, heartleaf/protocol,
   replays
+
+when not defined(emscripten):
+  import
+    std/[locks, monotimes],
+    curly, mummy,
+    bitworld/client as bitworldClient,
+    bitworld/runtime
 
 const
   DefaultSeed = 0x484541
@@ -38,6 +43,9 @@ const
   ScoreScreenTicks = 10 * TicksPerSecond
   DinnerScreenTicks = 10 * TicksPerSecond
   DinnerTallyMinutes = DinnerMinutes
+  DinnerEatRounds = 3
+  NewFoodEatScore = 3
+  LeftoverEatScore = 1
   DefaultDaySeconds = DayRealMinutes * 60
   DayStepMinutes = 5
   DayTotalMinutes = DayEndMinutes - DayStartMinutes
@@ -159,6 +167,7 @@ const
   InsetPlayerObjectBase = 21_400
   InsetPlayerBorderObjectBase = 21_500
   HouseGnomeZ = 20_500
+  HouseGnomeLift = 12
   InsetBottomZ = 31_000
   InsetPlayerZBase = 31_100
   InsetOverhangZ = 31_500
@@ -173,8 +182,8 @@ const
   ChatBannerObjectId = 25_000
   ChatFeedShowFrames = 96
   ChatFeedMaxItems = 400
-  ChatBannerMaxHearers = 4
-  ChatBannerHearerOverlap = 14
+  ChatBannerMaxHearers = 3
+  ChatBannerNameGap = 10
   PortraitGridColumns = 3
   ChatBannerPortraitMargin = 10
   ChatBannerPortraitY = 2
@@ -194,7 +203,7 @@ const
   NameMaxChars = 14
   ChatLifetimeTicks = 5 * 24
   ChatPad = 3
-  ChatWrapChars = 20
+  ChatWrapChars = 40
   ChatPointerHeight = 3
   ChatGapY = 3
   NamePadX = 2
@@ -211,32 +220,7 @@ const
   TintHueMixes = [0.18, 0.30, 0.43, 0.57, 0.72]
   TintSaturationScales = [1.05, 1.12, 1.20, 1.30, 1.38]
   TintValueScales = [0.86, 0.70, 0.54, 0.39, 0.25]
-  FoodNames = [
-    "Lettuce",
-    "Carrot",
-    "Apple",
-    "Tomato",
-    "Cucumber",
-    "Zucchini",
-    "Beet",
-    "Pear",
-    "Cabbage",
-    "Purple cabbage",
-    "Grapes",
-    "Raspberries",
-    "Yam",
-    "Potato",
-    "Wheat",
-    "Hay Grass",
-    "Avocado",
-    "Red pepper",
-    "Green pepper",
-    "Blueberries",
-    "Corn",
-    "Radish",
-    "Garlic",
-    "Onion"
-  ]
+  LookingForSpriteId = 7190
 
 type
   Direction = enum
@@ -283,6 +267,12 @@ type
     hearers: seq[ChatFeedPerson]
     message: string
 
+  ChatBannerHearer = object
+    portrait: RgbaSprite
+    tag: RgbaSprite
+    portraitX: int
+    tagX: int
+
   House = object
     rect: Rect
     valid: bool
@@ -315,6 +305,7 @@ type
     homeFlag: int
     mapIndex: int
     inventory: FoodCounts
+    eaten: array[FoodVeggieSlots, bool]
     dinners: seq[DinnerRecord]
     score: int
     dinnerTicks: int
@@ -370,7 +361,7 @@ type
     scoreTicks: int
     dinnerDone: bool
 
-  PlayerViewerState = ref object
+  PlayerViewerState* = ref object
     initialized: bool
     selectedPlayerIndex: int
     selectedHouseNumber: int  ## 0 = none, 1..HouseCount = house interior view
@@ -390,28 +381,6 @@ type
     replaySeekTick: int
     replayCommands: seq[char]
 
-  WebSocketAppState = ref object
-    lock: Lock
-    inputMasks: Table[WebSocket, uint8]
-    lastAppliedMasks: Table[WebSocket, uint8]
-    playerIndices: Table[WebSocket, int]
-    playerSlots: Table[WebSocket, int]
-    playerViewers: Table[WebSocket, PlayerViewerState]
-    globalViewers: Table[WebSocket, PlayerViewerState]
-    replayViewers: Table[WebSocket, PlayerViewerState]
-    playerUsernames: Table[WebSocket, string]
-    chatMessages: Table[WebSocket, string]
-    closedSockets: seq[WebSocket]
-    tokens: seq[string]
-    replayServerMode: bool
-    replayLoaded: bool
-    pendingReplayUri: string
-
-  ServerThreadArgs = ref object
-    server: ptr Server
-    address: string
-    port: int
-
   RunConfig = ref object
     address: string
     port: int
@@ -421,7 +390,31 @@ type
     daySeconds: int
     tokens: seq[string]
 
-var appState: WebSocketAppState
+when not defined(emscripten):
+  type
+    WebSocketAppState = ref object
+      lock: Lock
+      inputMasks: Table[WebSocket, uint8]
+      lastAppliedMasks: Table[WebSocket, uint8]
+      playerIndices: Table[WebSocket, int]
+      playerSlots: Table[WebSocket, int]
+      playerViewers: Table[WebSocket, PlayerViewerState]
+      globalViewers: Table[WebSocket, PlayerViewerState]
+      replayViewers: Table[WebSocket, PlayerViewerState]
+      playerUsernames: Table[WebSocket, string]
+      chatMessages: Table[WebSocket, string]
+      closedSockets: seq[WebSocket]
+      tokens: seq[string]
+      replayServerMode: bool
+      replayLoaded: bool
+      pendingReplayUri: string
+
+    ServerThreadArgs = ref object
+      server: ptr Server
+      address: string
+      port: int
+
+  var appState: WebSocketAppState
 
 proc addSpriteProtocolInit(
   packet: var seq[uint8],
@@ -748,32 +741,33 @@ proc addRgbaSpriteCached(
     pixels: sprite.pixels.copyPixels()
   ))
 
-proc sendSpritePacket(websocket: WebSocket, packet: seq[uint8]) =
-  ## Sends sprite protocol messages in certification-sized frames.
-  var start = 0
-  while start < packet.len:
-    var stop = start
-    while stop < packet.len:
-      let messageBytes = packet.spriteMessageBytes(stop)
-      if messageBytes <= 0:
-        stop = packet.len
-        break
-      if stop > start and
-          stop + messageBytes - start > MaxWebSocketFrameBytes:
-        break
-      stop += messageBytes
-      if stop - start >= MaxWebSocketFrameBytes:
-        break
-    if stop == start:
-      let messageBytes = packet.spriteMessageBytes(start)
-      stop =
-        if messageBytes > 0:
-          start + messageBytes
-        else:
-          packet.len
-    websocket.send(blobFromBytes(packet.toOpenArray(start, stop - 1)),
-      BinaryMessage)
-    start = stop
+when not defined(emscripten):
+  proc sendSpritePacket(websocket: WebSocket, packet: seq[uint8]) =
+    ## Sends sprite protocol messages in certification-sized frames.
+    var start = 0
+    while start < packet.len:
+      var stop = start
+      while stop < packet.len:
+        let messageBytes = packet.spriteMessageBytes(stop)
+        if messageBytes <= 0:
+          stop = packet.len
+          break
+        if stop > start and
+            stop + messageBytes - start > MaxWebSocketFrameBytes:
+          break
+        stop += messageBytes
+        if stop - start >= MaxWebSocketFrameBytes:
+          break
+      if stop == start:
+        let messageBytes = packet.spriteMessageBytes(start)
+        stop =
+          if messageBytes > 0:
+            start + messageBytes
+          else:
+            packet.len
+      websocket.send(blobFromBytes(packet.toOpenArray(start, stop - 1)),
+        BinaryMessage)
+      start = stop
 
 proc rectVisible(
   x,
@@ -826,18 +820,19 @@ proc blitChatText(
   sim.blitTinyText(target, text, x, y, rgba(255, 255, 255, 255))
 
 proc chatBubbleLines(text: string): seq[string] =
-  ## Splits one chat message on the first space after the wrap width.
-  result = @[text]
-  if text.len <= ChatWrapChars:
-    return
-  var breakAt = -1
-  for i in ChatWrapChars ..< text.len:
-    if text[i] == ' ':
-      breakAt = i
+  ## Wraps one chat message on spaces after the wrap width.
+  var remaining = text
+  while remaining.len > ChatWrapChars:
+    var breakAt = -1
+    for i in ChatWrapChars ..< remaining.len:
+      if remaining[i] == ' ':
+        breakAt = i
+        break
+    if breakAt <= 0 or breakAt >= remaining.len - 1:
       break
-  if breakAt <= 0 or breakAt >= text.len - 1:
-    return
-  result = @[text[0 ..< breakAt], text[breakAt + 1 .. ^1]]
+    result.add(remaining[0 ..< breakAt])
+    remaining = remaining[breakAt + 1 .. ^1]
+  result.add(remaining)
 
 proc speechBubbleSprite(sim: SimServer, text: string): RgbaSprite =
   ## Builds one speech bubble sprite for a player message.
@@ -977,8 +972,9 @@ proc dinnerOverlaySprite(sim: SimServer, record: DinnerRecord): RgbaSprite =
     sim.drawFoodCounts(result, record.foods, 8, 100)
   else:
     sim.blitChatText(result, "At dinner party you ate:", 8, 8)
-    sim.blitChatText(result, "Host: " & record.hostName, 8, 20)
-    sim.drawFoodCounts(result, record.foods, 8, 40)
+    sim.blitChatText(result, "+" & $record.score & " score", 8, 20)
+    sim.blitChatText(result, "Host: " & record.hostName, 8, 32)
+    sim.drawFoodCounts(result, record.foods, 8, 44)
 
 proc scoreDisplayName(player: Player): string =
   ## Returns the score-screen name with username and player name.
@@ -1231,12 +1227,6 @@ proc clockGlyphSpriteId(ch: char): int =
   ## Returns the sprite id for one clock glyph.
   ClockGlyphSpriteBase + ch.clockGlyphIndex()
 
-proc foodName(foodIndex: int): string =
-  ## Returns the display name for one food slot.
-  if foodIndex >= 0 and foodIndex < FoodNames.len:
-    return FoodNames[foodIndex]
-  return "food " & $foodIndex
-
 proc dailyResultsJson*(sim: SimServer): string =
   ## Returns one daily player score result as JSON.
   var
@@ -1278,11 +1268,6 @@ proc clearFoods(foods: var FoodCounts) =
   ## Clears one food count set.
   for i in 0 ..< FoodVeggieSlots:
     foods[i] = 0
-
-proc scaledFoods(foods: FoodCounts, multiplier: int): FoodCounts =
-  ## Returns food counts multiplied by one guest count.
-  for i in 0 ..< FoodVeggieSlots:
-    result[i] = foods[i] * multiplier
 
 proc isHomeMap(mapIndex: int): bool =
   ## Returns true when a map id points at one of the nine home maps.
@@ -2007,43 +1992,50 @@ proc addHouseGnomeObjects(
   sim: SimServer,
   cache: var seq[SpriteCacheEntry]
 ) =
-  ## Draws gnomes who are inside a house on the outside map at that
-  ## house, outlined white for guests and yellow for the house owner.
-  var houseSlots: array[HouseCount, int]
+  ## Draws gnomes who are inside a house on the outside map in one
+  ## horizontal row centered above the house door, outlined white for
+  ## guests and yellow for the house owner.
+  var occupants: array[HouseCount, seq[int]]
   for i, player in sim.players:
     let houseIndex = player.mapIndex - HomeMapIndexBase
     if houseIndex < 0 or houseIndex >= HouseCount:
       continue
     if not sim.houses[houseIndex].valid:
       continue
+    occupants[houseIndex].add(i)
+  for houseIndex in 0 ..< HouseCount:
+    if occupants[houseIndex].len == 0:
+      continue
     let
       rect = sim.houses[houseIndex].rect
       stride = GnomeSpriteSize + OutlinePad * 2 + 2
-      columns = max(1, rect.w div stride)
-      slot = houseSlots[houseIndex]
-      x = rect.x + (slot mod columns) * stride
-      y = rect.y + (slot div columns) * stride - GnomeSpriteSize
-      isOwner = player.homeFlag == HomeMapIndexBase + houseIndex
-    inc houseSlots[houseIndex]
-    packet.addObject(
-      HouseGnomeObjectBase + i,
-      x,
-      y,
-      HouseGnomeZ + slot * 2 + 1,
-      MapLayerId,
-      playerSpriteId(player.gnomeIndex, DirDown)
-    )
-    packet.addGnomeOutline(
-      sim,
-      cache,
-      player.gnomeIndex,
-      DirDown,
-      yellow = isOwner,
-      HouseGnomeBorderObjectBase + i,
-      x,
-      y,
-      HouseGnomeZ + slot * 2
-    )
+      rowWidth = stride * occupants[houseIndex].len - 2
+      startX = rect.x + rect.w div 2 - rowWidth div 2
+      y = rect.y - GnomeSpriteSize - HouseGnomeLift
+    for slot, i in occupants[houseIndex]:
+      let
+        player = sim.players[i]
+        x = startX + slot * stride
+        isOwner = player.homeFlag == HomeMapIndexBase + houseIndex
+      packet.addObject(
+        HouseGnomeObjectBase + i,
+        x,
+        y,
+        HouseGnomeZ + slot * 2 + 1,
+        MapLayerId,
+        playerSpriteId(player.gnomeIndex, DirDown)
+      )
+      packet.addGnomeOutline(
+        sim,
+        cache,
+        player.gnomeIndex,
+        DirDown,
+        yellow = isOwner,
+        HouseGnomeBorderObjectBase + i,
+        x,
+        y,
+        HouseGnomeZ + slot * 2
+      )
 
 proc addHouseInsetView(
   packet: var seq[uint8],
@@ -2195,6 +2187,25 @@ proc addInventoryObjects(
     )
     inc slot
 
+proc addLookingForObject(
+  packet: var seq[uint8],
+  player: Player
+) =
+  ## Appends one off-screen label of foods this gnome still needs to eat.
+  packet.addRgbaSprite(
+    LookingForSpriteId,
+    newRgbaSprite(1, 1),
+    player.eaten.lookingForLabel()
+  )
+  packet.addObject(
+    LookingForObjectId,
+    -8,
+    -8,
+    0,
+    UiLayerId,
+    LookingForSpriteId
+  )
+
 proc addClockObjects(packet: var seq[uint8], sim: SimServer) =
   ## Appends the upper-right clock using individual glyph objects.
   let text = sim.clockText()
@@ -2248,6 +2259,7 @@ proc addPlayerView(
       player,
       playerIndex
     )
+    packet.addLookingForObject(player)
     return true
   packet.addObject(
     BottomObjectId,
@@ -2292,6 +2304,7 @@ proc addPlayerView(
     cache,
     player
   )
+  packet.addLookingForObject(player)
   packet.addClockObjects(sim)
   return true
 
@@ -2687,10 +2700,34 @@ proc bannerMessageLines(
   if line.len > 0:
     result.add(line)
 
+proc layoutBannerHearers(
+  sim: SimServer,
+  item: ChatFeedItem,
+  bannerWidth: int
+): seq[ChatBannerHearer] =
+  ## Packs up to three hearers from the right, spaced by name tags.
+  var tagRight = bannerWidth - ChatBannerPortraitMargin
+  for h in 0 ..< min(item.hearers.len, ChatBannerMaxHearers):
+    let
+      portrait = sim.bannerPortrait(item.hearers[h].gnomeIndex)
+      tag = sim.nameTagSprite(item.hearers[h].name)
+    if portrait.width == 0 or tag.width == 0:
+      continue
+    let
+      tagX = tagRight - tag.width
+      portraitX = tagX + tag.width div 2 - portrait.width div 2
+    result.add(ChatBannerHearer(
+      portrait: portrait,
+      tag: tag,
+      portraitX: portraitX,
+      tagX: tagX
+    ))
+    tagRight = tagX - ChatBannerNameGap
+
 proc chatBannerSprite(sim: SimServer, item: ChatFeedItem): RgbaSprite =
   ## Builds the delay-chat banner: the flipped speaker on the left, the
-  ## message in the middle, overlapping hearers on the right, and
-  ## global-view style name tags along the bottom.
+  ## message in the middle, up to three hearers on the right, and name
+  ## tags along the bottom. Hearer portraits overlap above the names.
   result = sim.chatBanner
   if result.width == 0:
     return
@@ -2698,44 +2735,36 @@ proc chatBannerSprite(sim: SimServer, item: ChatFeedItem): RgbaSprite =
     ink = ColorRGBA(r: 0x94, g: 0x5C, b: 0x29, a: 255)
     speakerPortrait =
       sim.bannerPortrait(item.speaker.gnomeIndex).flippedHorizontal()
+    speakerTag = sim.nameTagSprite(item.speaker.name)
+    hearers = sim.layoutBannerHearers(item, result.width)
+    tagY = result.height - speakerTag.height - 2
   result.blitSprite(
     speakerPortrait,
     ChatBannerPortraitMargin,
     ChatBannerPortraitY
   )
-  let speakerTag = sim.nameTagSprite(item.speaker.name)
+  for hearer in hearers:
+    result.blitSprite(
+      hearer.portrait,
+      hearer.portraitX,
+      ChatBannerPortraitY
+    )
   result.blitSprite(
     speakerTag,
     ChatBannerPortraitMargin + speakerPortrait.width div 2 -
       speakerTag.width div 2,
-    result.height - speakerTag.height - 2
+    tagY
   )
-  var
-    hearerX = result.width - ChatBannerPortraitMargin
-    tagSpots: seq[tuple[centerX: int, name: string]]
-  for h in 0 ..< min(item.hearers.len, ChatBannerMaxHearers):
-    let portrait = sim.bannerPortrait(item.hearers[h].gnomeIndex)
-    if portrait.width == 0:
-      continue
-    let step =
-      if tagSpots.len == 0:
-        portrait.width
-      else:
-        portrait.width - ChatBannerHearerOverlap
-    hearerX -= step
-    result.blitSprite(portrait, hearerX, ChatBannerPortraitY)
-    tagSpots.add((hearerX + portrait.width div 2, item.hearers[h].name))
-  for spot in tagSpots:
-    let tag = sim.nameTagSprite(spot.name)
-    result.blitSprite(
-      tag,
-      spot.centerX - tag.width div 2,
-      result.height - tag.height - 2
-    )
+  for hearer in hearers:
+    result.blitSprite(hearer.tag, hearer.tagX, tagY)
+  var huddleLeft = result.width - ChatBannerPortraitMargin
+  for hearer in hearers:
+    huddleLeft = min(huddleLeft, hearer.portraitX)
+    huddleLeft = min(huddleLeft, hearer.tagX)
   let
     textLeft =
       ChatBannerPortraitMargin + speakerPortrait.width + ChatBannerTextGap
-    maxWidth = max(20, hearerX - ChatBannerTextGap - textLeft)
+    maxWidth = max(20, huddleLeft - ChatBannerTextGap - textLeft)
     lines = sim.bannerMessageLines(item.message, maxWidth)
     lineHeight = sim.textFont.height + 1
     blockTop = max(
@@ -3145,6 +3174,69 @@ proc recordDinner(
   player.dinnerRecord = record
   player.dinnerTicks = DinnerScreenTicks
 
+proc chooseDinnerBite*(
+  eaten: array[FoodVeggieSlots, bool],
+  pantry: array[FoodVeggieSlots, int],
+  rng: var Rand
+): int =
+  ## Returns one host-pantry food index to eat, or -1 when empty.
+  var wanted: seq[int]
+  for i in 0 ..< FoodVeggieSlots:
+    if pantry[i] > 0 and not eaten[i]:
+      wanted.add(i)
+  if wanted.len > 0:
+    return wanted[rng.rand(wanted.len - 1)]
+  let total = pantry.totalItems()
+  if total <= 0:
+    return -1
+  var pick = rng.rand(total - 1)
+  for i in 0 ..< FoodVeggieSlots:
+    if pick < pantry[i]:
+      return i
+    pick -= pantry[i]
+  -1
+
+proc applyDinnerBite(
+  eaten: var array[FoodVeggieSlots, bool],
+  pantry: var FoodCounts,
+  ate: var FoodCounts,
+  foodIndex: int
+): int =
+  ## Takes one pantry item and returns the bite score.
+  if foodIndex < 0 or foodIndex >= FoodVeggieSlots:
+    return 0
+  if pantry[foodIndex] <= 0:
+    return 0
+  let isNew = not eaten[foodIndex]
+  eaten[foodIndex] = true
+  dec pantry[foodIndex]
+  inc ate[foodIndex]
+  if isNew:
+    NewFoodEatScore
+  else:
+    LeftoverEatScore
+
+proc eatDinnerRounds*(
+  eaten: var seq[array[FoodVeggieSlots, bool]],
+  pantry: var array[FoodVeggieSlots, int],
+  rng: var Rand
+): tuple[
+  scores: seq[int],
+  foods: seq[array[FoodVeggieSlots, int]]
+] =
+  ## Runs three shared rounds of one bite each from a host pantry.
+  result.scores = newSeq[int](eaten.len)
+  result.foods = newSeq[array[FoodVeggieSlots, int]](eaten.len)
+  for r in 0 ..< DinnerEatRounds:
+    for i in 0 ..< eaten.len:
+      let foodIndex = chooseDinnerBite(eaten[i], pantry, rng)
+      result.scores[i] += applyDinnerBite(
+        eaten[i],
+        pantry,
+        result.foods[i],
+        foodIndex
+      )
+
 proc startDinnerParties(sim: SimServer) =
   ## Resolves all valid 6pm dinner parties in occupied homes.
   sim.dinnerDone = true
@@ -3164,38 +3256,60 @@ proc startDinnerParties(sim: SimServer) =
     var
       guestNames: seq[string]
       guestGnomeIndices: seq[int]
+      diners = @[hostIndex]
     for visitorIndex in visitors:
       guestNames.add(sim.players[visitorIndex].playerName)
       guestGnomeIndices.add(sim.players[visitorIndex].gnomeIndex)
+      diners.add(visitorIndex)
+    sim.rng.shuffle(diners)
 
+    var
+      dinerEaten = newSeq[array[FoodVeggieSlots, bool]](diners.len)
+      pantry = host.inventory
+    for i, dinerIndex in diners:
+      dinerEaten[i] = sim.players[dinerIndex].eaten
     let
-      hostFoods = host.inventory
-      fedFoods = hostFoods.scaledFoods(visitors.len)
-      score = hostFoods.totalItems() * visitors.len
-      hostRecord = DinnerRecord(
-        hostName: host.playerName,
-        wasHost: true,
-        foods: fedFoods,
-        guestNames: guestNames,
-        guestGnomeIndices: guestGnomeIndices,
-        guestCount: visitors.len,
-        score: score
-      )
-    host.score += score
+      served = host.inventory
+      hostScore = served.totalItems() * visitors.len
+      eatenMeals = eatDinnerRounds(dinerEaten, pantry, sim.rng)
+    for i, dinerIndex in diners:
+      sim.players[dinerIndex].eaten = dinerEaten[i]
+      sim.players[dinerIndex].score += eatenMeals.scores[i]
+
+    let hostRecord = DinnerRecord(
+      hostName: host.playerName,
+      wasHost: true,
+      foods: served,
+      guestNames: guestNames,
+      guestGnomeIndices: guestGnomeIndices,
+      guestCount: visitors.len,
+      score: hostScore
+    )
+    host.score += hostScore
     host.recordDinner(hostRecord)
     host.clearInventory()
 
     for visitorIndex in visitors:
-      let visitorRecord = DinnerRecord(
-        hostName: host.playerName,
-        wasHost: false,
-        foods: hostFoods,
-        guestNames: guestNames,
-        guestGnomeIndices: guestGnomeIndices,
-        guestCount: visitors.len,
-        score: 0
+      let visitor = sim.players[visitorIndex]
+      var
+        ate: FoodCounts
+        eatScore = 0
+      for i, dinerIndex in diners:
+        if dinerIndex == visitorIndex:
+          ate = eatenMeals.foods[i]
+          eatScore = eatenMeals.scores[i]
+          break
+      visitor.recordDinner(
+        DinnerRecord(
+          hostName: host.playerName,
+          wasHost: false,
+          foods: ate,
+          guestNames: guestNames,
+          guestGnomeIndices: guestGnomeIndices,
+          guestCount: visitors.len,
+          score: eatScore
+        )
       )
-      sim.players[visitorIndex].recordDinner(visitorRecord)
 
 proc startDay(sim: SimServer) =
   ## Starts a new morning while keeping long-game player progress.
@@ -3375,6 +3489,8 @@ proc gameHash*(sim: SimServer): uint64 =
     result.mixHashInt(ord(player.attackDown))
     for count in player.inventory:
       result.mixHashInt(count)
+    for eatenFlag in player.eaten:
+      result.mixHashInt(ord(eatenFlag))
   result.mixHashInt(sim.gardens.len)
   for garden in sim.gardens:
     for count in garden.inventory:
@@ -3582,35 +3698,34 @@ proc applyReplayCommand*(
   else:
     discard
 
-proc initAppState() =
-  ## Initializes shared websocket state.
-  appState = WebSocketAppState()
-  initLock(appState.lock)
-  appState.inputMasks = initTable[WebSocket, uint8]()
-  appState.lastAppliedMasks = initTable[WebSocket, uint8]()
-  appState.playerIndices = initTable[WebSocket, int]()
-  appState.playerSlots = initTable[WebSocket, int]()
-  appState.playerViewers = initTable[WebSocket, PlayerViewerState]()
-  appState.globalViewers = initTable[WebSocket, PlayerViewerState]()
-  appState.replayViewers = initTable[WebSocket, PlayerViewerState]()
-  appState.playerUsernames = initTable[WebSocket, string]()
-  appState.chatMessages = initTable[WebSocket, string]()
-  appState.closedSockets = @[]
-  appState.tokens = @[]
-  appState.replayServerMode = false
-  appState.replayLoaded = false
-  appState.pendingReplayUri = ""
+when not defined(emscripten):
+  proc initAppState() =
+    ## Initializes shared websocket state.
+    appState = WebSocketAppState()
+    initLock(appState.lock)
+    appState.inputMasks = initTable[WebSocket, uint8]()
+    appState.lastAppliedMasks = initTable[WebSocket, uint8]()
+    appState.playerIndices = initTable[WebSocket, int]()
+    appState.playerSlots = initTable[WebSocket, int]()
+    appState.playerViewers = initTable[WebSocket, PlayerViewerState]()
+    appState.globalViewers = initTable[WebSocket, PlayerViewerState]()
+    appState.replayViewers = initTable[WebSocket, PlayerViewerState]()
+    appState.playerUsernames = initTable[WebSocket, string]()
+    appState.chatMessages = initTable[WebSocket, string]()
+    appState.closedSockets = @[]
+    appState.tokens = @[]
+    appState.replayServerMode = false
+    appState.replayLoaded = false
+    appState.pendingReplayUri = ""
 
-proc globalPanelClickedPlayer(message: Message): int =
+proc globalPanelClickedPlayer(data: string): int =
   ## Returns the clicked global score-panel player index or -1.
   result = -1
-  if message.kind != BinaryMessage:
-    return
   var
     x = 0
     y = 0
     layer = -1
-  for item in message.data.parseSpriteClientMessages():
+  for item in data.parseSpriteClientMessages():
     case item.kind
     of SpriteClientMouseMoveMessage:
       x = item.x
@@ -3636,16 +3751,14 @@ proc globalPanelClickedPlayer(message: Message): int =
         SpriteClientSpritesOffMessage:
       discard
 
-proc globalMapClickAt(message: Message): tuple[hit: bool, x, y: int] =
-  ## Returns the map-layer click position in one viewer message.
+proc globalMapClickAt(data: string): tuple[hit: bool, x, y: int] =
+  ## Returns the map-layer click position in one viewer packet.
   result = (false, 0, 0)
-  if message.kind != BinaryMessage:
-    return
   var
     x = 0
     y = 0
     layer = -1
-  for item in message.data.parseSpriteClientMessages():
+  for item in data.parseSpriteClientMessages():
     case item.kind
     of SpriteClientMouseMoveMessage:
       x = item.x
@@ -3738,528 +3851,614 @@ proc drainReplayViewerInput(
     commands.add(command)
   state.replayCommands.setLen(0)
 
-proc playerChatFromMessage(message: Message): string =
-  ## Reads player chat from text or binary websocket messages.
-  case message.kind
-  of TextMessage:
-    message.data
-  of BinaryMessage:
-    if message.data.isChatPacket():
-      return message.data.blobToChat()
-    message.data.readSpriteInputText()
-  of Ping, Pong:
-    ""
+proc newReplayViewerState*(): PlayerViewerState =
+  ## Creates one replay viewer state with nothing selected.
+  PlayerViewerState(selectedPlayerIndex: -1)
 
-proc removePlayer(sim: SimServer, websocket: WebSocket) =
-  ## Removes one websocket and keeps player indices compact.
-  if websocket in appState.replayViewers:
-    appState.replayViewers.del(websocket)
-  if websocket in appState.globalViewers:
-    appState.globalViewers.del(websocket)
-  if websocket in appState.playerViewers:
-    appState.playerViewers.del(websocket)
-  if websocket in appState.playerSlots:
-    appState.playerSlots.del(websocket)
-  if websocket in appState.playerUsernames:
-    appState.playerUsernames.del(websocket)
-  if websocket in appState.chatMessages:
-    appState.chatMessages.del(websocket)
-  if websocket notin appState.playerIndices:
+proc handleReplayViewerPacket*(state: PlayerViewerState, data: string) =
+  ## Applies one raw sprite-client packet from a local viewer: the
+  ## score-panel selection toggle, house-inset map clicks, and mouse,
+  ## scrubber, and transport state. Mirrors websocketHandler.
+  when defined(replayViewerDebug):
+    for item in data.parseSpriteClientMessages():
+      case item.kind
+      of SpriteClientMouseMoveMessage:
+        echo "debug mouse move x=", item.x, " y=", item.y,
+          " layer=", (if item.hasLayer: item.layer else: -1)
+      of SpriteClientMouseButtonMessage:
+        echo "debug mouse button=", item.button, " down=", item.down
+      else:
+        discard
+  let clickedPlayer = data.globalPanelClickedPlayer()
+  if clickedPlayer >= 0:
+    state.selectedPlayerIndex =
+      if state.selectedPlayerIndex == clickedPlayer:
+        -1
+      else:
+        clickedPlayer
+    when defined(replayViewerDebug):
+      echo "debug clickedPlayer=", clickedPlayer,
+        " selected=", state.selectedPlayerIndex
+  let mapClick = data.globalMapClickAt()
+  if mapClick.hit:
+    state.pendingMapClick = true
+    state.pendingMapClickX = mapClick.x
+    state.pendingMapClickY = mapClick.y
+  state.applyReplayViewerMessage(data)
+
+proc replayViewerFrame*(
+  sim: SimServer,
+  replay: var ReplayPlayer,
+  state: var PlayerViewerState,
+  replayLoaded: bool
+): seq[uint8] =
+  ## Advances one replay viewer frame for a single local viewer and
+  ## returns the sprite packet to render: pending seeks and transport
+  ## commands, playback stepping with loop restart, the delay chat
+  ## pacing, and the global packet build.
+  var
+    seekTicks: seq[int]
+    commands: seq[char]
+  state.drainReplayViewerInput(replay.replayMaxTick(), seekTicks, commands)
+  if replayLoaded:
+    for seekTick in seekTicks:
+      replay.applyReplaySeek(sim, seekTick)
+    for command in commands:
+      replay.applyReplayCommand(sim, command)
+    if replay.playing:
+      for _ in 0 ..< replay.replaySpeed():
+        if replay.playing:
+          replay.stepReplay(sim)
+      if replay.looping and not replay.playing and
+          replay.replayMaxTick() > 0:
+        replay.seekReplay(sim, 0)
+        replay.playing = true
+  sim.advanceChatFeed()
+  var nextState: PlayerViewerState
+  result = sim.buildGlobalPacket(
+    state,
+    nextState,
+    replayControls = replayLoaded,
+    replayTick = sim.tickCount,
+    replaySpeed = replay.replaySpeed(),
+    replayMaxTick = replay.replayMaxTick(),
+    replayPlaying = replay.playing,
+    replayLooping = replay.looping,
+    replayMismatchTick = replay.hashMismatchTick
+  )
+  state = nextState
+
+when not defined(emscripten):
+  proc playerChatFromMessage(message: Message): string =
+    ## Reads player chat from text or binary websocket messages.
+    case message.kind
+    of TextMessage:
+      message.data
+    of BinaryMessage:
+      if message.data.isChatPacket():
+        return message.data.blobToChat()
+      message.data.readSpriteInputText()
+    of Ping, Pong:
+      ""
+
+  proc removePlayer(sim: SimServer, websocket: WebSocket) =
+    ## Removes one websocket and keeps player indices compact.
+    if websocket in appState.replayViewers:
+      appState.replayViewers.del(websocket)
+    if websocket in appState.globalViewers:
+      appState.globalViewers.del(websocket)
+    if websocket in appState.playerViewers:
+      appState.playerViewers.del(websocket)
+    if websocket in appState.playerSlots:
+      appState.playerSlots.del(websocket)
+    if websocket in appState.playerUsernames:
+      appState.playerUsernames.del(websocket)
+    if websocket in appState.chatMessages:
+      appState.chatMessages.del(websocket)
+    if websocket notin appState.playerIndices:
+      appState.inputMasks.del(websocket)
+      appState.lastAppliedMasks.del(websocket)
+      return
+
+    let removedIndex = appState.playerIndices[websocket]
+    appState.playerIndices.del(websocket)
     appState.inputMasks.del(websocket)
     appState.lastAppliedMasks.del(websocket)
-    return
+    if removedIndex >= 0 and removedIndex < sim.players.len:
+      sim.removePlayerAt(removedIndex)
+      for ws, value in appState.playerIndices.mpairs:
+        if value > removedIndex:
+          dec value
 
-  let removedIndex = appState.playerIndices[websocket]
-  appState.playerIndices.del(websocket)
-  appState.inputMasks.del(websocket)
-  appState.lastAppliedMasks.del(websocket)
-  if removedIndex >= 0 and removedIndex < sim.players.len:
-    sim.removePlayerAt(removedIndex)
-    for ws, value in appState.playerIndices.mpairs:
-      if value > removedIndex:
-        dec value
+  proc resetConnectedPlayers() =
+    ## Marks connected player sockets for a fresh simulation join.
+    var sockets: seq[WebSocket] = @[]
+    for websocket in appState.playerIndices.keys:
+      sockets.add(websocket)
+    for websocket in sockets:
+      appState.playerIndices[websocket] = UnassignedPlayerIndex
+      appState.playerViewers[websocket] = PlayerViewerState()
+      appState.inputMasks[websocket] = 0
+      appState.lastAppliedMasks[websocket] = 0
+    appState.chatMessages.clear()
 
-proc resetConnectedPlayers() =
-  ## Marks connected player sockets for a fresh simulation join.
-  var sockets: seq[WebSocket] = @[]
-  for websocket in appState.playerIndices.keys:
-    sockets.add(websocket)
-  for websocket in sockets:
-    appState.playerIndices[websocket] = UnassignedPlayerIndex
-    appState.playerViewers[websocket] = PlayerViewerState()
-    appState.inputMasks[websocket] = 0
-    appState.lastAppliedMasks[websocket] = 0
-  appState.chatMessages.clear()
+  proc isWebSocketUpgrade(request: Request): bool =
+    ## Returns true when the request is a websocket upgrade.
+    request.headers["Sec-WebSocket-Key"].len > 0
 
-proc isWebSocketUpgrade(request: Request): bool =
-  ## Returns true when the request is a websocket upgrade.
-  request.headers["Sec-WebSocket-Key"].len > 0
+  proc respondPlain(request: Request, status: int, body: string) =
+    ## Sends a no-cache plain text response.
+    var headers: HttpHeaders
+    headers["Content-Type"] = "text/plain; charset=utf-8"
+    headers["Cache-Control"] = "no-cache"
+    request.respond(status, headers, body)
 
-proc respondPlain(request: Request, status: int, body: string) =
-  ## Sends a no-cache plain text response.
-  var headers: HttpHeaders
-  headers["Content-Type"] = "text/plain; charset=utf-8"
-  headers["Cache-Control"] = "no-cache"
-  request.respond(status, headers, body)
-
-proc serveHealthz(request: Request): bool =
-  ## Serves the container health check endpoint.
-  if request.path != HealthzPath or request.httpMethod notin ["GET", "HEAD"]:
-    return false
-  request.respondPlain(200, "healthy")
-  return true
-
-proc playerSlot(request: Request): int =
-  ## Returns the requested zero-based slot or -1 for automatic assignment.
-  let text = request.queryParams.getOrDefault("slot", "").strip()
-  if text.len == 0:
-    return -1
-  try:
-    result = parseInt(text)
-  except ValueError:
-    return int.high
-  if result < 0:
-    return int.high
-
-proc playerToken(request: Request): string =
-  ## Returns the requested player token.
-  request.queryParams.getOrDefault("token", "").strip()
-
-proc playerUsername(request: Request): string =
-  ## Returns the requested connection username.
-  let username = request.queryParams.getOrDefault("username", "")
-  if username.len > 0:
-    return username.cleanUsername()
-  return request.queryParams.getOrDefault("name", "").cleanUsername()
-
-proc playerJoinAllowed(slot: int, token: string): bool =
-  ## Returns true when the configured token list accepts a join.
-  if appState.tokens.len == 0:
+  proc serveHealthz(request: Request): bool =
+    ## Serves the container health check endpoint.
+    if request.path != HealthzPath or request.httpMethod notin ["GET", "HEAD"]:
+      return false
+    request.respondPlain(200, "healthy")
     return true
-  if slot >= 0 and slot < appState.tokens.len:
-    return token == appState.tokens[slot]
-  if slot == -1:
-    return token in appState.tokens
-  return false
 
-proc replayFilePath(uri: string): string =
-  ## Resolves one local replay URI to a host path.
-  const FilePrefix = "file://"
-  if uri.startsWith(FilePrefix):
-    return uri[FilePrefix.len .. ^1]
-  if "://" in uri:
-    return ""
-  uri
+  proc playerSlot(request: Request): int =
+    ## Returns the requested zero-based slot or -1 for automatic assignment.
+    let text = request.queryParams.getOrDefault("slot", "").strip()
+    if text.len == 0:
+      return -1
+    try:
+      result = parseInt(text)
+    except ValueError:
+      return int.high
+    if result < 0:
+      return int.high
 
-let replayDownloadPool = newCurlPool(1)
+  proc playerToken(request: Request): string =
+    ## Returns the requested player token.
+    request.queryParams.getOrDefault("token", "").strip()
 
-proc loadReplayUri(uri: string): ReplayData =
-  ## Loads a replay from a local file URI or HTTP(S) URL.
-  parseReplayBytes(readCogameUri(uri, CogameLoadReplayUriEnv))
+  proc playerUsername(request: Request): string =
+    ## Returns the requested connection username.
+    let username = request.queryParams.getOrDefault("username", "")
+    if username.len > 0:
+      return username.cleanUsername()
+    return request.queryParams.getOrDefault("name", "").cleanUsername()
 
-proc readableReplayUri(uri: string): bool =
-  ## Returns true when a replay URI can be opened by this server.
-  if uri.len == 0:
-    return false
-  if uri.startsWith("http://") or uri.startsWith("https://"):
-    return replayDownloadPool.head(uri).code == 200
-  let path = replayFilePath(uri)
-  path.len > 0 and fileExists(path)
-
-proc replayRequestUri(request: Request): string =
-  ## Returns the replay artifact URI requested by a Coworld replay client.
-  request.queryParams.getOrDefault("uri", "").strip()
-
-proc checkReplayRequest(request: Request): bool =
-  ## Validates one replay page or websocket request, capturing the
-  ## requested replay URI for the playback loop. Returns false after
-  ## responding with an error.
-  result = true
-  var
-    replayServerMode = false
-    replayLoaded = false
-  {.gcsafe.}:
-    withLock appState.lock:
-      replayServerMode = appState.replayServerMode
-      replayLoaded = appState.replayLoaded
-  if not replayServerMode:
-    return true
-  let uri = request.replayRequestUri()
-  if uri.len == 0:
-    if replayLoaded:
+  proc playerJoinAllowed(slot: int, token: string): bool =
+    ## Returns true when the configured token list accepts a join.
+    if appState.tokens.len == 0:
       return true
-    request.respondPlain(400, "missing replay uri\n")
+    if slot >= 0 and slot < appState.tokens.len:
+      return token == appState.tokens[slot]
+    if slot == -1:
+      return token in appState.tokens
     return false
-  var readable = false
-  {.gcsafe.}:
-    readable = uri.readableReplayUri()
-  if not readable:
-    request.respondPlain(404, "replay uri is not readable\n")
-    return false
-  {.gcsafe.}:
-    withLock appState.lock:
-      appState.pendingReplayUri = uri
-  return true
 
-proc httpHandler(request: Request) =
-  ## Handles Heartleaf HTTP and websocket routes.
-  if request.serveHealthz():
-    discard
-  elif request.path == WebSocketPath and request.httpMethod == "GET" and
-      not request.isWebSocketUpgrade():
-    request.respondPlain(426, "websocket required\n")
-  elif request.path == GlobalWebSocketPath and request.httpMethod == "GET" and
-      not request.isWebSocketUpgrade():
-    discard bitworldClient.serveClientFile(
-      request,
-      bitworldClient.GlobalClientRoute,
-      bitworldClient.GlobalClientRoute
-    )
-  elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
-      not request.isWebSocketUpgrade():
-    if not request.checkReplayRequest():
-      return
-    discard bitworldClient.serveClientFile(
-      request,
-      bitworldClient.ReplayClientRoute,
-      bitworldClient.GlobalClientRoute
-    )
-  elif request.path == WebSocketPath and request.httpMethod == "GET" and
-      request.isWebSocketUpgrade():
-    let
-      slot = request.playerSlot()
-      token = request.playerToken()
-      username = request.playerUsername()
-    var allowed = false
-    {.gcsafe.}:
-      withLock appState.lock:
-        allowed = playerJoinAllowed(slot, token)
-    if not allowed:
-      request.respondPlain(403, "player token rejected\n")
-      return
-    let websocket = request.upgradeToWebSocket()
-    {.gcsafe.}:
-      withLock appState.lock:
-        appState.playerViewers[websocket] = PlayerViewerState()
-        appState.playerIndices[websocket] = UnassignedPlayerIndex
-        appState.playerSlots[websocket] = slot
-        appState.playerUsernames[websocket] = username
-        appState.inputMasks[websocket] = 0
-        appState.lastAppliedMasks[websocket] = 0
-  elif request.path == GlobalWebSocketPath and request.httpMethod == "GET" and
-      request.isWebSocketUpgrade():
-    let websocket = request.upgradeToWebSocket()
-    {.gcsafe.}:
-      withLock appState.lock:
-        appState.globalViewers[websocket] = PlayerViewerState(
-          selectedPlayerIndex: -1
-        )
-  elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
-      request.isWebSocketUpgrade():
-    if not request.checkReplayRequest():
-      return
-    let websocket = request.upgradeToWebSocket()
-    {.gcsafe.}:
-      withLock appState.lock:
-        appState.replayViewers[websocket] = PlayerViewerState(
-          selectedPlayerIndex: -1
-        )
-  elif request.path in [
-      bitworldClient.ReplayClientRoute,
-      bitworldClient.CoworldReplayClientRoute
-    ] and request.httpMethod == "GET":
-    if not request.checkReplayRequest():
-      return
-    discard bitworldClient.serveClientFile(
-      request,
-      request.path,
-      bitworldClient.GlobalClientRoute
-    )
-  elif bitworldClient.serveClientRoute(
-    request,
-    bitworldClient.GlobalClientRoute
-  ):
-    discard
-  else:
-    request.respondPlain(200, "Heartleaf sprite protocol server")
+  proc replayFilePath(uri: string): string =
+    ## Resolves one local replay URI to a host path.
+    const FilePrefix = "file://"
+    if uri.startsWith(FilePrefix):
+      return uri[FilePrefix.len .. ^1]
+    if "://" in uri:
+      return ""
+    uri
 
-proc websocketHandler(
-  websocket: WebSocket,
-  event: WebSocketEvent,
-  message: Message
-) =
-  ## Handles player websocket input and close events.
-  case event
-  of OpenEvent:
-    discard
-  of MessageEvent:
-    let clickedPlayer = message.globalPanelClickedPlayer()
-    if clickedPlayer >= 0:
-      {.gcsafe.}:
-        withLock appState.lock:
-          if websocket in appState.globalViewers:
-            let state = appState.globalViewers[websocket]
-            state.selectedPlayerIndex =
-              if state.selectedPlayerIndex == clickedPlayer:
-                -1
-              else:
-                clickedPlayer
-          elif websocket in appState.replayViewers:
-            let state = appState.replayViewers[websocket]
-            state.selectedPlayerIndex =
-              if state.selectedPlayerIndex == clickedPlayer:
-                -1
-              else:
-                clickedPlayer
-    let mapClick = message.globalMapClickAt()
-    if mapClick.hit:
-      {.gcsafe.}:
-        withLock appState.lock:
-          var state: PlayerViewerState
-          if websocket in appState.globalViewers:
-            state = appState.globalViewers[websocket]
-          elif websocket in appState.replayViewers:
-            state = appState.replayViewers[websocket]
-          if state != nil:
-            state.pendingMapClick = true
-            state.pendingMapClickX = mapClick.x
-            state.pendingMapClickY = mapClick.y
-    if message.kind == BinaryMessage:
-      {.gcsafe.}:
-        withLock appState.lock:
-          if appState.replayServerMode:
-            if websocket in appState.replayViewers:
-              appState.replayViewers[websocket].applyReplayViewerMessage(
-                message.data
-              )
-            elif websocket in appState.globalViewers:
-              appState.globalViewers[websocket].applyReplayViewerMessage(
-                message.data
-              )
-    if message.kind == BinaryMessage and message.data.len == 2 and
-        (
-          message.data[0].uint8 == PacketInput or
-          message.data[0].uint8 == 0x84'u8
-        ):
-      {.gcsafe.}:
-        withLock appState.lock:
-          if websocket in appState.playerViewers:
-            appState.inputMasks[websocket] = message.data[1].uint8 and 0x7f'u8
-    let chatText = message.playerChatFromMessage().cleanChatMessage()
-    if chatText.len > 0:
-      {.gcsafe.}:
-        withLock appState.lock:
-          if websocket in appState.playerViewers:
-            appState.chatMessages[websocket] = chatText
-  of ErrorEvent:
-    discard
-  of CloseEvent:
-    {.gcsafe.}:
-      withLock appState.lock:
-        appState.closedSockets.add(websocket)
+  let replayDownloadPool = newCurlPool(1)
 
-proc serverThreadProc(args: ServerThreadArgs) {.thread.} =
-  ## Runs the mummy server on a background thread.
-  args.server[].serve(Port(args.port), args.address)
+  proc loadReplayUri(uri: string): ReplayData =
+    ## Loads a replay from a local file URI or HTTP(S) URL.
+    parseReplayBytes(readCogameUri(uri, CogameLoadReplayUriEnv))
 
-proc runFrameLimiter(previousTick: var MonoTime) =
-  ## Sleeps until the next simulation frame should run.
-  let frameDuration = initDuration(milliseconds = int(1000.0 / TargetFps))
-  let elapsed = getMonoTime() - previousTick
-  if elapsed < frameDuration:
-    sleep(int((frameDuration - elapsed).inMilliseconds))
-  previousTick = getMonoTime()
+  proc readableReplayUri(uri: string): bool =
+    ## Returns true when a replay URI can be opened by this server.
+    if uri.len == 0:
+      return false
+    if uri.startsWith("http://") or uri.startsWith("https://"):
+      return replayDownloadPool.head(uri).code == 200
+    let path = replayFilePath(uri)
+    path.len > 0 and fileExists(path)
 
-proc writeArtifacts(
-  sim: SimServer,
-  runtimeConfig: RuntimeConfig
-) =
-  ## Writes the results artifact for the current day.
-  runtimeConfig.writeResults(sim.dailyResultsJson() & "\n")
+  proc replayRequestUri(request: Request): string =
+    ## Returns the replay artifact URI requested by a Coworld replay client.
+    request.queryParams.getOrDefault("uri", "").strip()
 
-proc runServerLoop*(
-  host = DefaultHost,
-  port = DefaultPort,
-  seed = DefaultSeed,
-  maxTicks = DefaultMaxTicks,
-  maxGames = DefaultMaxGames,
-  daySeconds = DefaultDaySeconds,
-  tokens: seq[string] = @[],
-  saveReplayPath = "",
-  runtimeConfig = RuntimeConfig()
-) =
-  ## Runs the Heartleaf websocket game server.
-  initAppState()
-  appState.tokens = tokens
-  var replayWriter = openReplayWriter(
-    saveReplayPath,
-    $(%*{
-      "seed": seed,
-      "maxTicks": maxTicks,
-      "maxGames": maxGames,
-      "daySeconds": daySeconds,
-      "tokenCount": tokens.len
-    })
-  )
-  let httpServer = newServer(
-    httpHandler,
-    websocketHandler,
-    workerThreads = 4,
-    tcpNoDelay = true
-  )
-  var serverThread: Thread[ServerThreadArgs]
-  var serverPtr = cast[ptr Server](unsafeAddr httpServer)
-  createThread(
-    serverThread,
-    serverThreadProc,
-    ServerThreadArgs(server: serverPtr, address: host, port: port)
-  )
-  httpServer.waitUntilReady()
-
-  let dayTicks = max(1, daySeconds) * TicksPerSecond
-  var
-    sim = initSimServer(seed, dayTicks)
-    lastTick = getMonoTime()
-    runTicks = 0
-    gamesFinished = 0
-    lastWrittenDay = 0
-
-  while true:
+  proc checkReplayRequest(request: Request): bool =
+    ## Validates one replay page or websocket request, capturing the
+    ## requested replay URI for the playback loop. Returns false after
+    ## responding with an error.
+    result = true
     var
-      sockets: seq[WebSocket] = @[]
-      playerIndices: seq[int] = @[]
-      playerStates: seq[PlayerViewerState] = @[]
-      globalSockets: seq[WebSocket] = @[]
-      globalStates: seq[PlayerViewerState] = @[]
-      inputs: seq[InputState]
-
+      replayServerMode = false
+      replayLoaded = false
     {.gcsafe.}:
       withLock appState.lock:
-        for websocket in appState.closedSockets:
-          if replayWriter.enabled and websocket in appState.playerIndices:
-            let playerIndex = appState.playerIndices[websocket]
-            if playerIndex >= 0 and playerIndex < sim.players.len:
-              replayWriter.writeLeave(tickTime(sim.tickCount), playerIndex)
-              if playerIndex < replayWriter.lastMasks.len:
-                replayWriter.lastMasks.delete(playerIndex)
-          sim.removePlayer(websocket)
-        appState.closedSockets.setLen(0)
+        replayServerMode = appState.replayServerMode
+        replayLoaded = appState.replayLoaded
+    if not replayServerMode:
+      return true
+    let uri = request.replayRequestUri()
+    if uri.len == 0:
+      if replayLoaded:
+        return true
+      request.respondPlain(400, "missing replay uri\n")
+      return false
+    var readable = false
+    {.gcsafe.}:
+      readable = uri.readableReplayUri()
+    if not readable:
+      request.respondPlain(404, "replay uri is not readable\n")
+      return false
+    {.gcsafe.}:
+      withLock appState.lock:
+        appState.pendingReplayUri = uri
+    return true
 
-        for websocket in appState.playerIndices.keys:
-          if appState.playerIndices[websocket] == UnassignedPlayerIndex:
-            let playerIndex = sim.addPlayer(
-              appState.playerUsernames.getOrDefault(websocket, ""),
-              appState.playerSlots.getOrDefault(websocket, -1)
-            )
-            if playerIndex >= 0:
-              appState.playerIndices[websocket] = playerIndex
-              if replayWriter.enabled:
-                replayWriter.writeJoin(
-                  tickTime(sim.tickCount),
-                  playerIndex,
-                  appState.playerUsernames.getOrDefault(websocket, ""),
-                  appState.playerSlots.getOrDefault(websocket, -1),
-                  ""
+  proc httpHandler(request: Request) =
+    ## Handles Heartleaf HTTP and websocket routes.
+    if request.serveHealthz():
+      discard
+    elif request.path == WebSocketPath and request.httpMethod == "GET" and
+        not request.isWebSocketUpgrade():
+      request.respondPlain(426, "websocket required\n")
+    elif request.path == GlobalWebSocketPath and request.httpMethod == "GET" and
+        not request.isWebSocketUpgrade():
+      discard bitworldClient.serveClientFile(
+        request,
+        bitworldClient.GlobalClientRoute,
+        bitworldClient.GlobalClientRoute
+      )
+    elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
+        not request.isWebSocketUpgrade():
+      if not request.checkReplayRequest():
+        return
+      discard bitworldClient.serveClientFile(
+        request,
+        bitworldClient.ReplayClientRoute,
+        bitworldClient.GlobalClientRoute
+      )
+    elif request.path == WebSocketPath and request.httpMethod == "GET" and
+        request.isWebSocketUpgrade():
+      let
+        slot = request.playerSlot()
+        token = request.playerToken()
+        username = request.playerUsername()
+      var allowed = false
+      {.gcsafe.}:
+        withLock appState.lock:
+          allowed = playerJoinAllowed(slot, token)
+      if not allowed:
+        request.respondPlain(403, "player token rejected\n")
+        return
+      let websocket = request.upgradeToWebSocket()
+      {.gcsafe.}:
+        withLock appState.lock:
+          appState.playerViewers[websocket] = PlayerViewerState()
+          appState.playerIndices[websocket] = UnassignedPlayerIndex
+          appState.playerSlots[websocket] = slot
+          appState.playerUsernames[websocket] = username
+          appState.inputMasks[websocket] = 0
+          appState.lastAppliedMasks[websocket] = 0
+    elif request.path == GlobalWebSocketPath and request.httpMethod == "GET" and
+        request.isWebSocketUpgrade():
+      let websocket = request.upgradeToWebSocket()
+      {.gcsafe.}:
+        withLock appState.lock:
+          appState.globalViewers[websocket] = PlayerViewerState(
+            selectedPlayerIndex: -1
+          )
+    elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
+        request.isWebSocketUpgrade():
+      if not request.checkReplayRequest():
+        return
+      let websocket = request.upgradeToWebSocket()
+      {.gcsafe.}:
+        withLock appState.lock:
+          appState.replayViewers[websocket] = PlayerViewerState(
+            selectedPlayerIndex: -1
+          )
+    elif request.path in [
+        bitworldClient.ReplayClientRoute,
+        bitworldClient.CoworldReplayClientRoute
+      ] and request.httpMethod == "GET":
+      if not request.checkReplayRequest():
+        return
+      discard bitworldClient.serveClientFile(
+        request,
+        request.path,
+        bitworldClient.GlobalClientRoute
+      )
+    elif bitworldClient.serveClientRoute(
+      request,
+      bitworldClient.GlobalClientRoute
+    ):
+      discard
+    else:
+      request.respondPlain(200, "Heartleaf sprite protocol server")
+
+  proc websocketHandler(
+    websocket: WebSocket,
+    event: WebSocketEvent,
+    message: Message
+  ) =
+    ## Handles player websocket input and close events.
+    case event
+    of OpenEvent:
+      discard
+    of MessageEvent:
+      let clickedPlayer =
+        if message.kind == BinaryMessage:
+          message.data.globalPanelClickedPlayer()
+        else:
+          -1
+      if clickedPlayer >= 0:
+        {.gcsafe.}:
+          withLock appState.lock:
+            if websocket in appState.globalViewers:
+              let state = appState.globalViewers[websocket]
+              state.selectedPlayerIndex =
+                if state.selectedPlayerIndex == clickedPlayer:
+                  -1
+                else:
+                  clickedPlayer
+            elif websocket in appState.replayViewers:
+              let state = appState.replayViewers[websocket]
+              state.selectedPlayerIndex =
+                if state.selectedPlayerIndex == clickedPlayer:
+                  -1
+                else:
+                  clickedPlayer
+      let mapClick =
+        if message.kind == BinaryMessage:
+          message.data.globalMapClickAt()
+        else:
+          (hit: false, x: 0, y: 0)
+      if mapClick.hit:
+        {.gcsafe.}:
+          withLock appState.lock:
+            var state: PlayerViewerState
+            if websocket in appState.globalViewers:
+              state = appState.globalViewers[websocket]
+            elif websocket in appState.replayViewers:
+              state = appState.replayViewers[websocket]
+            if state != nil:
+              state.pendingMapClick = true
+              state.pendingMapClickX = mapClick.x
+              state.pendingMapClickY = mapClick.y
+      if message.kind == BinaryMessage:
+        {.gcsafe.}:
+          withLock appState.lock:
+            if appState.replayServerMode:
+              if websocket in appState.replayViewers:
+                appState.replayViewers[websocket].applyReplayViewerMessage(
+                  message.data
                 )
-                while replayWriter.lastMasks.len < sim.players.len:
-                  replayWriter.lastMasks.add(0)
+              elif websocket in appState.globalViewers:
+                appState.globalViewers[websocket].applyReplayViewerMessage(
+                  message.data
+                )
+      if message.kind == BinaryMessage and message.data.len == 2 and
+          (
+            message.data[0].uint8 == PacketInput or
+            message.data[0].uint8 == 0x84'u8
+          ):
+        {.gcsafe.}:
+          withLock appState.lock:
+            if websocket in appState.playerViewers:
+              appState.inputMasks[websocket] = message.data[1].uint8 and 0x7f'u8
+      let chatText = message.playerChatFromMessage().cleanChatMessage()
+      if chatText.len > 0:
+        {.gcsafe.}:
+          withLock appState.lock:
+            if websocket in appState.playerViewers:
+              appState.chatMessages[websocket] = chatText
+    of ErrorEvent:
+      discard
+    of CloseEvent:
+      {.gcsafe.}:
+        withLock appState.lock:
+          appState.closedSockets.add(websocket)
 
-        inputs = newSeq[InputState](sim.players.len)
-        for websocket, playerIndex in appState.playerIndices.pairs:
-          sockets.add(websocket)
-          playerIndices.add(playerIndex)
-          playerStates.add(
-            appState.playerViewers.getOrDefault(
-              websocket,
-              PlayerViewerState()
+  proc serverThreadProc(args: ServerThreadArgs) {.thread.} =
+    ## Runs the mummy server on a background thread.
+    args.server[].serve(Port(args.port), args.address)
+
+  proc runFrameLimiter(previousTick: var MonoTime) =
+    ## Sleeps until the next simulation frame should run.
+    let frameDuration = initDuration(milliseconds = int(1000.0 / TargetFps))
+    let elapsed = getMonoTime() - previousTick
+    if elapsed < frameDuration:
+      sleep(int((frameDuration - elapsed).inMilliseconds))
+    previousTick = getMonoTime()
+
+  proc writeArtifacts(
+    sim: SimServer,
+    runtimeConfig: RuntimeConfig
+  ) =
+    ## Writes the results artifact for the current day.
+    runtimeConfig.writeResults(sim.dailyResultsJson() & "\n")
+
+  proc runServerLoop*(
+    host = DefaultHost,
+    port = DefaultPort,
+    seed = DefaultSeed,
+    maxTicks = DefaultMaxTicks,
+    maxGames = DefaultMaxGames,
+    daySeconds = DefaultDaySeconds,
+    tokens: seq[string] = @[],
+    saveReplayPath = "",
+    runtimeConfig = RuntimeConfig()
+  ) =
+    ## Runs the Heartleaf websocket game server.
+    initAppState()
+    appState.tokens = tokens
+    var replayWriter = openReplayWriter(
+      saveReplayPath,
+      $(%*{
+        "seed": seed,
+        "maxTicks": maxTicks,
+        "maxGames": maxGames,
+        "daySeconds": daySeconds,
+        "tokenCount": tokens.len
+      })
+    )
+    let httpServer = newServer(
+      httpHandler,
+      websocketHandler,
+      workerThreads = 4,
+      tcpNoDelay = true
+    )
+    var serverThread: Thread[ServerThreadArgs]
+    var serverPtr = cast[ptr Server](unsafeAddr httpServer)
+    createThread(
+      serverThread,
+      serverThreadProc,
+      ServerThreadArgs(server: serverPtr, address: host, port: port)
+    )
+    httpServer.waitUntilReady()
+
+    let dayTicks = max(1, daySeconds) * TicksPerSecond
+    var
+      sim = initSimServer(seed, dayTicks)
+      lastTick = getMonoTime()
+      runTicks = 0
+      gamesFinished = 0
+      lastWrittenDay = 0
+
+    while true:
+      var
+        sockets: seq[WebSocket] = @[]
+        playerIndices: seq[int] = @[]
+        playerStates: seq[PlayerViewerState] = @[]
+        globalSockets: seq[WebSocket] = @[]
+        globalStates: seq[PlayerViewerState] = @[]
+        inputs: seq[InputState]
+
+      {.gcsafe.}:
+        withLock appState.lock:
+          for websocket in appState.closedSockets:
+            if replayWriter.enabled and websocket in appState.playerIndices:
+              let playerIndex = appState.playerIndices[websocket]
+              if playerIndex >= 0 and playerIndex < sim.players.len:
+                replayWriter.writeLeave(tickTime(sim.tickCount), playerIndex)
+                if playerIndex < replayWriter.lastMasks.len:
+                  replayWriter.lastMasks.delete(playerIndex)
+            sim.removePlayer(websocket)
+          appState.closedSockets.setLen(0)
+
+          for websocket in appState.playerIndices.keys:
+            if appState.playerIndices[websocket] == UnassignedPlayerIndex:
+              let playerIndex = sim.addPlayer(
+                appState.playerUsernames.getOrDefault(websocket, ""),
+                appState.playerSlots.getOrDefault(websocket, -1)
+              )
+              if playerIndex >= 0:
+                appState.playerIndices[websocket] = playerIndex
+                if replayWriter.enabled:
+                  replayWriter.writeJoin(
+                    tickTime(sim.tickCount),
+                    playerIndex,
+                    appState.playerUsernames.getOrDefault(websocket, ""),
+                    appState.playerSlots.getOrDefault(websocket, -1),
+                    ""
+                  )
+                  while replayWriter.lastMasks.len < sim.players.len:
+                    replayWriter.lastMasks.add(0)
+
+          inputs = newSeq[InputState](sim.players.len)
+          for websocket, playerIndex in appState.playerIndices.pairs:
+            sockets.add(websocket)
+            playerIndices.add(playerIndex)
+            playerStates.add(
+              appState.playerViewers.getOrDefault(
+                websocket,
+                PlayerViewerState()
+              )
             )
-          )
-          if playerIndex < 0 or playerIndex >= inputs.len:
-            continue
-          let currentMask = appState.inputMasks.getOrDefault(websocket, 0)
-          inputs[playerIndex] = decodeInputMask(currentMask)
-          appState.lastAppliedMasks[websocket] = currentMask
-          replayWriter.writeInputMaskChange(
-            tickTime(sim.tickCount),
-            playerIndex,
-            currentMask
-          )
-          let chatText = appState.chatMessages.getOrDefault(websocket, "")
-          if chatText.len > 0:
-            sim.applyPlayerChat(playerIndex, chatText)
-            replayWriter.writeChat(
+            if playerIndex < 0 or playerIndex >= inputs.len:
+              continue
+            let currentMask = appState.inputMasks.getOrDefault(websocket, 0)
+            inputs[playerIndex] = decodeInputMask(currentMask)
+            appState.lastAppliedMasks[websocket] = currentMask
+            replayWriter.writeInputMaskChange(
               tickTime(sim.tickCount),
               playerIndex,
-              chatText
+              currentMask
             )
-            appState.chatMessages.del(websocket)
+            let chatText = appState.chatMessages.getOrDefault(websocket, "")
+            if chatText.len > 0:
+              sim.applyPlayerChat(playerIndex, chatText)
+              replayWriter.writeChat(
+                tickTime(sim.tickCount),
+                playerIndex,
+                chatText
+              )
+              appState.chatMessages.del(websocket)
 
-        for websocket, state in appState.globalViewers.pairs:
-          globalSockets.add(websocket)
-          globalStates.add(state)
+          for websocket, state in appState.globalViewers.pairs:
+            globalSockets.add(websocket)
+            globalStates.add(state)
 
-    let wasScoring = sim.scoreTicks > 0
-    sim.step(inputs)
-    sim.advanceChatFeed()
-    replayWriter.writeHash(uint32(sim.tickCount), sim.gameHash())
-    if not wasScoring and sim.scoreTicks > 0:
-      sim.writeArtifacts(runtimeConfig)
-      lastWrittenDay = sim.dayNumber
-    inc runTicks
-
-    for i in 0 ..< sockets.len:
-      var nextState: PlayerViewerState
-      let packet = sim.buildPlayerPacket(
-        playerIndices[i],
-        playerStates[i],
-        nextState
-      )
-      try:
-        sockets[i].sendSpritePacket(packet)
-        {.gcsafe.}:
-          withLock appState.lock:
-            if sockets[i] in appState.playerViewers:
-              appState.playerViewers[sockets[i]] = nextState
-      except CatchableError:
-        {.gcsafe.}:
-          withLock appState.lock:
-            sim.removePlayer(sockets[i])
-
-    for i in 0 ..< globalSockets.len:
-      var nextState: PlayerViewerState
-      let packet = sim.buildGlobalPacket(globalStates[i], nextState)
-      try:
-        globalSockets[i].sendSpritePacket(packet)
-        {.gcsafe.}:
-          withLock appState.lock:
-            if globalSockets[i] in appState.globalViewers:
-              appState.globalViewers[globalSockets[i]] = nextState
-      except CatchableError:
-        {.gcsafe.}:
-          withLock appState.lock:
-            sim.removePlayer(globalSockets[i])
-
-    if maxTicks > 0 and runTicks >= maxTicks:
-      if lastWrittenDay == 0:
+      let wasScoring = sim.scoreTicks > 0
+      sim.step(inputs)
+      sim.advanceChatFeed()
+      replayWriter.writeHash(uint32(sim.tickCount), sim.gameHash())
+      if not wasScoring and sim.scoreTicks > 0:
         sim.writeArtifacts(runtimeConfig)
-      if replayWriter.enabled:
-        # Only the first game of a run is recorded and uploaded.
-        replayWriter.closeReplayWriter()
-        if fileExists(saveReplayPath):
-          echo "Replay written: ", saveReplayPath,
-            " (", getFileSize(saveReplayPath), " bytes)"
-          runtimeConfig.writeReplay(readFile(saveReplayPath))
-      inc gamesFinished
-      if maxGames > 0 and gamesFinished >= maxGames:
-        quit(0)
-      sim = initSimServer(seed + gamesFinished, dayTicks)
-      runTicks = 0
-      lastWrittenDay = 0
-      {.gcsafe.}:
-        withLock appState.lock:
-          resetConnectedPlayers()
+        lastWrittenDay = sim.dayNumber
+      inc runTicks
 
-    runFrameLimiter(lastTick)
+      for i in 0 ..< sockets.len:
+        var nextState: PlayerViewerState
+        let packet = sim.buildPlayerPacket(
+          playerIndices[i],
+          playerStates[i],
+          nextState
+        )
+        try:
+          sockets[i].sendSpritePacket(packet)
+          {.gcsafe.}:
+            withLock appState.lock:
+              if sockets[i] in appState.playerViewers:
+                appState.playerViewers[sockets[i]] = nextState
+        except CatchableError:
+          {.gcsafe.}:
+            withLock appState.lock:
+              sim.removePlayer(sockets[i])
+
+      for i in 0 ..< globalSockets.len:
+        var nextState: PlayerViewerState
+        let packet = sim.buildGlobalPacket(globalStates[i], nextState)
+        try:
+          globalSockets[i].sendSpritePacket(packet)
+          {.gcsafe.}:
+            withLock appState.lock:
+              if globalSockets[i] in appState.globalViewers:
+                appState.globalViewers[globalSockets[i]] = nextState
+        except CatchableError:
+          {.gcsafe.}:
+            withLock appState.lock:
+              sim.removePlayer(globalSockets[i])
+
+      if maxTicks > 0 and runTicks >= maxTicks:
+        if lastWrittenDay == 0:
+          sim.writeArtifacts(runtimeConfig)
+        if replayWriter.enabled:
+          # Only the first game of a run is recorded and uploaded.
+          replayWriter.closeReplayWriter()
+          if fileExists(saveReplayPath):
+            echo "Replay written: ", saveReplayPath,
+              " (", getFileSize(saveReplayPath), " bytes)"
+            runtimeConfig.writeReplay(readFile(saveReplayPath))
+        inc gamesFinished
+        if maxGames > 0 and gamesFinished >= maxGames:
+          quit(0)
+        sim = initSimServer(seed + gamesFinished, dayTicks)
+        runTicks = 0
+        lastWrittenDay = 0
+        {.gcsafe.}:
+          withLock appState.lock:
+            resetConnectedPlayers()
+
+      runFrameLimiter(lastTick)
 
 proc readConfigString(node: JsonNode, name: string, value: var string) =
   ## Reads one optional string config field.
@@ -4472,153 +4671,154 @@ proc snapshotReplayGardens*(sim: SimServer): seq[ReplayGardenSnapshot] =
       foodTotal: foodTotal
     ))
 
-proc runReplayServerLoop*(
-  host = DefaultHost,
-  port = DefaultPort,
-  runtimeConfig = RuntimeConfig()
-) =
-  ## Serves recorded Heartleaf replays to replay and global viewers.
-  initAppState()
-  appState.replayServerMode = true
+when not defined(emscripten):
+  proc runReplayServerLoop*(
+    host = DefaultHost,
+    port = DefaultPort,
+    runtimeConfig = RuntimeConfig()
+  ) =
+    ## Serves recorded Heartleaf replays to replay and global viewers.
+    initAppState()
+    appState.replayServerMode = true
 
-  var
-    replayData = ReplayData()
-    replaySeed = DefaultSeed
-    replayDayTicks = DefaultDaySeconds * TicksPerSecond
-    replayLoaded = false
-  if runtimeConfig.replay.len > 0:
-    replayData = parseReplayBytes(runtimeConfig.replay)
-    let replayConfig = replayData.replayRunConfigFor()
-    replaySeed = replayConfig.seed
-    replayDayTicks = max(1, replayConfig.daySeconds) * TicksPerSecond
-    replayLoaded = true
-  appState.replayLoaded = replayLoaded
-
-  let httpServer = newServer(
-    httpHandler,
-    websocketHandler,
-    workerThreads = 4,
-    tcpNoDelay = true
-  )
-  var serverThread: Thread[ServerThreadArgs]
-  var serverPtr = cast[ptr Server](unsafeAddr httpServer)
-  createThread(
-    serverThread,
-    serverThreadProc,
-    ServerThreadArgs(server: serverPtr, address: host, port: port)
-  )
-  httpServer.waitUntilReady()
-
-  var
-    sim = initSimServer(replaySeed, replayDayTicks)
-    replay =
-      if replayLoaded:
-        initReplayPlayer(replayData)
-      else:
-        ReplayPlayer()
-    lastTick = getMonoTime()
-  if replayLoaded:
-    replay.buildReplayKeyframes(replaySeed, replayDayTicks)
-
-  while true:
     var
-      pendingReplayUri = ""
-      viewerSockets: seq[WebSocket] = @[]
-      viewerStates: seq[PlayerViewerState] = @[]
-      viewerIsReplay: seq[bool] = @[]
-      seekTicks: seq[int] = @[]
-      commands: seq[char] = @[]
+      replayData = ReplayData()
+      replaySeed = DefaultSeed
+      replayDayTicks = DefaultDaySeconds * TicksPerSecond
+      replayLoaded = false
+    if runtimeConfig.replay.len > 0:
+      replayData = parseReplayBytes(runtimeConfig.replay)
+      let replayConfig = replayData.replayRunConfigFor()
+      replaySeed = replayConfig.seed
+      replayDayTicks = max(1, replayConfig.daySeconds) * TicksPerSecond
+      replayLoaded = true
+    appState.replayLoaded = replayLoaded
 
-    {.gcsafe.}:
-      withLock appState.lock:
-        pendingReplayUri = appState.pendingReplayUri
-        appState.pendingReplayUri = ""
-        for websocket in appState.closedSockets:
-          sim.removePlayer(websocket)
-        appState.closedSockets.setLen(0)
+    let httpServer = newServer(
+      httpHandler,
+      websocketHandler,
+      workerThreads = 4,
+      tcpNoDelay = true
+    )
+    var serverThread: Thread[ServerThreadArgs]
+    var serverPtr = cast[ptr Server](unsafeAddr httpServer)
+    createThread(
+      serverThread,
+      serverThreadProc,
+      ServerThreadArgs(server: serverPtr, address: host, port: port)
+    )
+    httpServer.waitUntilReady()
 
-    if pendingReplayUri.len > 0:
-      try:
-        replayData = loadReplayUri(pendingReplayUri)
-        let replayConfig = replayData.replayRunConfigFor()
-        replaySeed = replayConfig.seed
-        replayDayTicks = max(1, replayConfig.daySeconds) * TicksPerSecond
-        sim = initSimServer(replaySeed, replayDayTicks)
-        replay = initReplayPlayer(replayData)
-        replay.buildReplayKeyframes(replaySeed, replayDayTicks)
-        replayLoaded = true
-        {.gcsafe.}:
-          withLock appState.lock:
-            appState.replayLoaded = true
-      except CatchableError as e:
-        echo "Could not load replay uri: ", e.msg
-
-    {.gcsafe.}:
-      withLock appState.lock:
-        for websocket, state in appState.replayViewers.pairs:
-          viewerSockets.add(websocket)
-          viewerStates.add(state)
-          viewerIsReplay.add(true)
-          state.drainReplayViewerInput(
-            replay.replayMaxTick(),
-            seekTicks,
-            commands
-          )
-        for websocket, state in appState.globalViewers.pairs:
-          viewerSockets.add(websocket)
-          viewerStates.add(state)
-          viewerIsReplay.add(false)
-          state.drainReplayViewerInput(
-            replay.replayMaxTick(),
-            seekTicks,
-            commands
-          )
-
+    var
+      sim = initSimServer(replaySeed, replayDayTicks)
+      replay =
+        if replayLoaded:
+          initReplayPlayer(replayData)
+        else:
+          ReplayPlayer()
+      lastTick = getMonoTime()
     if replayLoaded:
-      for seekTick in seekTicks:
-        replay.applyReplaySeek(sim, seekTick)
-      for command in commands:
-        replay.applyReplayCommand(sim, command)
-      if replay.playing:
-        for _ in 0 ..< replay.replaySpeed():
-          if replay.playing:
-            replay.stepReplay(sim)
-        if replay.looping and not replay.playing and
-            replay.replayMaxTick() > 0:
-          replay.seekReplay(sim, 0)
-          replay.playing = true
-    sim.advanceChatFeed()
+      replay.buildReplayKeyframes(replaySeed, replayDayTicks)
 
-    for i in 0 ..< viewerSockets.len:
-      var nextState: PlayerViewerState
-      let packet = sim.buildGlobalPacket(
-        viewerStates[i],
-        nextState,
-        replayControls = replayLoaded,
-        replayTick = sim.tickCount,
-        replaySpeed = replay.replaySpeed(),
-        replayMaxTick = replay.replayMaxTick(),
-        replayPlaying = replay.playing,
-        replayLooping = replay.looping,
-        replayMismatchTick = replay.hashMismatchTick
-      )
-      try:
-        viewerSockets[i].sendSpritePacket(packet)
-        {.gcsafe.}:
-          withLock appState.lock:
-            if viewerIsReplay[i]:
-              if viewerSockets[i] in appState.replayViewers:
-                appState.replayViewers[viewerSockets[i]] = nextState
-            elif viewerSockets[i] in appState.globalViewers:
-              appState.globalViewers[viewerSockets[i]] = nextState
-      except CatchableError:
-        {.gcsafe.}:
-          withLock appState.lock:
-            sim.removePlayer(viewerSockets[i])
+    while true:
+      var
+        pendingReplayUri = ""
+        viewerSockets: seq[WebSocket] = @[]
+        viewerStates: seq[PlayerViewerState] = @[]
+        viewerIsReplay: seq[bool] = @[]
+        seekTicks: seq[int] = @[]
+        commands: seq[char] = @[]
 
-    runFrameLimiter(lastTick)
+      {.gcsafe.}:
+        withLock appState.lock:
+          pendingReplayUri = appState.pendingReplayUri
+          appState.pendingReplayUri = ""
+          for websocket in appState.closedSockets:
+            sim.removePlayer(websocket)
+          appState.closedSockets.setLen(0)
 
-when isMainModule:
+      if pendingReplayUri.len > 0:
+        try:
+          replayData = loadReplayUri(pendingReplayUri)
+          let replayConfig = replayData.replayRunConfigFor()
+          replaySeed = replayConfig.seed
+          replayDayTicks = max(1, replayConfig.daySeconds) * TicksPerSecond
+          sim = initSimServer(replaySeed, replayDayTicks)
+          replay = initReplayPlayer(replayData)
+          replay.buildReplayKeyframes(replaySeed, replayDayTicks)
+          replayLoaded = true
+          {.gcsafe.}:
+            withLock appState.lock:
+              appState.replayLoaded = true
+        except CatchableError as e:
+          echo "Could not load replay uri: ", e.msg
+
+      {.gcsafe.}:
+        withLock appState.lock:
+          for websocket, state in appState.replayViewers.pairs:
+            viewerSockets.add(websocket)
+            viewerStates.add(state)
+            viewerIsReplay.add(true)
+            state.drainReplayViewerInput(
+              replay.replayMaxTick(),
+              seekTicks,
+              commands
+            )
+          for websocket, state in appState.globalViewers.pairs:
+            viewerSockets.add(websocket)
+            viewerStates.add(state)
+            viewerIsReplay.add(false)
+            state.drainReplayViewerInput(
+              replay.replayMaxTick(),
+              seekTicks,
+              commands
+            )
+
+      if replayLoaded:
+        for seekTick in seekTicks:
+          replay.applyReplaySeek(sim, seekTick)
+        for command in commands:
+          replay.applyReplayCommand(sim, command)
+        if replay.playing:
+          for _ in 0 ..< replay.replaySpeed():
+            if replay.playing:
+              replay.stepReplay(sim)
+          if replay.looping and not replay.playing and
+              replay.replayMaxTick() > 0:
+            replay.seekReplay(sim, 0)
+            replay.playing = true
+      sim.advanceChatFeed()
+
+      for i in 0 ..< viewerSockets.len:
+        var nextState: PlayerViewerState
+        let packet = sim.buildGlobalPacket(
+          viewerStates[i],
+          nextState,
+          replayControls = replayLoaded,
+          replayTick = sim.tickCount,
+          replaySpeed = replay.replaySpeed(),
+          replayMaxTick = replay.replayMaxTick(),
+          replayPlaying = replay.playing,
+          replayLooping = replay.looping,
+          replayMismatchTick = replay.hashMismatchTick
+        )
+        try:
+          viewerSockets[i].sendSpritePacket(packet)
+          {.gcsafe.}:
+            withLock appState.lock:
+              if viewerIsReplay[i]:
+                if viewerSockets[i] in appState.replayViewers:
+                  appState.replayViewers[viewerSockets[i]] = nextState
+              elif viewerSockets[i] in appState.globalViewers:
+                appState.globalViewers[viewerSockets[i]] = nextState
+        except CatchableError:
+          {.gcsafe.}:
+            withLock appState.lock:
+              sim.removePlayer(viewerSockets[i])
+
+      runFrameLimiter(lastTick)
+
+when isMainModule and not defined(emscripten):
   let runtimeConfig = readRuntimeConfig()
   var
     config = RunConfig(

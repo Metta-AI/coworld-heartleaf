@@ -26,20 +26,32 @@ another house does not remove the visitor's own inventory.
 Dinner happens at 6:00 PM. A house hosts dinner if its owner is inside
 the house and at least one visiting gnome is also inside.
 
-The visitors eat from the host's inventory. Each visitor gets the full
-amount of every food item the host collected. After dinner, the host's
-served food is removed. Visitors keep their own inventory.
+The host score is counted first from the pantry as it was when dinner
+started:
+
+```text
+host score = (food items in the host inventory) x (number of visitors)
+```
+
+Everyone at that party then eats from the host inventory only, including
+the host. Guests never spend their own stash. Diners are shuffled into
+one random order and that order is reused for 3 rounds. Each gnome takes
+1 bite per round.
+
+On each bite:
+
+- If the host still has a type that gnome has not eaten this game, they
+  take it and score +3.
+- Else if any food remains, they take a random leftover and score +1.
+- If the host pantry is empty, they skip and score 0.
+
+One dinner is at most 9 eating points (`3 x 3`). After dinner, the
+host's served food is removed. Visitors keep their own inventory.
 
 ## Scoring
 
-Only hosts score points. A host gains:
-
-```text
-Total hosted food items x number of visitors
-```
-
-Visitors do not gain score for eating. Their benefit is that they can
-eat elsewhere while keeping their own food for hosting.
+Hosts gain the food-times-visitors score above, plus whatever they ate.
+Guests gain only their eating score.
 
 ## End Of Day
 

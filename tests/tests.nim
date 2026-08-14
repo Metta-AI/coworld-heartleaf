@@ -1,9 +1,10 @@
 import
-  std/[json, os, strutils],
+  std/[json, os, random, strutils],
   bitworld/client as bitworldClient,
   bitworld/resources,
   bitworld/spriteprotocol,
   heartleaf,
+  heartleaf/[common, protocol],
   replays,
   ../players/talking_villager/decisions
 
@@ -58,6 +59,75 @@ let fencedDecision = parseLlmDecision("""
 doAssert fencedDecision.valid, "fenced JSON should parse defensively"
 doAssert fencedDecision.action == LlmGoToParty, "party action should parse"
 doAssert fencedDecision.houseIndex == 8, "house 9 should become index 8"
+
+let stringHouse = parseLlmDecision("""
+{"action": "go_to_party", "houseIndex": "4", "targetName": "Sasha"}
+""")
+doAssert stringHouse.valid, "string houseIndex should parse"
+doAssert stringHouse.houseIndex == 3, "house 4 should become index 3"
+
+echo "Testing food names"
+let namedFoods = replayFoodNames()
+doAssert namedFoods.len == FoodVeggieSlots, "food names should match veggie slots"
+doAssert namedFoods[0] == "Lettuce", "slot 0 should be Lettuce"
+doAssert namedFoods[1] == "Carrot", "slot 1 should be Carrot"
+doAssert namedFoods[5] == "Yellow Squash", "slot 5 should be Yellow Squash"
+doAssert namedFoods[9] == "Purple Cabbage", "slot 9 should be Purple Cabbage"
+doAssert namedFoods[11] == "Strawberries", "slot 11 should be Strawberries"
+doAssert namedFoods[15] == "Rice", "slot 15 should be Rice"
+doAssert namedFoods[17] == "Red Pepper", "slot 17 should be Red Pepper"
+doAssert namedFoods[18] == "Green Pepper", "slot 18 should be Green Pepper"
+doAssert "Zucchini" notin namedFoods, "old zucchini name should be gone"
+doAssert "Raspberries" notin namedFoods, "old raspberry name should be gone"
+doAssert "Hay Grass" notin namedFoods, "old hay grass name should be gone"
+
+echo "Testing looking-for labels"
+var uneaten: array[FoodVeggieSlots, bool]
+doAssert lookingForLabel(uneaten).startsWith(LookingForLabelPrefix),
+  "looking-for label should use the protocol prefix"
+doAssert "Carrot" in lookingForLabel(uneaten),
+  "a new gnome should still want carrot"
+uneaten[1] = true
+doAssert "Carrot" notin lookingForLabel(uneaten),
+  "eaten carrot should leave the looking-for list"
+for i in 0 ..< FoodVeggieSlots:
+  uneaten[i] = true
+doAssert lookingForLabel(uneaten) == LookingForLabelPrefix & "none",
+  "a finished gnome should look for none"
+
+echo "Testing dinner bites"
+block:
+  var
+    rng = initRand(1)
+    eaten: array[FoodVeggieSlots, bool]
+    pantry: array[FoodVeggieSlots, int]
+  pantry[1] = 2
+  doAssert chooseDinnerBite(eaten, pantry, rng) == 1,
+    "an uneaten carrot in the pantry should be taken"
+  pantry[1] = 0
+  doAssert chooseDinnerBite(eaten, pantry, rng) == -1,
+    "an empty pantry should skip the bite"
+  eaten[1] = true
+  pantry[3] = 4
+  doAssert chooseDinnerBite(eaten, pantry, rng) == 3,
+    "a leftover tomato should be taken after new types are gone"
+
+echo "Testing dinner rounds"
+block:
+  var
+    rng = initRand(2)
+    eaten = newSeq[array[FoodVeggieSlots, bool]](2)
+    pantry: array[FoodVeggieSlots, int]
+  pantry[1] = 1
+  pantry[3] = 5
+  let meals = eatDinnerRounds(eaten, pantry, rng)
+  doAssert meals.scores.len == 2, "both diners should get a score"
+  doAssert meals.scores[0] >= 3, "the first diner should eat a new type"
+  doAssert meals.scores[1] >= 3, "the second diner should eat a new type"
+  doAssert pantry[1] + pantry[3] == 0,
+    "six bites should empty six host items"
+  doAssert eaten[0][1] or eaten[1][1],
+    "someone should have eaten the carrot"
 
 echo "Testing replay round trip"
 block:
