@@ -4179,11 +4179,16 @@ when not defined(emscripten):
     event: WebSocketEvent,
     message: Message
   ) =
-    ## Handles player websocket input and close events.
+    ## Handles websocket ping, player input, and close events.
     case event
     of OpenEvent:
       discard
     of MessageEvent:
+      if message.kind == Ping:
+        websocket.send(message.data, Pong)
+        return
+      if message.kind == Pong:
+        return
       let clickedPlayer =
         if message.kind == BinaryMessage:
           message.data.globalPanelClickedPlayer()
