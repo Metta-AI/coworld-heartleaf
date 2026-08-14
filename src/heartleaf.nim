@@ -4305,6 +4305,14 @@ when not defined(emscripten):
         "tokenCount": tokens.len
       })
     )
+    let dayTicks = max(1, daySeconds) * TicksPerSecond
+    var
+      sim = initSimServer(seed, dayTicks)
+      lastTick: MonoTime
+      runTicks = 0
+      gamesFinished = 0
+      lastWrittenDay = 0
+    # Load assets before healthz so /global can send on the first tick.
     let httpServer = newServer(
       httpHandler,
       websocketHandler,
@@ -4319,14 +4327,7 @@ when not defined(emscripten):
       ServerThreadArgs(server: serverPtr, address: host, port: port)
     )
     httpServer.waitUntilReady()
-
-    let dayTicks = max(1, daySeconds) * TicksPerSecond
-    var
-      sim = initSimServer(seed, dayTicks)
-      lastTick = getMonoTime()
-      runTicks = 0
-      gamesFinished = 0
-      lastWrittenDay = 0
+    lastTick = getMonoTime()
 
     while true:
       var
@@ -4699,6 +4700,17 @@ when not defined(emscripten):
       replayLoaded = true
     appState.replayLoaded = replayLoaded
 
+    var
+      sim = initSimServer(replaySeed, replayDayTicks)
+      replay =
+        if replayLoaded:
+          initReplayPlayer(replayData)
+        else:
+          ReplayPlayer()
+      lastTick: MonoTime
+    if replayLoaded:
+      replay.buildReplayKeyframes(replaySeed, replayDayTicks)
+    # Load assets before healthz so replay viewers get frames immediately.
     let httpServer = newServer(
       httpHandler,
       websocketHandler,
@@ -4713,17 +4725,7 @@ when not defined(emscripten):
       ServerThreadArgs(server: serverPtr, address: host, port: port)
     )
     httpServer.waitUntilReady()
-
-    var
-      sim = initSimServer(replaySeed, replayDayTicks)
-      replay =
-        if replayLoaded:
-          initReplayPlayer(replayData)
-        else:
-          ReplayPlayer()
-      lastTick = getMonoTime()
-    if replayLoaded:
-      replay.buildReplayKeyframes(replaySeed, replayDayTicks)
+    lastTick = getMonoTime()
 
     while true:
       var
