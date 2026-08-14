@@ -7,6 +7,9 @@
   ],
   "game": {
     "name": "heartleaf",
+    "replay_viewer": {
+      "bundle": "build/static-replay-viewer"
+    },
     "description": "A cozy BitWorld garden dinner game where players grow food, collect vegetables, and gather in the evening.",
     "owner": "treeform@softmax.com",
     "runnable": {

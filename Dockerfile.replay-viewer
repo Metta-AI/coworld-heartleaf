@@ -1,0 +1,48 @@
+# Build the static WASM replay viewer with the same pinned Nim and
+# Bitworld sources as the native game. The output is architecture-neutral
+# WebAssembly even though this toolchain container runs as linux/amd64.
+FROM emscripten/emsdk:4.0.15 AS replay-viewer-builder
+
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git && \
+  rm -rf /var/lib/apt/lists/* && \
+  curl -fsSL \
+    -o /usr/local/bin/nimby \
+    https://github.com/treeform/nimby/releases/download/0.1.26/nimby-Linux-X64 && \
+  chmod +x /usr/local/bin/nimby && \
+  nimby use 2.2.4
+
+ENV PATH="/root/.nimby/nim/bin:$PATH"
+
+WORKDIR /workspace/heartleaf
+COPY nimby.lock .
+RUN nimby sync nimby.lock -g
+
+COPY . .
+RUN nimby sync nimby.lock -g
+
+RUN BITWORLD_ROOT="" && \
+  for d in /root/.nimble/pkgs2/bitworld-*; do \
+    if [ -d "$d/client/dist" ]; then \
+      BITWORLD_ROOT="$d"; \
+    fi; \
+  done && \
+  test -n "$BITWORLD_ROOT" && \
+  test -f "$BITWORLD_ROOT/client/dist/atlas.png" && \
+  mkdir -p /workspace && \
+  ln -sfn "$BITWORLD_ROOT" /workspace/bitworld
+
+RUN nim c -d:emscripten wasm/replay_viewer.nim && \
+  mkdir -p wasm/dist/bundle && \
+  cp wasm/dist/replay_viewer.html wasm/dist/bundle/index.html && \
+  cp wasm/dist/replay_viewer.js wasm/dist/bundle/ && \
+  cp wasm/dist/replay_viewer.wasm wasm/dist/bundle/ && \
+  cp wasm/dist/replay_viewer.data wasm/dist/bundle/ && \
+  test -s wasm/dist/bundle/index.html && \
+  test -s wasm/dist/bundle/replay_viewer.js && \
+  test -s wasm/dist/bundle/replay_viewer.wasm && \
+  test -s wasm/dist/bundle/replay_viewer.data && \
+  grep -q 'replay_viewer.js' wasm/dist/bundle/index.html
