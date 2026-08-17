@@ -3,15 +3,27 @@
 ## pairs together (weighted by pixel count) until at most the requested
 ## number of colors remain.
 ##
+## Reads PNG and aseprite files; the writer is picked by the output
+## extension, so an aseprite input can also be exported to PNG via
+## --out. Aseprite inputs are flattened (frame 0, all visible layers)
+## and written back as one full-canvas RGBA layer.
+##
 ## Usage:
-##   reduce_palette [--colors:N] [--out:PATH] <image.png>
+##   reduce_palette [--colors:N] [--out:PATH] <image.(png|aseprite)>
 
-import std/[os, parseopt, strutils, tables], pixie, chroma
+import std/[os, parseopt, strutils, tables], pixie, chroma, zippy
+import bitworld/aseprite
 
 const
   DefaultColors = 64
   AlphaOpaqueThreshold = 128
-  UsageText = "Usage: reduce_palette [--colors:N] [--out:PATH] <image.png>"
+  AsepriteHeaderBytes = 128
+  AsepriteHeaderMagic = 0xA5E0
+  AsepriteFrameMagic = 0xF1FA
+  AsepriteLayerChunk = 0x2004
+  AsepriteCelChunk = 0x2005
+  UsageText =
+    "Usage: reduce_palette [--colors:N] [--out:PATH] <image.(png|aseprite)>"
 
 type
   CliConfig = object
@@ -66,6 +78,125 @@ proc parseArgs(): CliConfig =
     fail("Input image not found: " & result.inputPath)
   if result.outputPath.len == 0:
     result.outputPath = result.inputPath
+
+proc addU8(bytes: var string, value: int) =
+  ## Appends one unsigned byte.
+  bytes.add(char(value and 0xff))
+
+proc addU16(bytes: var string, value: int) =
+  ## Appends one little-endian unsigned word.
+  bytes.addU8(value)
+  bytes.addU8(value shr 8)
+
+proc addU32(bytes: var string, value: int) =
+  ## Appends one little-endian unsigned dword.
+  bytes.addU16(value)
+  bytes.addU16(value shr 16)
+
+proc addZeros(bytes: var string, count: int) =
+  ## Appends a run of zero bytes.
+  for _ in 0 ..< count:
+    bytes.addU8(0)
+
+proc asepriteLayerChunk(): string =
+  ## Builds one normal, visible, full-opacity layer chunk body.
+  let name = "Layer"
+  result.addU16(3)         # flags: visible + editable
+  result.addU16(0)         # type: normal
+  result.addU16(0)         # child level
+  result.addU16(0)         # default width, ignored
+  result.addU16(0)         # default height, ignored
+  result.addU16(0)         # blend mode: normal
+  result.addU8(255)        # opacity
+  result.addZeros(3)
+  result.addU16(name.len)
+  result.add(name)
+
+proc asepriteCelChunk(image: Image): string =
+  ## Builds one zlib-compressed full-canvas RGBA cel chunk body.
+  var raw = newString(image.data.len * 4)
+  for i, color in image.data:
+    # Alpha is snapped to 0 or 255 upstream, so premultiplied pixie
+    # pixels are already straight RGBA.
+    raw[i * 4] = char(color.r)
+    raw[i * 4 + 1] = char(color.g)
+    raw[i * 4 + 2] = char(color.b)
+    raw[i * 4 + 3] = char(color.a)
+  result.addU16(0)         # layer index
+  result.addU16(0)         # x position
+  result.addU16(0)         # y position
+  result.addU8(255)        # opacity
+  result.addU16(2)         # cel type: compressed image
+  result.addU16(0)         # z-index
+  result.addZeros(5)
+  result.addU16(image.width)
+  result.addU16(image.height)
+  result.add(compress(raw, BestCompression, dfZlib))
+
+proc addAsepriteChunk(bytes: var string, chunkType: int, body: string) =
+  ## Appends one chunk with its size and type header.
+  bytes.addU32(body.len + 6)
+  bytes.addU16(chunkType)
+  bytes.add(body)
+
+proc writeAsepriteRgba(path: string, image: Image) =
+  ## Writes one image as a single-frame, single-layer RGBA aseprite
+  ## file, mirroring the field order of bitworld's aseprite parser.
+  var frame = ""
+  frame.addU16(AsepriteFrameMagic)
+  frame.addU16(2)          # old chunk count
+  frame.addU16(100)        # frame duration in ms
+  frame.addZeros(2)
+  frame.addU32(2)          # new chunk count
+  frame.addAsepriteChunk(AsepriteLayerChunk, asepriteLayerChunk())
+  frame.addAsepriteChunk(AsepriteCelChunk, asepriteCelChunk(image))
+
+  var frameBytes = ""
+  frameBytes.addU32(frame.len + 4)
+  frameBytes.add(frame)
+
+  var header = ""
+  header.addU32(AsepriteHeaderBytes + frameBytes.len)
+  header.addU16(AsepriteHeaderMagic)
+  header.addU16(1)         # frame count
+  header.addU16(image.width)
+  header.addU16(image.height)
+  header.addU16(32)        # color depth: RGBA
+  header.addU32(1)         # flags: layer opacity is valid
+  header.addU16(100)       # legacy speed
+  header.addU32(0)
+  header.addU32(0)
+  header.addU8(0)          # transparent palette index
+  header.addZeros(3)
+  header.addU16(0)         # color count, 0 means 256
+  header.addU8(1)          # pixel width
+  header.addU8(1)          # pixel height
+  header.addU16(0)         # grid x
+  header.addU16(0)         # grid y
+  header.addU16(16)        # grid width
+  header.addU16(16)        # grid height
+  header.addZeros(AsepriteHeaderBytes - header.len)
+
+  writeFile(path, header & frameBytes)
+
+proc isAsepritePath(path: string): bool =
+  ## Returns true for aseprite file extensions.
+  let ext = path.splitFile().ext.toLowerAscii()
+  ext == ".aseprite" or ext == ".ase"
+
+proc readInputImage(path: string): Image =
+  ## Loads one PNG or flattened aseprite image.
+  if path.isAsepritePath():
+    readAsepriteImage(path)
+  else:
+    readImage(path)
+
+proc writeOutputImage(path: string, image: Image) =
+  ## Writes one image as PNG or aseprite based on the extension.
+  if path.isAsepritePath():
+    writeAsepriteRgba(path, image)
+  else:
+    image.writeFile(path)
 
 proc colorKey(color: ColorRGBA): uint32 =
   ## Packs one opaque color into a table key.
@@ -152,7 +283,7 @@ proc resolveParent(parents: seq[int], index: int): int =
 
 when isMainModule:
   let config = parseArgs()
-  var image = readImage(config.inputPath)
+  var image = readInputImage(config.inputPath)
 
   # Snap alpha to fully transparent or fully opaque.
   for i in 0 ..< image.data.len:
@@ -211,6 +342,6 @@ when isMainModule:
     if cluster.alive:
       inc uniqueAfter
 
-  image.writeFile(config.outputPath)
+  writeOutputImage(config.outputPath, image)
   echo "Wrote ", config.outputPath, ": ", uniqueBefore, " -> ",
     uniqueAfter, " colors (target ", config.colors, ")."
