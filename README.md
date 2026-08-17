@@ -44,6 +44,9 @@ coworld upload-coworld dist/coworld_manifest.json
 - Press A again to come back out.
 - Player 1 spawns near house 1, player 2 near house 2, and so on through
   player 9.
+- A game seats 2-9 players (`tokens` / `players` in the config); the league
+  runs full 9-seat villages, and experience requests can seat any 2-9
+  policies (1v1, 2v2, 3v3v3, ...) with the unused houses left empty.
 
 ## Tournament Rules (Gnome Law)
 

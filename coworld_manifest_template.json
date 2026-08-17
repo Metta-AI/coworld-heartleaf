@@ -29,30 +29,19 @@
       ],
       "properties": {
         "tokens": {
-          "description": "One connection token per player slot, indexed by slot.",
+          "description": "One connection token per player seat, indexed by seat. 2-9 seats; empty houses stay closed.",
           "type": "array",
-          "minItems": 9,
+          "minItems": 2,
           "maxItems": 9,
           "items": {
             "type": "string",
             "minLength": 0
-          },
-          "default": [
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            ""
-          ]
+          }
         },
         "players": {
-          "description": "Per-slot display names. Hosted dispatch fills each name with the policy or player behind the slot; the score panel shows it instead of player_N.",
+          "description": "Per-seat display names, 2-9 seats. Hosted dispatch fills each name with the policy or player behind the seat; the score panel shows it instead of player_N.",
           "type": "array",
-          "minItems": 9,
+          "minItems": 2,
           "maxItems": 9,
           "items": {
             "type": "object",
@@ -86,13 +75,6 @@
           "minimum": 0,
           "default": 0
         },
-        "num_agents": {
-          "description": "Player seat count used by hosted league seating.",
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9,
-          "default": 9
-        },
         "daySeconds": {
           "description": "Real seconds per in-game day, before the 10-second score screen.",
           "type": "integer",
@@ -120,27 +102,27 @@
           "minimum": 1
         },
         "names": {
-          "description": "Player names in score order.",
+          "description": "Player names in seat order.",
           "type": "array",
-          "minItems": 9,
+          "minItems": 2,
           "maxItems": 9,
           "items": {
             "type": "string"
           }
         },
         "usernames": {
-          "description": "Connection usernames in score order.",
+          "description": "Connection usernames in seat order.",
           "type": "array",
-          "minItems": 9,
+          "minItems": 2,
           "maxItems": 9,
           "items": {
             "type": "string"
           }
         },
         "playerNames": {
-          "description": "Fixed Heartleaf gnome names in score order.",
+          "description": "Fixed Heartleaf gnome names in seat order.",
           "type": "array",
-          "minItems": 9,
+          "minItems": 2,
           "maxItems": 9,
           "items": {
             "type": "string"
@@ -149,7 +131,7 @@
         "scores": {
           "description": "Cumulative player scores at the end of this day.",
           "type": "array",
-          "minItems": 9,
+          "minItems": 2,
           "maxItems": 9,
           "items": {
             "type": "integer",
@@ -280,8 +262,36 @@
         "seed": 4731713,
         "maxTicks": 23760,
         "maxGames": 1,
-        "num_agents": 9,
-        "daySeconds": 100
+        "daySeconds": 100,
+        "players": [
+          {
+            "name": "Villager 1"
+          },
+          {
+            "name": "Villager 2"
+          },
+          {
+            "name": "Villager 3"
+          },
+          {
+            "name": "Villager 4"
+          },
+          {
+            "name": "Villager 5"
+          },
+          {
+            "name": "Villager 6"
+          },
+          {
+            "name": "Villager 7"
+          },
+          {
+            "name": "Villager 8"
+          },
+          {
+            "name": "Villager 9"
+          }
+        ]
       },
       "description": "Nine compressed Heartleaf days (100s each) so every gnome gets a hosting turn, used for hosted league rounds."
     },
@@ -307,11 +317,11 @@
     }
   ],
   "certification": {
-      "game_config": {
-        "seed": 4731713,
-        "maxTicks": 300,
-        "maxGames": 1
-      },
+    "game_config": {
+      "seed": 4731713,
+      "maxTicks": 300,
+      "maxGames": 1
+    },
     "players": [
       {
         "player_id": "shy_villager"

@@ -331,6 +331,10 @@ type
     houses: array[HouseCount, House]
     gnomes: seq[GnomeSprites]
     players: seq[Player]
+    seatCount*: int
+      ## Player seats this game was configured for (the hosted token
+      ## count). Results report exactly this many slots, so a 4-seat
+      ## experience request does not get 9 scores.
     textFont: PixelFont
     rng: Rand
     tickCount*: int
@@ -670,6 +674,7 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   ## Initializes the Heartleaf simulation.
   result = SimServer()
   result.dayTicks = max(TicksPerSecond, dayTicks)
+  result.seatCount = HouseCount
   let dataRoot = dataDir()
   # Keep asset paths explicit here so startup shows what the game needs.
   let
@@ -1239,7 +1244,7 @@ proc dailyResultsJson*(sim: SimServer): string =
     playerNames = newJArray()
     scores = newJArray()
     results = newJObject()
-  for houseIndex in 0 ..< HouseCount:
+  for houseIndex in 0 ..< sim.seatCount:
     let fixedPlayerName = houseIndex.playerNameForHouse()
     var player: Player = nil
     for candidate in sim.players:
@@ -4325,6 +4330,8 @@ when not defined(emscripten):
       runTicks = 0
       gamesFinished = 0
       lastWrittenDay = 0
+    if tokens.len > 0:
+      sim.seatCount = tokens.len
     # Load assets before healthz so /global can send on the first tick.
     let httpServer = newServer(
       httpHandler,
@@ -4563,6 +4570,15 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("daySeconds", config.daySeconds)
   node.readConfigInt("day-seconds", config.daySeconds)
   node.readConfigStrings("tokens", config.tokens)
+  # Seat i spawns in house i, so more tokens than houses can never all
+  # join. Fewer tokens is fine: the remaining houses simply stay empty.
+  if config.tokens.len > HouseCount:
+    raise newException(
+      HeartleafError,
+      "Config field tokens lists " & $config.tokens.len &
+        " seats but Heartleaf has only " & $HouseCount &
+        " houses; use at most " & $HouseCount & " tokens."
+    )
   node.readConfigPlayerNames(config.playerNames)
 
 proc limitText(value: int): string =
