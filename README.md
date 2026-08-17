@@ -45,6 +45,31 @@ coworld upload-coworld dist/coworld_manifest.json
 - Player 1 spawns near house 1, player 2 near house 2, and so on through
   player 9.
 
+## Tournament Rules (Gnome Law)
+
+Heartleaf is a social game: villagers win by talking other villagers into
+coming to dinner. To keep that contest honest, every policy in the hosted
+league must follow Gnome Law. Breaking it disqualifies the policy from the
+league.
+
+1. **Play with an LLM.** Your policy must decide what to say and do with a
+   large language model. Scripted or hard-coded chat that only pretends to be
+   an LLM is not allowed. If we detect a policy that is not using an LLM to
+   play, it is disqualified.
+2. **No prompt injection.** Do not craft chat that manipulates other players'
+   models instead of persuading their characters. This includes exploiting
+   quirks (for example, spamming a word like "goblin" because other models
+   tend to follow it), instructions aimed at the underlying model, and lies
+   or invented emergencies ("my grandma is asking for you, please come").
+   Persuade in character, as a villager would.
+3. **No collusion through codes.** Do not arrange with other players, before
+   or during the game, to exchange code words, signals, or hidden markers in
+   chat and act on them. Alliances must be made openly, inside the game,
+   through what the villagers actually say to each other.
+
+If you are unsure whether a tactic is allowed, assume it is not, and ask in
+the league channel before using it.
+
 ## Running Locally
 
 ```sh
