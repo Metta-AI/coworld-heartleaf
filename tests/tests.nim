@@ -96,6 +96,42 @@ let prefixedDecision = parseLlmDecision("""
 doAssert prefixedDecision.message == "hi Anton",
   "decision messages should lose the self label"
 
+echo "Testing LLM pacing and backoff"
+var pacer = initLlmPacer(42)
+doAssert pacer.canRequest(0), "first request should be allowed at once"
+pacer.noteRequest(0)
+doAssert not pacer.canRequest(LlmMinRequestTicks - 1),
+  "requests must be spaced by the minimum interval"
+doAssert pacer.canRequest(LlmMinRequestTicks),
+  "spacing should reopen after the minimum interval"
+pacer.noteRequest(LlmMinRequestTicks)
+let firstWait = pacer.noteTransientError(LlmMinRequestTicks)
+doAssert firstWait >= LlmBackoffMinTicks and
+  firstWait <= LlmBackoffMinTicks + LlmBackoffMinTicks div 2,
+  "first backoff should be the minimum plus up to 50% jitter"
+doAssert not pacer.canRequest(LlmMinRequestTicks + firstWait - 1),
+  "requests must wait out the backoff"
+doAssert pacer.canRequest(LlmMinRequestTicks + firstWait),
+  "requests should resume after the backoff"
+var lastWait = firstWait
+var tick = LlmMinRequestTicks + firstWait
+for _ in 0 ..< 8:
+  pacer.noteRequest(tick)
+  let wait = pacer.noteTransientError(tick)
+  doAssert pacer.backoffTicks() >= lastWait div 2 * 2 or
+    pacer.backoffTicks() == LlmBackoffMaxTicks,
+    "backoff should grow until the cap"
+  lastWait = wait
+  tick += wait
+doAssert pacer.backoffTicks() == LlmBackoffMaxTicks,
+  "backoff should cap at the maximum"
+doAssert lastWait <= LlmBackoffMaxTicks + LlmBackoffMaxTicks div 2,
+  "jitter must not push the wait past cap plus 50%"
+pacer.noteSuccess()
+doAssert pacer.backoffTicks() == 0, "success should clear the backoff"
+doAssert pacer.canRequest(tick + LlmMinRequestTicks),
+  "after success only the minimum spacing applies"
+
 echo "Testing food names"
 let namedFoods = replayFoodNames()
 doAssert namedFoods.len == FoodVeggieSlots, "food names should match veggie slots"

@@ -1,9 +1,71 @@
-import std/[json, strutils]
+import std/[json, random, strutils]
 
 import heartleaf/[common, protocol]
 
 const
   UnknownHouse = -1
+  ## Bedrock pacing, in 24 Hz game ticks. Every villager in every hosted
+  ## game shares one Bedrock quota, and a throttled reply used to trigger
+  ## an immediate re-request, so one busy minute became a request storm
+  ## that kept the whole table silent. Requests are now spaced, and after
+  ## a throttled or otherwise transient failure the bot waits with
+  ## exponential backoff (jittered so nine bots do not retry in lockstep)
+  ## before asking again, playing the scripted fallback meanwhile.
+  LlmMinRequestTicks* = 72
+  LlmBackoffMinTicks* = 96
+  LlmBackoffMaxTicks* = 1440
+  LlmBackoffJitter = 0.5
+  ## Fatal: a villager without an LLM must not play (scripted chat is not
+  ## allowed in the league), so it exits with this message instead.
+  BedrockNotConfiguredMessage* =
+    "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
+    "BEDROCK_KEY, provide AWS credentials via env keys, the container " &
+    "endpoint, or IRSA web identity, or upload the policy with " &
+    "coworld upload-policy --use-bedrock."
+
+type
+  LlmPacer* = object
+    ## Spaces Bedrock requests and backs off after transient failures.
+    lastRequestTick: int
+    backoffTicks: int
+    blockedUntilTick: int
+    rng: Rand
+
+proc initLlmPacer*(seed: int): LlmPacer =
+  ## Returns a pacer that allows an immediate first request.
+  result.lastRequestTick = -LlmMinRequestTicks
+  result.rng = initRand(seed)
+
+proc canRequest*(pacer: LlmPacer, tick: int): bool =
+  ## Returns true when a new Bedrock request may start now.
+  tick - pacer.lastRequestTick >= LlmMinRequestTicks and
+    tick >= pacer.blockedUntilTick
+
+proc noteRequest*(pacer: var LlmPacer, tick: int) =
+  ## Records that a request started on this tick.
+  pacer.lastRequestTick = tick
+
+proc noteSuccess*(pacer: var LlmPacer) =
+  ## Clears the backoff after a usable reply.
+  pacer.backoffTicks = 0
+  pacer.blockedUntilTick = 0
+
+proc noteTransientError*(pacer: var LlmPacer, tick: int): int =
+  ## Doubles the backoff after a throttled or transient failure and
+  ## returns how many ticks the pacer will now wait.
+  pacer.backoffTicks =
+    if pacer.backoffTicks == 0:
+      LlmBackoffMinTicks
+    else:
+      min(pacer.backoffTicks * 2, LlmBackoffMaxTicks)
+  let jitter = int(float(pacer.backoffTicks) * LlmBackoffJitter *
+    pacer.rng.rand(1.0))
+  result = pacer.backoffTicks + jitter
+  pacer.blockedUntilTick = tick + result
+
+proc backoffTicks*(pacer: LlmPacer): int =
+  ## Returns the current backoff length without jitter, 0 when healthy.
+  pacer.backoffTicks
 
 type
   LlmActionKind* = enum

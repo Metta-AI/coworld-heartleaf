@@ -177,6 +177,7 @@ type
     llmTag: string
     llmSerial: int
     lastLlmError: string
+    llmPacer: LlmPacer
     pendingChat: string
     hasPendingChat: bool
     lastChatRequestTick: int
@@ -241,12 +242,7 @@ proc requireBedrockConfig() =
   if mockBedrockReply().len > 0:
     return
   if bedrockToken().len == 0 and not hasAwsCredentialSignal():
-    raise newException(
-      TalkingVillagerError,
-      "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
-        "BEDROCK_KEY, or provide AWS credentials via env keys, the " &
-        "container endpoint, or IRSA web identity."
-    )
+    raise newException(TalkingVillagerError, BedrockNotConfiguredMessage)
 
 proc transientBedrockError(answer: BedrockResult): bool =
   ## Returns true for Bedrock failures worth retrying later.
@@ -1332,6 +1328,9 @@ proc initBot(name: string, slot: int, soul: string): Bot =
     else:
       DefaultName
   result.slot = slot
+  result.llmPacer = initLlmPacer(
+    slot * 7919 + int(epochTime() * 1000) mod 100_000
+  )
   result.homeIndex =
     if slot >= 0 and slot < 9:
       slot
@@ -1767,16 +1766,17 @@ proc startChatRequest(bot: Bot) =
     started = startTalkToBedrock(messages, bot.llmTag)
   except CatchableError as e:
     bot.lastLlmError = e.msg
-    bot.log("llm chat start error " & e.msg)
+    if BedrockResult(done: true, error: e.msg).transientBedrockError():
+      let waitTicks = bot.llmPacer.noteTransientError(bot.frameTick)
+      bot.log("llm chat start error " & e.msg & ", backing off " &
+        $(waitTicks div 24) & "s")
+    else:
+      bot.log("llm chat start error " & e.msg)
     return
   if not started:
-    raise newException(
-      TalkingVillagerError,
-      "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
-        "BEDROCK_KEY, or provide AWS credentials via env keys, the " &
-        "container endpoint, or IRSA web identity."
-    )
+    raise newException(TalkingVillagerError, BedrockNotConfiguredMessage)
   bot.llmWaiting = true
+  bot.llmPacer.noteRequest(bot.frameTick)
 
 proc pollChatReply(bot: Bot) =
   ## Polls and applies one completed chat request.
@@ -1789,6 +1789,7 @@ proc pollChatReply(bot: Bot) =
     return
   bot.llmWaiting = false
   if answer.ok:
+    bot.llmPacer.noteSuccess()
     bot.applyChatReply(answer.reply)
     return
   bot.lastLlmError = answer.error
@@ -1798,10 +1799,16 @@ proc pollChatReply(bot: Bot) =
       TalkingVillagerError,
       "Bedrock request failed: " & answer.error
     )
+  if answer.transientBedrockError():
+    let waitTicks = bot.llmPacer.noteTransientError(bot.frameTick)
+    bot.log("llm chat transient error, backing off " &
+      $(waitTicks div 24) & "s")
 
 proc shouldRequestChat(bot: Bot): bool =
   ## Returns true when the bot should ask the LLM for a fresh line.
   if bot.llmWaiting or bot.hasPendingChat:
+    return false
+  if not bot.llmPacer.canRequest(bot.frameTick):
     return false
   if bot.minutes >= DayEndMinutes:
     return false

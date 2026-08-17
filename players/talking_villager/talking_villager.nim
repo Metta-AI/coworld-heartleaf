@@ -34,6 +34,7 @@ const
   UnknownHouse = -1
   DecisionRetryTicks = 24
   DecisionStuckTicks = RepathStuckTicks * 2
+  ChatHistoryLimit = 120
   HighFoodForInvites = 6
   EarlyHostUntilDay = 3
   LateHostFromDay = 8
@@ -196,6 +197,7 @@ type
     llmTag: string
     llmSerial: int
     lastLlmError: string
+    llmPacer: LlmPacer
     committedPartyHouse: int
 
 
@@ -256,12 +258,7 @@ proc requireBedrockConfig() =
   if mockBedrockReply().len > 0:
     return
   if bedrockToken().len == 0 and not hasAwsCredentialSignal():
-    raise newException(
-      TalkingVillagerError,
-      "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
-        "BEDROCK_KEY, or provide AWS credentials via env keys, the " &
-        "container endpoint, or IRSA web identity."
-    )
+    raise newException(TalkingVillagerError, BedrockNotConfiguredMessage)
 
 proc transientBedrockError(answer: BedrockResult): bool =
   ## Returns true for Bedrock failures worth retrying later.
@@ -570,6 +567,11 @@ proc recordOwnChat(bot: Bot, text: string) =
   ## are what it said out loud, and a "Name:" label here is exactly what
   ## the model would imitate in its next line.
   bot.chatHistory.add(ConversationMessage(role: "assistant", content: text))
+
+proc trimChatHistory(bot: Bot) =
+  ## Keeps the transcript bounded so prompt tokens stop growing all game.
+  if bot.chatHistory.len > ChatHistoryLimit:
+    bot.chatHistory = bot.chatHistory[^ChatHistoryLimit .. ^1]
 
 proc scanHeardChats(bot: Bot) =
   ## Records newly visible chat bubbles from other players.
@@ -1389,6 +1391,9 @@ proc initBot(name: string, slot: int, soul: string): Bot =
     else:
       DefaultName
   result.slot = slot
+  result.llmPacer = initLlmPacer(
+    slot * 7919 + int(epochTime() * 1000) mod 100_000
+  )
   result.homeIndex =
     if slot >= 0 and slot < 9:
       slot
@@ -2571,6 +2576,7 @@ proc startLlmDecision(bot: Bot): bool =
     return false
   inc bot.llmSerial
   bot.llmTag = "decision-" & $bot.llmSerial
+  bot.trimChatHistory()
   var messages = @[
     ConversationMessage(role: "system", content: bot.soulInstructions)
   ]
@@ -2586,7 +2592,9 @@ proc startLlmDecision(bot: Bot): bool =
     let answer = BedrockResult(done: true, error: e.msg)
     if answer.transientBedrockError():
       bot.lastLlmError = e.msg
-      bot.log("llm transient start error " & e.msg & ", using fallback")
+      let waitTicks = bot.llmPacer.noteTransientError(bot.frameTick)
+      bot.log("llm transient start error " & e.msg & ", backing off " &
+        $(waitTicks div 24) & "s, using fallback")
       bot.applyDecision(bot.fallbackDecision())
       return false
     raise newException(
@@ -2594,13 +2602,9 @@ proc startLlmDecision(bot: Bot): bool =
       "Could not start Bedrock request: " & e.msg
     )
   if not started:
-    raise newException(
-      TalkingVillagerError,
-      "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
-        "BEDROCK_KEY, or provide AWS credentials via env keys, the " &
-        "container endpoint, or IRSA web identity."
-    )
+    raise newException(TalkingVillagerError, BedrockNotConfiguredMessage)
   bot.llmWaiting = true
+  bot.llmPacer.noteRequest(bot.frameTick)
   bot.decisionStartedTick = bot.frameTick
   let latency = bedrockPerformanceLatency()
   let latencyName =
@@ -2627,6 +2631,7 @@ proc pollLlmDecision(bot: Bot): bool =
     return false
   bot.llmWaiting = false
   if answer.ok:
+    bot.llmPacer.noteSuccess()
     bot.applyLlmReply(answer.reply)
   else:
     bot.lastLlmError = answer.error
@@ -2638,7 +2643,12 @@ proc pollLlmDecision(bot: Bot): bool =
       )
     ## Transient errors and unusable 200 bodies (empty text, parse
     ## failures) both keep the bot in the game on the scripted fallback.
-    bot.log("llm error is not permanent, using fallback")
+    if answer.transientBedrockError():
+      let waitTicks = bot.llmPacer.noteTransientError(bot.frameTick)
+      bot.log("llm transient error, backing off " &
+        $(waitTicks div 24) & "s, using fallback")
+    else:
+      bot.log("llm error is not permanent, using fallback")
     bot.applyDecision(bot.fallbackDecision())
   return true
 
@@ -2831,6 +2841,12 @@ proc needsFreshDecision(bot: Bot): bool =
     return true
   bot.decisionComplete() or bot.decisionInterrupted()
 
+proc mayAskLlm(bot: Bot): bool =
+  ## Returns true when pacing allows a Bedrock request right now. While
+  ## spaced or backing off, the bot keeps playing its current or fallback
+  ## decision instead (the fallback never chats).
+  bot.llmPacer.canRequest(bot.frameTick)
+
 proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
   ## Sends the chat text chosen by the current LLM decision.
   if not bot.hasDecision or bot.decisionChatSent:
@@ -3016,11 +3032,16 @@ proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
     bot.hasTarget = false
     bot.updateStuck(0)
     return 0
-  if bot.needsFreshDecision() and bot.startLlmDecision():
-    bot.desiredMask = 0
-    bot.hasTarget = false
-    bot.updateStuck(0)
-    return 0
+  if bot.needsFreshDecision():
+    if bot.mayAskLlm():
+      if bot.startLlmDecision():
+        bot.desiredMask = 0
+        bot.hasTarget = false
+        bot.updateStuck(0)
+        return 0
+    elif not bot.hasDecision or (bot.decisionComplete() and
+        bot.frameTick - bot.decisionStartedTick >= DecisionRetryTicks):
+      bot.applyDecision(bot.fallbackDecision())
   let goal = bot.chooseGoal()
   let action = bot.interactionMask(goal)
   if action != 0:
