@@ -4570,11 +4570,14 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("daySeconds", config.daySeconds)
   node.readConfigInt("day-seconds", config.daySeconds)
   node.readConfigStrings("tokens", config.tokens)
+  # Seat i spawns in house i, so more tokens than houses can never all
+  # join. Fewer tokens is fine: the remaining houses simply stay empty.
   if config.tokens.len > HouseCount:
     raise newException(
       HeartleafError,
-      "Config field tokens has " & $config.tokens.len & " seats but the " &
-        "village has " & $HouseCount & " houses."
+      "Config field tokens lists " & $config.tokens.len &
+        " seats but Heartleaf has only " & $HouseCount &
+        " houses; use at most " & $HouseCount & " tokens."
     )
   node.readConfigPlayerNames(config.playerNames)
 
