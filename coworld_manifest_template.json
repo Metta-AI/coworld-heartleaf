@@ -49,6 +49,25 @@
             ""
           ]
         },
+        "players": {
+          "description": "Per-slot display names. Hosted dispatch fills each name with the policy or player behind the slot; the score panel shows it instead of player_N.",
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
         "seed": {
           "description": "Random seed.",
           "type": "integer",

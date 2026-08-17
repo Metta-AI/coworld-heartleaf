@@ -389,6 +389,9 @@ type
     maxGames: int
     daySeconds: int
     tokens: seq[string]
+    playerNames: seq[string]
+      ## Per-slot display names from `players[].name`, filled by hosted
+      ## dispatch with the policy or player name behind each slot.
 
 when not defined(emscripten):
   type
@@ -405,6 +408,7 @@ when not defined(emscripten):
       chatMessages: Table[WebSocket, string]
       closedSockets: seq[WebSocket]
       tokens: seq[string]
+      playerNames: seq[string]
       replayServerMode: bool
       replayLoaded: bool
       pendingReplayUri: string
@@ -4016,8 +4020,13 @@ when not defined(emscripten):
     ## Returns the requested player token.
     request.queryParams.getOrDefault("token", "").strip()
 
-  proc playerUsername(request: Request): string =
-    ## Returns the requested connection username.
+  proc playerUsername(request: Request, slot: int): string =
+    ## Returns the display username for one joining player. The hosted
+    ## `players[].name` config entry for the slot is authoritative; the
+    ## `username` or `name` query parameter is the local-play fallback.
+    if slot >= 0 and slot < appState.playerNames.len and
+        appState.playerNames[slot].len > 0:
+      return appState.playerNames[slot].cleanUsername()
     let username = request.queryParams.getOrDefault("username", "")
     if username.len > 0:
       return username.cleanUsername()
@@ -4120,11 +4129,13 @@ when not defined(emscripten):
       let
         slot = request.playerSlot()
         token = request.playerToken()
-        username = request.playerUsername()
-      var allowed = false
+      var
+        allowed = false
+        username = ""
       {.gcsafe.}:
         withLock appState.lock:
           allowed = playerJoinAllowed(slot, token)
+          username = request.playerUsername(slot)
       if not allowed:
         request.respondPlain(403, "player token rejected\n")
         return
@@ -4289,12 +4300,14 @@ when not defined(emscripten):
     maxGames = DefaultMaxGames,
     daySeconds = DefaultDaySeconds,
     tokens: seq[string] = @[],
+    playerNames: seq[string] = @[],
     saveReplayPath = "",
     runtimeConfig = RuntimeConfig()
   ) =
     ## Runs the Heartleaf websocket game server.
     initAppState()
     appState.tokens = tokens
+    appState.playerNames = playerNames
     var replayWriter = openReplayWriter(
       saveReplayPath,
       $(%*{
@@ -4509,6 +4522,23 @@ proc readConfigStrings(node: JsonNode, name: string, value: var seq[string]) =
       )
     value.add(child.getStr())
 
+proc readConfigPlayerNames(node: JsonNode, value: var seq[string]) =
+  ## Reads the optional Coworld `players[].name` display names by slot.
+  if not node.hasKey("players"):
+    return
+  let item = node["players"]
+  if item.kind != JArray:
+    raise newException(HeartleafError, "Config field players must be an array.")
+  value.setLen(0)
+  for child in item.items:
+    if child.kind != JObject or not child.hasKey("name") or
+        child["name"].kind != JString:
+      raise newException(
+        HeartleafError,
+        "Config field players items must be objects with a string name."
+      )
+    value.add(child["name"].getStr())
+
 proc update(config: var RunConfig, jsonText: string) =
   ## Updates the run config from a JSON object.
   if jsonText.len == 0:
@@ -4533,6 +4563,7 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("daySeconds", config.daySeconds)
   node.readConfigInt("day-seconds", config.daySeconds)
   node.readConfigStrings("tokens", config.tokens)
+  node.readConfigPlayerNames(config.playerNames)
 
 proc limitText(value: int): string =
   ## Returns a readable text value for a numeric limit.
@@ -4547,6 +4578,7 @@ proc echoStartupConfig(config: RunConfig) =
     " port=", config.port,
     " seed=", config.seed,
     " tokens=", config.tokens.len,
+    " playerNames=", config.playerNames.len,
     " maxTicks=", config.maxTicks.limitText(),
     " maxGames=", config.maxGames.limitText(),
     " daySeconds=", config.daySeconds
@@ -4860,6 +4892,7 @@ when isMainModule and not defined(emscripten):
     maxGames = config.maxGames,
     daySeconds = config.daySeconds,
     tokens = config.tokens,
+    playerNames = config.playerNames,
     saveReplayPath = localReplayPath,
     runtimeConfig = runtimeConfig
   )
