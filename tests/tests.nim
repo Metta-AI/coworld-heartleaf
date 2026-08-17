@@ -66,6 +66,36 @@ let stringHouse = parseLlmDecision("""
 doAssert stringHouse.valid, "string houseIndex should parse"
 doAssert stringHouse.houseIndex == 3, "house 4 should become index 3"
 
+echo "Testing self name prefix stripping"
+let vova = ["Vova", "talking_villager"]
+doAssert "Vova: hello Anton".stripSelfPrefix(vova) == "hello Anton",
+  "plain self label should be stripped"
+doAssert "vova:hello".stripSelfPrefix(vova) == "hello",
+  "self label match should ignore case and missing space"
+doAssert "**Vova:** hello".stripSelfPrefix(vova) == "hello",
+  "markdown bold self label should be stripped"
+doAssert "[Vova]: hello".stripSelfPrefix(vova) == "hello",
+  "bracketed self label should be stripped"
+doAssert "Vova: Vova: hello".stripSelfPrefix(vova) == "hello",
+  "repeated self labels should all be stripped"
+doAssert "talking_villager: hello".stripSelfPrefix(vova) == "hello",
+  "any of the bot's names should be stripped"
+doAssert "Anton: come to dinner".stripSelfPrefix(vova) ==
+  "Anton: come to dinner", "other names must not be stripped"
+doAssert "Vova's house at 6!".stripSelfPrefix(vova) == "Vova's house at 6!",
+  "self name without a colon label must stay"
+doAssert "Vovan: hi".stripSelfPrefix(vova) == "Vovan: hi",
+  "longer names sharing a prefix must stay"
+doAssert "Vova:".stripSelfPrefix(vova) == "",
+  "a bare label leaves an empty line"
+doAssert "Vova: hello".stripSelfPrefix([]) == "Vova: hello",
+  "no names means nothing is stripped"
+let prefixedDecision = parseLlmDecision("""
+{"action": "say_to_person", "targetName": "Anton", "message": "Vova: hi Anton"}
+""", vova)
+doAssert prefixedDecision.message == "hi Anton",
+  "decision messages should lose the self label"
+
 echo "Testing food names"
 let namedFoods = replayFoodNames()
 doAssert namedFoods.len == FoodVeggieSlots, "food names should match veggie slots"

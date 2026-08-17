@@ -1,5 +1,5 @@
 import
-  std/[algorithm, json, options, os, parseopt, strutils],
+  std/[algorithm, json, options, os, parseopt, strutils, times],
   bitworld/[spriteprotocol, resources],
   curly, pathy, supersnappy, whisky,
   bedrock_auth, decisions, heartleaf/[common, protocol]
@@ -10,6 +10,8 @@ const
   DefaultBedrockRegion = "us-east-1"
   DefaultBedrockModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
   DefaultBedrockTimeoutSeconds = 30
+  ReconnectDelayMs = 1000
+  ReconnectGiveUpSeconds = 60.0
   DefaultBedrockMaxTokens = 192
   BedrockTemperature = 0.2
 
@@ -286,29 +288,31 @@ proc transientBedrockError(answer: BedrockResult): bool =
     return true
 
 proc permanentBedrockError(answer: BedrockResult): bool =
-  ## Returns true for Bedrock failures that should stop the bot.
+  ## Returns true for Bedrock failures that should stop the bot: the
+  ## request itself is rejected (bad model id, bad credentials, prompt too
+  ## long), so retrying can only fail the same way. Anything else, including
+  ## a 200 whose body we could not use, is worth playing through.
   if answer.transientBedrockError():
     return false
-  let message = answer.error.toLowerAscii()
+  if answer.statusCode == 200:
+    return false
   if answer.statusCode == 400 or
       answer.statusCode == 401 or
       answer.statusCode == 403 or
       answer.statusCode == 404:
     return true
+  let message = answer.error.toLowerAscii()
   if message.contains("too many tokens") or
       message.contains("input is too long") or
       message.contains("context length") or
       message.contains("maximum context") or
       message.contains("token limit") or
       message.contains("validationexception") or
+      message.contains("resourcenotfoundexception") or
       message.contains("accessdenied") or
       message.contains("unauthorized") or
       message.contains("forbidden") or
-      message.contains("not authorized") or
-      message.contains("not supported") or
-      message.contains("model") or
-      message.contains("malformed") or
-      message.contains("invalid"):
+      message.contains("not authorized"):
     return true
 
 proc bedrockHost(): string =
@@ -553,14 +557,19 @@ proc recordChatLine(bot: Bot, role, speaker, text: string) =
     content: speaker & ": " & text
   ))
 
+proc selfNames(bot: Bot): seq[string] =
+  ## Returns the names this bot goes by, for stripping self labels.
+  if bot.playerName.len > 0:
+    result.add(bot.playerName)
+  if bot.name.len > 0 and bot.name != bot.playerName:
+    result.add(bot.name)
+
 proc recordOwnChat(bot: Bot, text: string) =
-  ## Records one chat message this bot said out loud.
-  let speaker =
-    if bot.playerName.len > 0:
-      bot.playerName
-    else:
-      bot.name
-  bot.recordChatLine("assistant", speaker, text)
+  ## Records one chat message this bot said out loud. Own turns are
+  ## stored as bare text: the soul tells the model that its earlier turns
+  ## are what it said out loud, and a "Name:" label here is exactly what
+  ## the model would imitate in its next line.
+  bot.chatHistory.add(ConversationMessage(role: "assistant", content: text))
 
 proc scanHeardChats(bot: Bot) =
   ## Records newly visible chat bubbles from other players.
@@ -1816,6 +1825,8 @@ proc inviteCountFrom(bot: Bot, name: string): int =
   if name.len == 0:
     return 0
   for message in bot.chatHistory:
+    if message.role != "user":
+      continue
     if message.content.chatSpeaker() != name:
       continue
     if message.content.chatBody().isHostInviteMessage():
@@ -2546,7 +2557,7 @@ proc applyDecision(bot: Bot, decision: LlmDecision) =
 
 proc applyLlmReply(bot: Bot, reply: string) =
   ## Parses and applies one LLM reply.
-  let decision = reply.parseLlmDecision()
+  let decision = reply.parseLlmDecision(bot.selfNames())
   if not decision.valid:
     bot.lastLlmError = decision.error
     bot.log("llm parse error " & decision.error)
@@ -2620,19 +2631,15 @@ proc pollLlmDecision(bot: Bot): bool =
   else:
     bot.lastLlmError = answer.error
     bot.log("llm error " & answer.error)
-    if answer.transientBedrockError():
-      bot.log("llm transient error, using fallback")
-      bot.applyDecision(bot.fallbackDecision())
-    elif answer.permanentBedrockError():
+    if answer.permanentBedrockError():
       raise newException(
         TalkingVillagerError,
         "Bedrock request failed: " & answer.error
       )
-    else:
-      raise newException(
-        TalkingVillagerError,
-        "Unknown Bedrock request failed: " & answer.error
-      )
+    ## Transient errors and unusable 200 bodies (empty text, parse
+    ## failures) both keep the bot in the game on the scripted fallback.
+    bot.log("llm error is not permanent, using fallback")
+    bot.applyDecision(bot.fallbackDecision())
   return true
 
 proc decisionGoal(bot: Bot, decision: LlmDecision): Goal =
@@ -3148,12 +3155,17 @@ proc runBot(
   except TalkingVillagerError as e:
     echo bot.name, " fatal: ", e.msg
     quit(1)
+  ## Hosted runs (exitOnDisconnect) keep reconnecting through mid-game
+  ## drops and only exit once the server has been unreachable for
+  ## ReconnectGiveUpSeconds, which is what the end of the game looks like.
   var hadConnection = false
+  var disconnectedAt = 0.0
   while true:
     try:
       let ws = newWebSocket(connectUrl)
       echo bot.name, " connected to ", connectUrl
       hadConnection = true
+      disconnectedAt = 0.0
       bot.lastMask = 0xff'u8
       while true:
         if not ws.receiveUpdates(bot):
@@ -3169,8 +3181,13 @@ proc runBot(
     except CatchableError as e:
       echo bot.name, " reconnecting: ", e.msg
       if exitOnDisconnect and hadConnection:
-        break
-      sleep(250)
+        if disconnectedAt == 0.0:
+          disconnectedAt = epochTime()
+        elif epochTime() - disconnectedAt > ReconnectGiveUpSeconds:
+          echo bot.name, " server gone for ", ReconnectGiveUpSeconds,
+            "s, exiting"
+          break
+      sleep(ReconnectDelayMs)
 
 proc talkingVillagerMain*(defaultName = DefaultName, soul: string) =
   ## Parses bot CLI options and runs one talking Villager bot.

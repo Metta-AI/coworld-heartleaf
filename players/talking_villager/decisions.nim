@@ -36,6 +36,45 @@ proc cleanDecisionText*(text: string): string =
     if value >= 32 and value < 127:
       result.add(ch)
 
+proc stripOneSelfPrefix(text: string, name: string): string =
+  ## Removes one leading "Name:" label naming this bot, tolerating
+  ## markdown or bracket decoration like "**Name:**" or "[Name]:".
+  ## Returns the text unchanged when it does not start with the label.
+  result = text
+  if name.len == 0:
+    return
+  var at = 0
+  while at < text.len and text[at] in {'*', '[', '(', '"', ' '}:
+    inc at
+  if at + name.len > text.len:
+    return
+  if text[at ..< at + name.len].toLowerAscii() != name.toLowerAscii():
+    return
+  at += name.len
+  while at < text.len and text[at] in {'*', ']', ')', '"', ' '}:
+    inc at
+  if at >= text.len or text[at] != ':':
+    return
+  inc at
+  while at < text.len and text[at] in {'*', '"', ' '}:
+    inc at
+  result = text[at .. ^1]
+
+proc stripSelfPrefix*(text: string, selfNames: openArray[string]): string =
+  ## Removes leading speaker labels the model wrote for itself, so a bot
+  ## named Vova never says "Vova: hello"; the game already shows who is
+  ## talking. Repeats until no self label is left.
+  result = text.strip()
+  while true:
+    var changed = false
+    for name in selfNames:
+      let stripped = result.stripOneSelfPrefix(name)
+      if stripped != result:
+        result = stripped.strip()
+        changed = true
+    if not changed or result.len == 0:
+      return
+
 proc actionName*(action: LlmActionKind): string =
   ## Returns the JSON action name for one LLM action.
   case action
@@ -120,8 +159,13 @@ proc houseField(node: JsonNode, name: string): int =
   if value >= 1 and value <= HouseCount:
     result = value - 1
 
-proc parseLlmDecision*(text: string): LlmDecision =
-  ## Parses one strict LLM decision JSON object.
+proc parseLlmDecision*(
+  text: string,
+  selfNames: openArray[string] = []
+): LlmDecision =
+  ## Parses one strict LLM decision JSON object. selfNames are the names
+  ## this bot goes by; a message that starts with one as a speaker label
+  ## has that label removed.
   result = LlmDecision(
     valid: false,
     action: LlmInvalid,
@@ -150,6 +194,7 @@ proc parseLlmDecision*(text: string): LlmDecision =
   result.action = action
   result.targetName = node.stringField("targetName")
   result.houseIndex = node.houseField("houseIndex")
-  result.message = node.stringField("message").cleanDecisionText()
+  result.message = node.stringField("message")
+    .stripSelfPrefix(selfNames).cleanDecisionText()
   result.commitParty = node.boolField("commitParty")
   result.reason = node.stringField("reason")
