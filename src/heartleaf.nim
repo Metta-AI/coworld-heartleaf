@@ -3556,7 +3556,7 @@ proc checkReplayHash(replay: var ReplayPlayer, sim: SimServer) =
     return
   let expected = replay.data.hashes[replay.hashIndex]
   if int(expected.tick) < sim.tickCount:
-    echo "Replay hash tick is missing at tick ", sim.tickCount, "."
+    stderr.writeLine "Replay hash tick is missing at tick " & $sim.tickCount & "."
     replay.hashValidationFailed = true
     replay.hashMismatchTick = sim.tickCount
     return
@@ -3564,8 +3564,8 @@ proc checkReplayHash(replay: var ReplayPlayer, sim: SimServer) =
     return
   let hash = sim.gameHash()
   if hash != expected.hash:
-    echo "Replay hash mismatch at tick ", sim.tickCount,
-      "; expected ", expected.hash, ", got ", hash, "."
+    stderr.writeLine "Replay hash mismatch at tick " & $sim.tickCount &
+      "; expected " & $expected.hash & ", got " & $hash & "."
     replay.hashValidationFailed = true
     replay.hashMismatchTick = sim.tickCount
     return
