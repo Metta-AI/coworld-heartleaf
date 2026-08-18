@@ -87,8 +87,23 @@ Then open:
 For a short smoke run:
 
 ```sh
-nim r src/heartleaf.nim -- --maxTicks:120 --maxGames:1
+nim r src/heartleaf.nim -- \
+  --config:'{"maxTicks":120,"maxGames":1,"daySeconds":30}'
 ```
+
+## Build A Bot
+
+A ready-to-customize LLM player lives in `players/heartleaf_bot`. It includes
+an editable strategy prompt, local setup and smoke tooling, a Docker image,
+and a Coworld player manifest.
+
+```sh
+./players/heartleaf_bot/dev.sh setup
+./players/heartleaf_bot/dev.sh test
+./players/heartleaf_bot/dev.sh smoke
+```
+
+See `players/heartleaf_bot/README.md` for local Bedrock and container usage.
 
 ## Project Layout
 
