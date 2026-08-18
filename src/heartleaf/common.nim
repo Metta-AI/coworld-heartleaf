@@ -20,6 +20,13 @@ const
   DayStartMinutes* = 8 * 60
   DayEndMinutes* = 22 * 60
   DinnerMinutes* = 18 * 60
+  ## One game day is 100 real seconds, the same as the hosted league
+  ## variant, so local runs, league rounds, and walk-time estimates share
+  ## the same clock.
+  TicksPerSecond* = 24
+  DefaultDaySeconds* = 100
+  DayTicks* = DefaultDaySeconds * TicksPerSecond
+  DayTotalMinutes* = DayEndMinutes - DayStartMinutes
 
 type
   Rect* = object

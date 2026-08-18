@@ -96,6 +96,34 @@ let prefixedDecision = parseLlmDecision("""
 doAssert prefixedDecision.message == "hi Anton",
   "decision messages should lose the self label"
 
+echo "Testing untilTime parsing"
+let untilDecision = parseLlmDecision("""
+{"action": "stand_at_house_garden", "houseIndex": 3, "untilTime": "5:15pm"}
+""")
+doAssert untilDecision.valid and untilDecision.untilMinutes == 17 * 60 + 15,
+  "untilTime accepts am/pm clocks"
+doAssert parseLlmDecision("""{"action": "go_home", "untilTime": "18:30"}""")
+  .untilMinutes == 18 * 60 + 30, "untilTime accepts 24h clocks"
+doAssert parseLlmDecision("""{"action": "go_home", "untilTime": 1110}""")
+  .untilMinutes == 1110, "untilTime accepts day minutes"
+doAssert parseLlmDecision("""{"action": "go_home"}""").untilMinutes == -1,
+  "untilTime defaults to none"
+
+echo "Testing dinner label parsing"
+let dinnerLabelText = "dinner 3 host=Anton wasHost=false score=7 " &
+  "guests=Vova,Yura foods=Yellow Squash x2, Beet"
+doAssert dinnerLabelText.dinnerLabelField("host") == "Anton"
+doAssert dinnerLabelText.dinnerLabelField("wasHost") == "false"
+doAssert dinnerLabelText.dinnerLabelField("score") == "7"
+doAssert dinnerLabelText.dinnerLabelField("guests") == "Vova,Yura"
+doAssert dinnerLabelText.dinnerLabelField("foods") ==
+  "Yellow Squash x2, Beet", "foods keeps its spaces and counts"
+doAssert "dinner 3".dinnerLabelField("host") == "",
+  "legacy labels have no fields"
+doAssert "Yellow Squash x2, Beet".foodNamesIn() ==
+  @["Yellow Squash", "Beet"], "counts are stripped from food names"
+doAssert "none".foodNamesIn().len == 0
+
 echo "Testing LLM pacing and backoff"
 var pacer = initLlmPacer(42)
 doAssert pacer.canRequest(0), "first request should be allowed at once"

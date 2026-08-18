@@ -1,5 +1,5 @@
 import
-  std/[algorithm, json, options, os, parseopt, strutils, times],
+  std/[algorithm, json, math, options, os, parseopt, sets, strutils, times],
   bitworld/[spriteprotocol, resources],
   curly, pathy, supersnappy, whisky,
   bedrock_auth, decisions, heartleaf/[common, protocol]
@@ -9,7 +9,7 @@ const
   BedrockVersion = "bedrock-2023-05-31"
   DefaultBedrockRegion = "us-east-1"
   DefaultBedrockModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-  DefaultBedrockTimeoutSeconds = 30
+  DefaultBedrockTimeoutSeconds = 15
   ReconnectDelayMs = 1000
   ReconnectGiveUpSeconds = 60.0
   DefaultBedrockMaxTokens = 192
@@ -34,22 +34,30 @@ const
   UnknownHouse = -1
   DecisionRetryTicks = 24
   DecisionStuckTicks = RepathStuckTicks * 2
-  ChatHistoryLimit = 120
-  HighFoodForInvites = 6
-  EarlyHostUntilDay = 3
-  LateHostFromDay = 8
-  PushyInviteCount = 3
+  ## Transcript cap in lines. A nine-day game produces roughly 120 hourly
+  ## clock lines plus 50-120 own chats plus whatever is overheard, so 600
+  ## is rarely reached; when it is, whole oldest days are dropped.
+  ChatHistoryLimit = 600
+  ## Food bands for interrupt detection only: crossing a band re-asks the
+  ## LLM because "how much I carry" changed enough to matter.
+  LowFoodBand = 2
+  HighFoodBand = 6
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
-  HostPrepMinutes = 15 * 60
-  InviteStartMinutes = 16 * 60
-  HouseEnterMinutes = 17 * 60
-  PartyLeaveMinutes = 20 * 60
-  LatePartySearchMinutes = 16 * 60
-  MaxHostWaitMinutes = 90
-  StrongHostFood = 12
-  MediumHostFood = 6
-  LowHostFood = 2
+  ## After this many minutes past dinner without a dinner overlay the bot
+  ## records that it missed dinner.
+  DinnerMissedGraceMinutes = 5
+  ## Walk-time estimates for the state report: top speed in pixels per
+  ## tick from the sim (MaxSpeed 704 / MotionScale 256), a fudge for
+  ## acceleration, corners, and doors, and ticks per game minute from
+  ## the same DayTicks the sim uses, until the bot has measured the
+  ## real clock rate.
+  WalkPixelsPerTick = 2.75
+  WalkTimeFudge = 1.5
+  DefaultTicksPerMinute = float(DayTicks) / float(DayTotalMinutes)
+  ClockRateMinMinutes = 15
+  LeaveMarginMinutes = 30
+  LeaveNudgeMinutes = 30
   HouseGatherMaxRadius = 96
   MorningIdentityUntilMinutes = 9 * 60
   MorningIdentityRadius = 140
@@ -135,6 +143,8 @@ type
     tag: string
     reply: string
     error: string
+    ## Token accounting from the response, for throttling diagnosis.
+    usage: string
 
   TalkingVillagerError = object of CatchableError
 
@@ -175,11 +185,31 @@ type
     chatHistory: seq[ConversationMessage]
     heardChats: seq[string]
     currentGarden: int
-    partyHouse: int
-    searchHouse: int
-    hostUntilMinutes: int
-    hostCommitted: bool
     dayIndex: int
+    dayEndRecorded: bool
+    ## Gnome names seen and greeted since this morning; both reset daily.
+    seenToday: HashSet[string]
+    greetedToday: HashSet[string]
+    ## Set by one-shot events (first sighting, departure time) that
+    ## should re-ask the LLM; cleared when a decision is applied.
+    interruptRequested: bool
+    ## Last inventory text written to the transcript, so a change is
+    ## recorded once rather than every frame.
+    lastCarryText: string
+    ## Dinner bookkeeping: what the bot still wanted at 6pm, where it
+    ## was, and whether the result was written to the transcript.
+    dinnerLookingBefore: string
+    dinnerHouse: int
+    dinnerRecorded: bool
+    ## Measured game-clock rate so walk times can be given in game
+    ## minutes: anchor tick and minute of the day, and the estimate.
+    clockAnchorTick: int
+    clockAnchorMinutes: int
+    ticksPerMinute: float
+    ## Set once per day when the latest departure time for dinner passes,
+    ## so that moment interrupts the current action exactly once.
+    leaveTimeNoted: bool
+    leaveTimeNotedMinutes: int
     frameTick: int
     desiredMask: uint8
     target: Point
@@ -193,6 +223,13 @@ type
     decisionTimePhase: int
     decisionChatSignature: string
     decisionCrowdSignature: string
+    ## Gnomes visible when the current decision was made; anyone else
+    ## walking into view while the bot waits at a door is a passer-by
+    ## worth interrupting for.
+    decisionVisibleNames: HashSet[string]
+    ## Chat lines said today, newest last, for the state report and the
+    ## repeated-line guard.
+    saidToday: seq[string]
     llmWaiting: bool
     llmTag: string
     llmSerial: int
@@ -345,37 +382,68 @@ proc bedrockHeaders(body: string): HttpHeaders =
   if latency.len > 0:
     result["X-Amzn-Bedrock-PerformanceConfig-Latency"] = latency
 
+var promptCacheEnabled = getEnv("BEDROCK_PROMPT_CACHE").strip() != "0"
+  ## Prompt caching marks the soul and the transcript tail as cache
+  ## breakpoints so the ever-growing transcript prefix is read from cache
+  ## instead of being re-billed and re-counted against the shared quota on
+  ## every request. Set BEDROCK_PROMPT_CACHE=0 to send plain requests; the
+  ## bot also switches it off by itself if Bedrock rejects the field.
+
+proc textBlock(text: string, cached: bool): JsonNode =
+  ## Returns one Messages API text content block.
+  result = %*{"type": "text", "text": text}
+  if cached:
+    result["cache_control"] = %*{"type": "ephemeral"}
+
 proc bedrockBody(messages: openArray[ConversationMessage]): string =
   ## Builds one Anthropic Messages request body for Bedrock.
   ## Consecutive same-role messages are joined because the Anthropic
-  ## Messages API requires user and assistant turns to alternate.
+  ## Messages API requires user and assistant turns to alternate. The
+  ## final message is the state report; it stays its own content block so
+  ## the transcript before it can end with a cache breakpoint.
   var
     systemPrompt = ""
     chatMessages = newJArray()
-  for message in messages:
+  for i, message in messages:
     if message.role == "system":
       systemPrompt = message.content
       continue
+    let isStateReport = i == messages.len - 1
     if chatMessages.elems.len == 0 and message.role == "assistant":
       chatMessages.add(%*{
         "role": "user",
-        "content": "(The day begins.)"
+        "content": [textBlock("(The day begins.)", false)]
       })
     if chatMessages.elems.len > 0 and
+        chatMessages.elems[^1]["role"].getStr() == message.role and
+        not isStateReport:
+      let last = chatMessages.elems[^1]["content"].elems[^1]
+      last["text"] = %(last["text"].getStr() & "\n" & message.content)
+    elif chatMessages.elems.len > 0 and
         chatMessages.elems[^1]["role"].getStr() == message.role:
-      chatMessages.elems[^1]["content"] = %(
-        chatMessages.elems[^1]["content"].getStr() & "\n" & message.content
+      chatMessages.elems[^1]["content"].add(
+        textBlock(message.content, false)
       )
     else:
       chatMessages.add(%*{
         "role": message.role,
-        "content": message.content
+        "content": [textBlock(message.content, false)]
       })
+  if promptCacheEnabled:
+    ## Breakpoint on the last transcript block: the block right before
+    ## the state report, which may live in the same user message.
+    let lastMessage = chatMessages.elems[^1]
+    let blocks = lastMessage["content"].elems
+    if blocks.len >= 2:
+      blocks[^2]["cache_control"] = %*{"type": "ephemeral"}
+    elif chatMessages.elems.len >= 2:
+      chatMessages.elems[^2]["content"].elems[^1]["cache_control"] =
+        %*{"type": "ephemeral"}
   let body = %*{
     "anthropic_version": BedrockVersion,
     "max_tokens": bedrockMaxTokens(),
     "temperature": BedrockTemperature,
-    "system": systemPrompt,
+    "system": [textBlock(systemPrompt, promptCacheEnabled)],
     "messages": chatMessages
   }
   if not hasSidecarEndpoint():
@@ -388,6 +456,21 @@ proc parseBedrockReply(body: string): string =
   for part in data["content"]:
     if part{"type"}.getStr() == "text":
       result.add(part["text"].getStr())
+
+proc bedrockUsageText(body: string): string =
+  ## Summarizes the usage block of one response as "in=N cacheRead=N
+  ## cacheWrite=N out=N" so logs show how big prompts are and whether the
+  ## prompt cache is hit.
+  try:
+    let usage = parseJson(body){"usage"}
+    if usage == nil or usage.kind != JObject:
+      return ""
+    "in=" & $usage{"input_tokens"}.getInt() &
+      " cacheRead=" & $usage{"cache_read_input_tokens"}.getInt() &
+      " cacheWrite=" & $usage{"cache_creation_input_tokens"}.getInt() &
+      " out=" & $usage{"output_tokens"}.getInt()
+  except CatchableError:
+    ""
 
 proc startTalkToBedrock(
   messages: openArray[ConversationMessage],
@@ -424,6 +507,7 @@ proc pollTalkToBedrock(): BedrockResult =
     return
   try:
     result.reply = response.body.parseBedrockReply()
+    result.usage = response.body.bedrockUsageText()
   except CatchableError as e:
     result.error = e.msg
     return
@@ -436,16 +520,64 @@ proc repoDir(): string =
   ## Returns the Heartleaf repository directory.
   currentSourcePath().parentDir().parentDir().parentDir()
 
+## Fixed notes about the state report and the actions. They live in the
+## system prompt rather than in every state report so the prompt cache
+## covers them and each request only re-sends what changed.
+const StateReportReference =
+  "State report reference:\n" &
+  "timeMinutes is minutes after midnight; " & $DinnerMinutes &
+  " is 6:00pm when dinner is served, " & $DayEndMinutes &
+  " is 10:00pm when the day ends.\n" &
+  "walkMinutesToHouse lists game minutes of walking from where you " &
+  "stand to each house door; leave that early, plus a margin, to be " &
+  "inside before a time. leaveForOwnHouseBy (only matters when you " &
+  "host at home), leaveForCommittedPartyBy, and leaveForNightBy are " &
+  "the latest clock times to start walking to be inside before dinner " &
+  "or before the day ends at 10:00pm.\n" &
+  "location says whether you are inside a house or outside; only " &
+  "gnomes inside a house at 6:00pm eat.\n" &
+  "visiblePlayers are the gnomes on screen with their positions and " &
+  "current chat bubbles; visibleHouseCrowds counts gnomes near each " &
+  "house door; gardenMarkers are gardens with food left.\n" &
+  "yourLinesToday are lines you already said today; greetedToday and " &
+  "seenTodayNotGreeted track whom you have greeted.\n" &
+  "Actions: keep_gathering_plants walks the gardens outside; " &
+  "find_person / stand_next_to_person / say_to_person walk to " &
+  "targetName and stay by them, say_to_person says message only once " &
+  "you are next to them; if targetName is not in visiblePlayers you " &
+  "walk toward their house when you are outside, and simply wait when " &
+  "you are inside a house (to go outside use keep_gathering_plants, " &
+  "find_house or stand_at_house_garden); " &
+  "find_house / stand_at_house_garden wait OUTSIDE the door of " &
+  "houseIndex and leave the house if you are inside; " &
+  "go_home goes INSIDE your own house and stays (it walks you OUT of " &
+  "any other house first); go_to_party goes INSIDE houseIndex and " &
+  "stays; stay_inside stays right where you are inside a house (from " &
+  "outside it walks to the house you promised, else home). To be " &
+  "inside for dinner use go_to_party, stay_inside, or go_home when you " &
+  "host; every other action puts you outside.\n" &
+  "untilTime is an optional field, a clock like 5:15pm; the action " &
+  "then keeps going until that time (wait at a door, gather, stay " &
+  "home) instead of ending when reached; while you wait at a door " &
+  "you are asked again whenever a gnome walks into view.\n" &
+  "commitParty true with houseIndex records a promise to be at that " &
+  "house for dinner; if you cannot be asked when the time comes, the " &
+  "promise is carried out for you."
+
 proc loadSoulInstructions(bot: Bot, name: string): string =
-  ## Builds the full system prompt for one player name.
+  ## Builds the full system prompt for one player name: the soul with
+  ## the name filled in, plus the fixed state report reference.
   let cleanName =
     if name.strip().len > 0:
       name.strip()
     else:
       "a Heartleaf gnome"
-  if bot.soulTemplate.contains("{name}"):
-    return bot.soulTemplate.replace("{name}", cleanName)
-  "Your name is " & cleanName & ".\n\n" & bot.soulTemplate
+  result =
+    if bot.soulTemplate.contains("{name}"):
+      bot.soulTemplate.replace("{name}", cleanName)
+    else:
+      "Your name is " & cleanName & ".\n\n" & bot.soulTemplate
+  result.add("\n\n" & StateReportReference)
 
 proc loadBotResources(): Resources =
   ## Loads house, garden, and home-exit resource rectangles.
@@ -468,14 +600,6 @@ proc loadBotResources(): Resources =
 proc screenRectVisible(x, y, w, h: int): bool =
   ## Returns true when one screen-space rectangle overlaps the viewport.
   x < ViewportWidth and y < ViewportHeight and x + w > 0 and y + h > 0
-
-proc playerDistanceSquared(bot: Bot, rect: Rect): int =
-  ## Returns the squared distance from the bot foot pixel to one rectangle.
-  pointRectDistanceSquared(
-    bot.selfX.footXAt(),
-    bot.selfY.footYAt(),
-    rect
-  )
 
 proc playerFootX(bot: Bot): int =
   ## Returns the bot foot-center X coordinate.
@@ -505,6 +629,33 @@ proc spriteInfo(bot: Bot, spriteId: int): SpriteInfo =
   ## Returns sprite metadata for one sprite id.
   if spriteId >= 0 and spriteId < bot.sprites.len:
     return bot.sprites[spriteId]
+
+proc logName(bot: Bot): string =
+  ## Returns the username and fixed player name for bot logs.
+  if bot.playerName.len == 0:
+    return bot.name
+  bot.name & " (" & bot.playerName & ")"
+
+proc clockText(bot: Bot): string =
+  ## Reads the current clock text from visible glyph objects.
+  var glyphs: seq[tuple[x: int, ch: char]]
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < ClockObjectBase or objectId >= ScoreObjectBase:
+      continue
+    let sprite = bot.spriteInfo(objectState.spriteId)
+    if sprite == nil or sprite.kind != SpriteClock:
+      continue
+    glyphs.add((x: objectState.x, ch: sprite.glyph))
+  glyphs.sort(proc(a, b: tuple[x: int, ch: char]): int = cmp(a.x, b.x))
+  for glyph in glyphs:
+    result.add(glyph.ch)
+  result = result.strip()
+
+proc log(bot: Bot, text: string) =
+  ## Writes one bot activity log line.
+  echo bot.logName(), ": ", text, " (", bot.clockText(), ")"
 
 proc visiblePlayerName(bot: Bot, playerIndex: int): string =
   ## Returns the visible name for one player index.
@@ -568,10 +719,43 @@ proc recordOwnChat(bot: Bot, text: string) =
   ## the model would imitate in its next line.
   bot.chatHistory.add(ConversationMessage(role: "assistant", content: text))
 
+proc recordEvent(bot: Bot, text: string) =
+  ## Records one world event the bot noticed, as a parenthesized user
+  ## line: day boundaries, first sightings, what it carries, dinner.
+  bot.chatHistory.add(ConversationMessage(
+    role: "user",
+    content: "(" & text & ")"
+  ))
+
+proc recordOwnDecision(bot: Bot, text: string) =
+  ## Records what the bot decided to do, as a parenthesized own turn, so
+  ## later prompts remember actions and not only spoken lines.
+  bot.chatHistory.add(ConversationMessage(
+    role: "assistant",
+    content: "(" & text & ")"
+  ))
+
+proc dayBeginsLine(day: int): string =
+  ## Returns the transcript marker that opens one day.
+  "Day " & $day & " begins."
+
 proc trimChatHistory(bot: Bot) =
-  ## Keeps the transcript bounded so prompt tokens stop growing all game.
-  if bot.chatHistory.len > ChatHistoryLimit:
-    bot.chatHistory = bot.chatHistory[^ChatHistoryLimit .. ^1]
+  ## Keeps the transcript bounded. When it grows past ChatHistoryLimit,
+  ## whole oldest days are dropped, cutting at a "Day N begins." marker so
+  ## the model never sees half a day.
+  if bot.chatHistory.len <= ChatHistoryLimit:
+    return
+  let excess = bot.chatHistory.len - ChatHistoryLimit
+  var cut = -1
+  for i in excess ..< bot.chatHistory.len:
+    let content = bot.chatHistory[i].content
+    if content.startsWith("(Day ") and content.endsWith(" begins.)"):
+      cut = i
+      break
+  if cut <= 0:
+    return
+  bot.log("transcript trimmed " & $cut & " lines before day marker")
+  bot.chatHistory = bot.chatHistory[cut .. ^1]
 
 proc scanHeardChats(bot: Bot) =
   ## Records newly visible chat bubbles from other players.
@@ -595,11 +779,28 @@ proc scanHeardChats(bot: Bot) =
       continue
     bot.recordChatLine("user", speaker, text)
 
-proc logName(bot: Bot): string =
-  ## Returns the username and fixed player name for bot logs.
-  if bot.playerName.len == 0:
-    return bot.name
-  bot.name & " (" & bot.playerName & ")"
+proc scanSeenGnomes(bot: Bot) =
+  ## Records the first sighting of each other gnome today and flags it so
+  ## the current action can be interrupted to say hello.
+  if not bot.localized:
+    return
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+      continue
+    let playerIndex = objectId - PlayerObjectBase
+    if playerIndex == bot.selfIndex:
+      continue
+    let name = bot.visiblePlayerName(playerIndex)
+    if name.len == 0 or name == bot.playerName:
+      continue
+    if name in bot.seenToday:
+      continue
+    bot.seenToday.incl(name)
+    bot.interruptRequested = true
+    bot.recordEvent("You see " & name & " for the first time today.")
+    bot.log("first sighting " & name)
 
 proc ensureSprite(bot: Bot, spriteId: int) =
   ## Ensures the sprite table can contain one sprite id.
@@ -965,111 +1166,125 @@ proc applySpritePacket(bot: Bot, packet: string): bool =
       return false
   true
 
-proc clockText(bot: Bot): string =
-  ## Reads the current clock text from visible glyph objects.
-  var glyphs: seq[tuple[x: int, ch: char]]
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < ClockObjectBase or objectId >= ScoreObjectBase:
-      continue
-    let sprite = bot.spriteInfo(objectState.spriteId)
-    if sprite == nil or sprite.kind != SpriteClock:
-      continue
-    glyphs.add((x: objectState.x, ch: sprite.glyph))
-  glyphs.sort(proc(a, b: tuple[x: int, ch: char]): int = cmp(a.x, b.x))
-  for glyph in glyphs:
-    result.add(glyph.ch)
-  result = result.strip()
-
-proc log(bot: Bot, text: string) =
-  ## Writes one bot activity log line.
-  echo bot.logName(), ": ", text, " (", bot.clockText(), ")"
-
 proc dayNumber(bot: Bot): int =
   ## Returns the one-based day of the current game.
   bot.dayIndex + 1
 
-proc isEarlyHostDay(bot: Bot): bool =
-  ## Returns true on days when hosting wastes a small pantry.
-  bot.dayNumber <= EarlyHostUntilDay
-
-proc isLateHostDay(bot: Bot): bool =
-  ## Returns true on the last two days of a typical nine-day game.
-  bot.dayNumber >= LateHostFromDay
-
 proc clockAnnouncement(bot: Bot): string =
-  ## Returns one hourly clock line for the conversation history.
+  ## Returns one neutral hourly clock line for the conversation history.
+  ## What the hours mean (dinner at 6pm, night at 10pm) is the soul's job.
   let
     clock = bot.minutes.clockName()
-    dayPrefix = "Day " & $bot.dayNumber & ". "
     minutes = bot.minutes
+  result = "Day " & $bot.dayNumber & ". It is " & clock & "."
   if minutes < DinnerMinutes:
     let hours = (DinnerMinutes - minutes) div 60
     if hours <= 0:
-      dayPrefix & "It is " & clock &
-        ". Dinner starts within the hour! Be INSIDE " &
-        "your dinner house before it is served at 6:00pm - if you are " &
-        "outside when it is served you miss dinner entirely."
+      result.add(" Dinner is served within the hour.")
     elif hours == 1:
-      dayPrefix & "It is " & clock &
-        " (1 hour till dinner). Settle on a dinner " &
-        "house now; you must be inside it before 6:00pm."
+      result.add(" One hour till dinner.")
     else:
-      dayPrefix & "It is " & clock &
-        " (" & $hours & " hours till dinner)."
-  elif minutes < DinnerMinutes + 60:
-    dayPrefix & "It is " & clock &
-      ". Dinner was served at 6:00pm sharp - anyone " &
-      "outside then missed it. The evening is for gathering food " &
-      "for tomorrow."
+      result.add(" " & $hours & " hours till dinner.")
   elif minutes < DayEndMinutes:
     let hours = (DayEndMinutes - minutes) div 60
-    if hours <= 1:
-      dayPrefix & "It is " & clock & " (night falls within the hour)."
+    if hours <= 0:
+      result.add(" Night falls within the hour.")
     else:
-      dayPrefix & "It is " & clock &
-        " (" & $hours & " hours till night time)."
+      result.add(" " & $hours & " hours till night.")
   else:
-    dayPrefix & "It is " & clock & ". It is night time."
+    result.add(" It is night.")
+
+proc recordDayEnd(bot: Bot) =
+  ## Records the end of the day once and logs the transcript size so a
+  ## hosted run shows how close ChatHistoryLimit gets.
+  if bot.dayEndRecorded:
+    return
+  bot.dayEndRecorded = true
+  bot.recordEvent("Day " & $bot.dayNumber & " ends.")
+  var heard, said, events, decisions, clocks = 0
+  for message in bot.chatHistory:
+    if message.content.startsWith("Clock: "):
+      inc clocks
+    elif message.content.startsWith("("):
+      if message.role == "user":
+        inc events
+      else:
+        inc decisions
+    elif message.role == "user":
+      inc heard
+    else:
+      inc said
+  bot.log("day " & $bot.dayNumber & " ends, history len=" &
+    $bot.chatHistory.len & " heard=" & $heard & " said=" & $said &
+    " events=" & $events & " decisions=" & $decisions &
+    " clocks=" & $clocks)
+
+proc maybeRecordDayEnd(bot: Bot) =
+  ## Records the day end when the clock reaches night time.
+  if bot.minutes >= DayEndMinutes:
+    bot.recordDayEnd()
 
 proc maybeRecordClock(bot: Bot) =
-  ## Records one clock line in the conversation every game hour.
+  ## Records one clock line in the conversation every game hour, after
+  ## the day marker on the first hour of each day.
   if bot.minutes < 0:
     return
   let hour = bot.minutes div 60
   if hour == bot.lastClockHour:
     return
+  if bot.lastClockHour < 0:
+    bot.recordEvent(bot.dayNumber.dayBeginsLine())
   bot.lastClockHour = hour
   bot.chatHistory.add(ConversationMessage(
     role: "user",
     content: "Clock: " & bot.clockAnnouncement()
   ))
+  bot.maybeRecordDayEnd()
 
 proc resetGardenPlan(bot: Bot) =
-  ## Resets the static garden checklist for a new day.
+  ## Resets the per-day state for a new morning: the garden checklist,
+  ## who was seen and greeted, dinner bookkeeping, and any pending
+  ## decision or request from yesterday. lastClockHour = -1 makes the
+  ## next clock line open with a "Day N begins." marker.
+  bot.recordDayEnd()
   inc bot.dayIndex
   bot.gardenChecked = newSeq[bool](bot.resources.gardens.len)
   bot.currentGarden = -1
-  bot.partyHouse = UnknownHouse
-  bot.searchHouse = UnknownHouse
-  bot.hostUntilMinutes = -1
-  bot.hostCommitted = false
   bot.hasDecision = false
   bot.decisionChatSent = false
   bot.llmWaiting = false
   bot.lastLlmError = ""
   bot.committedPartyHouse = UnknownHouse
+  bot.seenToday.clear()
+  bot.greetedToday.clear()
+  bot.interruptRequested = false
+  bot.dayEndRecorded = false
+  bot.dinnerLookingBefore = ""
+  bot.dinnerHouse = UnknownHouse
+  bot.dinnerRecorded = false
+  bot.leaveTimeNoted = false
+  bot.saidToday.setLen(0)
+  bot.lastClockHour = -1
   bot.path.setLen(0)
   bot.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
 
 proc updateClock(bot: Bot) =
-  ## Updates the bot's current day clock from the UI glyphs.
+  ## Updates the bot's current day clock from the UI glyphs and measures
+  ## how many ticks one game minute takes.
   let minutes = bot.clockText().parseClockMinutes()
-  if minutes >= 0:
-    if bot.minutes > minutes:
-      bot.resetGardenPlan()
-    bot.minutes = minutes
+  if minutes < 0:
+    return
+  if bot.minutes > minutes:
+    bot.resetGardenPlan()
+    bot.clockAnchorMinutes = -1
+  if minutes != bot.minutes:
+    if bot.clockAnchorMinutes < 0:
+      bot.clockAnchorTick = bot.frameTick
+      bot.clockAnchorMinutes = minutes
+    elif minutes - bot.clockAnchorMinutes >= ClockRateMinMinutes:
+      bot.ticksPerMinute = float(bot.frameTick - bot.clockAnchorTick) /
+        float(minutes - bot.clockAnchorMinutes)
+  bot.minutes = minutes
 
 proc updateScreenKind(bot: Bot) =
   ## Updates the visible screen kind and camera offset.
@@ -1152,8 +1367,6 @@ proc adoptHomeIdentity(bot: Bot, homeIndex: int) =
     else:
       UnknownHouse
   bot.pendingHouse = UnknownHouse
-  bot.partyHouse = UnknownHouse
-  bot.searchHouse = UnknownHouse
   bot.committedPartyHouse = UnknownHouse
   bot.hasDecision = false
   bot.currentGarden = -1
@@ -1357,8 +1570,134 @@ proc gardensExhausted(bot: Bot): bool =
   true
 
 proc shouldGather(bot: Bot): bool =
-  ## Returns true when the bot should keep gathering food.
-  bot.minutes < HouseEnterMinutes and not bot.gardensExhausted()
+  ## Returns true while there are gardens left to check today.
+  not bot.gardensExhausted()
+
+proc maybeRecordCarry(bot: Bot) =
+  ## Records what the bot carries whenever it changes, so the transcript
+  ## remembers pickups and the emptied pantry after hosting.
+  if bot.screenKind == OverlayScreen:
+    return
+  ## Only a change in which foods are carried is worth a line; a second
+  ## carrot is not.
+  let carry = bot.collectedFoodsText()
+  let names = carry.foodNamesIn().join(", ")
+  if names == bot.lastCarryText:
+    return
+  bot.lastCarryText = names
+  if carry == "none":
+    bot.recordEvent("You carry no food now.")
+  else:
+    bot.recordEvent("You now carry: " & carry & ".")
+
+proc visibleDinnerLabel(bot: Bot): string =
+  ## Returns the dinner overlay label when the dinner result is on
+  ## screen, else "".
+  for objectId in ScoreObjectBase ..< LookingForObjectId:
+    if objectId >= bot.objects.len or not bot.objects[objectId].present:
+      continue
+    let sprite = bot.spriteInfo(bot.objects[objectId].spriteId)
+    if sprite != nil and sprite.label.startsWith(DinnerLabelPrefix):
+      return sprite.label
+
+proc dinnerSummary(bot: Bot, label: string): string =
+  ## Turns one dinner overlay label into a transcript line. Labels from
+  ## older game builds carry only the player index, so the summary then
+  ## falls back to what the bot saw itself at 6pm.
+  let
+    host = label.dinnerLabelField("host")
+    wasHost = label.dinnerLabelField("wasHost") == "true"
+    score = label.dinnerLabelField("score")
+    guestsText = label.dinnerLabelField("guests")
+    foodsText = label.dinnerLabelField("foods")
+  var guests: seq[string]
+  for name in guestsText.split(","):
+    if name.strip().len > 0 and name.strip() != bot.playerName:
+      guests.add(name.strip())
+  let others =
+    if guests.len == 0:
+      "nobody else"
+    else:
+      guests.join(", ")
+  if host.len == 0:
+    ## Legacy label: infer from position and the looking-for list.
+    let hostName =
+      if bot.dinnerHouse >= 0:
+        bot.dinnerHouse.playerNameForHouse()
+      else:
+        ""
+    if hostName.len == 0:
+      return "Dinner was served but you do not know where you were."
+    if bot.dinnerHouse == bot.homeIndex:
+      return "Dinner: you hosted at your house and served your pantry."
+    var ate: seq[string]
+    let stillLooking = bot.lookingForFoodsText().foodNamesIn()
+    for name in bot.dinnerLookingBefore.foodNamesIn():
+      if name notin stillLooking:
+        ate.add(name)
+    result = "Dinner: you ate at " & hostName & "'s house."
+    if ate.len > 0:
+      result.add(" You ate " & ate.join(", ") & ", which you still wanted.")
+    return
+  let scoreText =
+    if score.len > 0:
+      " (+" & score & " score)"
+    else:
+      ""
+  if wasHost:
+    return "Dinner: you hosted " & others & " at your house and served " &
+      foodsText & scoreText & ". Your pantry is empty now."
+  var wanted: seq[string]
+  let before = bot.dinnerLookingBefore.foodNamesIn()
+  for name in foodsText.foodNamesIn():
+    if name in before:
+      wanted.add(name)
+  result = "Dinner: you ate at " & host & "'s house with " & others &
+    ". You ate " & foodsText & scoreText & "."
+  if wanted.len > 0:
+    result.add(" You had wanted " & wanted.join(", ") & " and got it.")
+  let stillLooking = bot.lookingForFoodsText()
+  if stillLooking.len > 0 and stillLooking != "none":
+    result.add(" Still looking for: " & stillLooking & ".")
+
+proc maybeRecordDinner(bot: Bot) =
+  ## Remembers, until dinner, where the bot is and what it still wants,
+  ## then records the dinner result once the dinner overlay shows, or that
+  ## dinner was missed if it never does. The clock is hidden while the
+  ## overlay is up, so the label is checked every frame regardless of the
+  ## last clock reading.
+  if bot.dinnerRecorded:
+    return
+  if bot.minutes < DinnerMinutes and bot.screenKind != OverlayScreen:
+    if LookingForObjectId < bot.objects.len and
+        bot.objects[LookingForObjectId].present:
+      bot.dinnerLookingBefore = bot.lookingForFoodsText()
+    bot.dinnerHouse =
+      if bot.screenKind == HomeMap:
+        bot.currentHouse
+      else:
+        UnknownHouse
+  let label = bot.visibleDinnerLabel()
+  if label.len > 0:
+    bot.dinnerRecorded = true
+    let summary = bot.dinnerSummary(label)
+    bot.recordEvent(summary)
+    bot.log("dinner " & label)
+    return
+  if bot.minutes < DinnerMinutes + DinnerMissedGraceMinutes:
+    return
+  bot.dinnerRecorded = true
+  let missed =
+    if bot.dinnerHouse < 0:
+      "Dinner: you were outside at 6pm and missed dinner."
+    elif bot.dinnerHouse == bot.homeIndex:
+      "Dinner: you were home at 6pm but nobody came, so there was no dinner."
+    else:
+      "Dinner: you were at " & bot.dinnerHouse.playerNameForHouse() &
+        "'s house at 6pm but no dinner was served there (the host was " &
+        "not inside)."
+  bot.recordEvent(missed)
+  bot.log("dinner missed: " & missed)
 
 proc analyze(bot: Bot) =
   ## Rebuilds high-level bot state from decoded objects.
@@ -1420,10 +1759,6 @@ proc initBot(name: string, slot: int, soul: string): Bot =
   result.selfIndex = -1
   result.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
   result.currentGarden = -1
-  result.partyHouse = UnknownHouse
-  result.searchHouse = UnknownHouse
-  result.hostUntilMinutes = -1
-  result.hostCommitted = false
   result.hasDecision = false
   result.decisionChatSent = false
   result.llmWaiting = false
@@ -1431,6 +1766,11 @@ proc initBot(name: string, slot: int, soul: string): Bot =
   result.dayIndex = 0
   result.gardenChecked = newSeq[bool](result.resources.gardens.len)
   result.lastClockHour = -1
+  result.seenToday = initHashSet[string]()
+  result.greetedToday = initHashSet[string]()
+  result.dinnerHouse = UnknownHouse
+  result.clockAnchorMinutes = -1
+  result.ticksPerMinute = DefaultTicksPerMinute
 
 proc gardenGoal(bot: Bot): Goal =
   ## Returns a goal for the nearest garden that may still have food.
@@ -1622,16 +1962,6 @@ proc houseHasGuest(bot: Bot, houseIndex: int): bool =
     if bot.playerNearHouse(objectState, houseIndex):
       return true
 
-proc houseCrowd(bot: Bot, houseIndex: int): int =
-  ## Returns how many visible gnomes are gathered near one house.
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    if bot.playerNearHouse(objectState, houseIndex):
-      inc result
-
 proc houseCrowdOthers(bot: Bot, houseIndex: int): int =
   ## Returns how many other visible gnomes are gathered near one house.
   for objectId, objectState in bot.objects:
@@ -1646,255 +1976,6 @@ proc houseCrowdOthers(bot: Bot, houseIndex: int): int =
       continue
     if bot.playerNearHouse(objectState, houseIndex):
       inc result
-
-proc socialRandom(bot: Bot, salt, limit: int): int =
-  ## Returns one deterministic daily pseudo-random value.
-  if limit <= 0:
-    return 0
-  var value = uint32(bot.homeIndex + 1)
-  value = value * 1103515245'u32 + uint32(bot.dayIndex + 1)
-  value = value xor (uint32(max(0, salt)) * 2654435761'u32)
-  value = value xor (value shr 16)
-  return int(value mod uint32(limit))
-
-proc hostWaitDuration(bot: Bot): int =
-  ## Returns how long this bot should try hosting today.
-  if bot.isEarlyHostDay():
-    return 0
-  let food = bot.inventoryTotal()
-  if food >= StrongHostFood:
-    return MaxHostWaitMinutes
-  var
-    base = 0
-    jitter = 15
-  if food <= 0:
-    base = 0
-    jitter = 10
-  elif food <= LowHostFood:
-    base = 5
-    jitter = 15
-  elif food < MediumHostFood:
-    base = 15
-    jitter = 25
-  else:
-    base = 40
-    jitter = 45
-  return min(MaxHostWaitMinutes, base + bot.socialRandom(31 + food, jitter + 1))
-
-proc ensureHostWait(bot: Bot) =
-  ## Initializes this day's host patience window.
-  if bot.hostUntilMinutes >= 0:
-    return
-  bot.hostUntilMinutes = min(
-    HouseEnterMinutes,
-    bot.minutes + bot.hostWaitDuration()
-  )
-
-proc shouldHostOwnHouse(bot: Bot): bool =
-  ## Returns true when the bot should keep trying to host at home.
-  if bot.homeIndex < 0 or bot.homeIndex >= HouseCount:
-    return false
-  if bot.houseHasGuest(bot.homeIndex):
-    bot.hostCommitted = true
-    bot.partyHouse = bot.homeIndex
-    return true
-  if bot.hostCommitted:
-    bot.partyHouse = bot.homeIndex
-    return true
-  if bot.isEarlyHostDay():
-    return false
-  if bot.minutes >= LatePartySearchMinutes:
-    return false
-  let food = bot.inventoryTotal()
-  if food >= StrongHostFood:
-    bot.partyHouse = bot.homeIndex
-    return true
-  bot.ensureHostWait()
-  if bot.minutes < bot.hostUntilMinutes:
-    bot.partyHouse = bot.homeIndex
-    return true
-  return false
-
-proc requiredPartyCrowd(bot: Bot): int =
-  ## Returns the crowd size this bot prefers before joining a party.
-  if bot.minutes >= LatePartySearchMinutes:
-    return 1
-  let minutesLeft = max(0, HouseEnterMinutes - bot.minutes)
-  result =
-    if minutesLeft > 180:
-      4
-    elif minutesLeft > 90:
-      3
-    elif minutesLeft > 30:
-      2
-    else:
-      1
-  let food = bot.inventoryTotal()
-  if food <= LowHostFood:
-    result = max(1, result - 1)
-  elif food >= MediumHostFood:
-    result = min(4, result + 1)
-
-proc acceptsPartyCrowd(bot: Bot, houseIndex, crowd: int): bool =
-  ## Returns true when this bot accepts a visible house crowd.
-  if crowd <= 0:
-    return false
-  if bot.minutes >= LatePartySearchMinutes:
-    return true
-  let required = bot.requiredPartyCrowd()
-  if crowd >= required:
-    return true
-  let
-    minutesLeft = max(0, HouseEnterMinutes - bot.minutes)
-    deficit = required - crowd
-  var chance =
-    if minutesLeft > 180:
-      case deficit
-      of 1: 20
-      of 2: 5
-      else: 0
-    elif minutesLeft > 90:
-      case deficit
-      of 1: 45
-      of 2: 15
-      else: 3
-    elif minutesLeft > 30:
-      case deficit
-      of 1: 70
-      of 2: 35
-      else: 10
-    else:
-      100
-  let food = bot.inventoryTotal()
-  if food <= LowHostFood:
-    chance += 15
-  elif food >= MediumHostFood:
-    chance -= 10
-  chance = chance.clamp(0, 100)
-  let salt = 1000 + houseIndex * 17 + bot.minutes div 15
-  return bot.socialRandom(salt, 100) < chance
-
-proc isHostInviteMessage(message: string): bool =
-  ## Returns true when chat text invites people to this bot's house.
-  let lower = message.toLowerAscii()
-  lower.contains("my house") or
-    lower.contains("my place") or
-    lower.contains("come to my") or
-    lower.contains("party at my") or
-    lower.contains("meet at my")
-
-proc chatSpeaker(content: string): string =
-  ## Returns the speaker name prefix of one transcript line.
-  let at = content.find(": ")
-  if at <= 0:
-    return ""
-  content[0 ..< at]
-
-proc chatBody(content: string): string =
-  ## Returns the spoken text of one transcript line.
-  let at = content.find(": ")
-  if at < 0:
-    return content
-  content[at + 2 .. ^1]
-
-proc mentionCount(bot: Bot, houseIndex: int): int =
-  ## Returns how often this bot has talked with one house owner.
-  if houseIndex < 0 or houseIndex >= HouseCount:
-    return 0
-  if houseIndex == bot.homeIndex:
-    return 0
-  let
-    name = houseIndex.playerNameForHouse()
-    prefix = name & ": "
-  for message in bot.chatHistory:
-    if message.content.startsWith(prefix):
-      inc result
-    elif message.role == "assistant" and
-        message.content.contains(name):
-      inc result
-
-proc likedHouseIndex(bot: Bot): int =
-  ## Returns the house of the gnome this bot has talked with most.
-  result = UnknownHouse
-  var bestCount = 0
-  for houseIndex in 0 ..< HouseCount:
-    if houseIndex == bot.homeIndex:
-      continue
-    let count = bot.mentionCount(houseIndex)
-    if count > bestCount:
-      bestCount = count
-      result = houseIndex
-
-proc inviteCountFrom(bot: Bot, name: string): int =
-  ## Returns how many dinner pitches this bot heard from one gnome.
-  if name.len == 0:
-    return 0
-  for message in bot.chatHistory:
-    if message.role != "user":
-      continue
-    if message.content.chatSpeaker() != name:
-      continue
-    if message.content.chatBody().isHostInviteMessage():
-      inc result
-
-proc isPushyHost(bot: Bot, name: string): bool =
-  ## Returns true when one gnome has pitched dinner over and over.
-  name.len > 0 and bot.inviteCountFrom(name) >= PushyInviteCount
-
-proc visiblePartyScore(bot: Bot, houseIndex, crowd: int): int =
-  ## Returns a score for a visible candidate dinner house.
-  let distance = bot.playerDistanceSquared(bot.resources.houses[houseIndex])
-  result =
-    bot.mentionCount(houseIndex) * 1_000_000 +
-    crowd * 10_000 -
-    distance div 16
-  if houseIndex == bot.partyHouse:
-    result += 2_000
-
-proc bestVisiblePartyHouse(bot: Bot, relaxed = false): int =
-  ## Returns the best visible house party this bot is willing to join.
-  result = UnknownHouse
-  var bestScore = low(int)
-  for step in 0 ..< HouseCount:
-    let houseIndex = (bot.homeIndex + 1 + step) mod HouseCount
-    if not bot.resources.houseValid[houseIndex]:
-      continue
-    if houseIndex == bot.homeIndex:
-      continue
-    if bot.isPushyHost(houseIndex.playerNameForHouse()):
-      continue
-    if not bot.houseOwnerPresent(houseIndex):
-      continue
-    let count = bot.houseCrowd(houseIndex)
-    if not relaxed and not bot.acceptsPartyCrowd(houseIndex, count):
-      continue
-    let score = bot.visiblePartyScore(houseIndex, count)
-    if score > bestScore:
-      bestScore = score
-      result = houseIndex
-
-proc scoutingHouseIndex(bot: Bot): int =
-  ## Returns the next house this bot should inspect while seeking.
-  result = bot.homeIndex
-  let step = max(0, bot.minutes - DayStartMinutes) div 20
-  for offset in 0 ..< HouseCount:
-    let houseIndex = (bot.homeIndex + step + offset + 1) mod HouseCount
-    if houseIndex == bot.homeIndex:
-      continue
-    if bot.resources.houseValid[houseIndex]:
-      result = houseIndex
-      break
-
-proc partyHouseIndex(bot: Bot): int =
-  ## Returns the house this bot currently wants for dinner.
-  if bot.partyHouse >= 0:
-    return bot.partyHouse
-  result = bot.bestVisiblePartyHouse(true)
-  if result < 0 and bot.searchHouse >= 0:
-    result = bot.searchHouse
-  if result < 0:
-    result = bot.homeIndex
-  bot.partyHouse = result
 
 proc desiredHouseGatherPoint(bot: Bot, house: Rect): Point =
   ## Returns this bot's preferred outside door spot around one house.
@@ -1941,27 +2022,6 @@ proc gatherAtHouseGoal(bot: Bot, houseIndex: int): Goal =
     gardenIndex: -1
   )
 
-proc gatherOwnHouseGoal(bot: Bot): Goal =
-  ## Returns the goal that keeps the bot outside its own house.
-  bot.gatherAtHouseGoal(bot.homeIndex)
-
-proc dinnerGatherGoal(bot: Bot): Goal =
-  ## Returns the outside-house goal for pre-dinner social planning.
-  if bot.screenKind == HomeMap:
-    return bot.exitGoal()
-  if bot.screenKind != MainMap:
-    return Goal(kind: GoalIdle, screenKind: bot.screenKind)
-  if bot.shouldHostOwnHouse():
-    return bot.gatherOwnHouseGoal()
-  let partyHouse = bot.bestVisiblePartyHouse()
-  if partyHouse >= 0:
-    bot.partyHouse = partyHouse
-    return bot.gatherAtHouseGoal(partyHouse)
-  let scoutHouse = bot.scoutingHouseIndex()
-  bot.partyHouse = UnknownHouse
-  bot.searchHouse = scoutHouse
-  bot.gatherAtHouseGoal(scoutHouse)
-
 proc firstDinerGoal(bot: Bot): Goal =
   ## Returns a small idle movement goal away from the home exit.
   Goal(
@@ -1973,17 +2033,6 @@ proc firstDinerGoal(bot: Bot): Goal =
     gardenIndex: -1
   )
 
-proc partyGoal(bot: Bot): Goal =
-  ## Returns the goal that gets the bot to the shared dinner house.
-  let houseIndex = bot.partyHouseIndex()
-  if bot.screenKind == HomeMap:
-    if bot.currentHouse == houseIndex:
-      return bot.firstDinerGoal()
-    return bot.exitGoal()
-  if bot.screenKind == MainMap:
-    return bot.enterHouseGoal(houseIndex)
-  Goal(kind: GoalIdle, screenKind: bot.screenKind)
-
 proc ownHomeGoal(bot: Bot): Goal =
   ## Returns the goal that gets the bot into its own house.
   if bot.screenKind == HomeMap:
@@ -1993,16 +2042,6 @@ proc ownHomeGoal(bot: Bot): Goal =
   if bot.screenKind == MainMap:
     return bot.enterHouseGoal(bot.homeIndex)
   Goal(kind: GoalIdle, screenKind: bot.screenKind)
-
-proc visibleOtherPlayerCount(bot: Bot): int =
-  ## Returns how many other player sprites are visible now.
-  for objectId, objectState in bot.objects:
-    if not objectState.present:
-      continue
-    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
-      continue
-    if objectId - PlayerObjectBase != bot.selfIndex:
-      inc result
 
 proc visiblePlayerNear(bot: Bot, name: string): bool =
   ## Returns true when one named visible player is close enough to talk.
@@ -2036,8 +2075,9 @@ proc standNextToPersonGoal(bot: Bot, name: string): Goal =
       gardenIndex: -1,
       targetName: name
     )
+  ## Inside a house you cannot search the world; wait here for them.
   if bot.screenKind == HomeMap:
-    return bot.exitGoal()
+    return Goal(kind: GoalIdle, screenKind: bot.screenKind)
   if bot.screenKind == MainMap:
     let houseIndex = name.houseIndexForPlayerName()
     if houseIndex >= 0:
@@ -2052,99 +2092,33 @@ proc decisionHouse(bot: Bot, decision: LlmDecision): int =
   if result < 0 and bot.committedPartyHouse >= 0:
     result = bot.committedPartyHouse
 
-proc mentionedHouseIndex(message: string): int =
-  ## Returns a house index mentioned by owner name in chat text.
-  result = UnknownHouse
-  let lower = message.toLowerAscii()
-  for i, playerName in PlayerNames:
-    let owner = playerName.toLowerAscii()
-    if lower.contains(owner & "'s house") or
-        lower.contains(owner & "s house") or
-        lower.contains(owner & " house"):
-      return i
-
-proc isAttendanceMessage(message: string): bool =
-  ## Returns true when chat text confirms attendance at a party.
-  let lower = message.toLowerAscii()
-  lower.contains("i will come") or
-    lower.contains("i'll come") or
-    lower.contains("i will be there") or
-    lower.contains("i'll be there") or
-    lower.contains("i am coming") or
-    lower.contains("i'm coming") or
-    lower.contains("see you") or
-    lower.contains("sounds great") or
-    lower.contains("count me in") or
-    lower.contains("coming to")
-
 proc inferSocialCommitment(bot: Bot, decision: LlmDecision): LlmDecision =
-  ## Infers party commitments from social chat decisions.
+  ## Fills in the house a commitment refers to. Only what the JSON says
+  ## counts: commitParty true (with houseIndex, else targetName's house,
+  ## else the bot's own house when it is inviting) or go_to_party. Chat
+  ## wording is never read as a promise; that guess once sent a bot to
+  ## the wrong house.
   result = decision
-  let mentionedHouse = decision.message.mentionedHouseIndex()
-  if result.houseIndex < 0 and mentionedHouse >= 0:
-    result.houseIndex = mentionedHouse
-  if result.action == LlmGoToParty and result.houseIndex < 0:
-    let targetHouse = result.targetName.houseIndexForPlayerName()
-    if targetHouse >= 0:
-      result.houseIndex = targetHouse
-  if result.houseIndex >= 0 and
-      bot.isPushyHost(result.houseIndex.playerNameForHouse()):
-    result.commitParty = false
-    if result.action == LlmGoToParty:
-      result.houseIndex = UnknownHouse
-  if result.action != LlmSayToPerson:
-    return
-  if result.message.isHostInviteMessage():
-    result.commitParty = true
+  if result.houseIndex < 0 and result.targetName.len > 0 and
+      (result.action == LlmGoToParty or result.commitParty):
+    result.houseIndex = result.targetName.houseIndexForPlayerName()
+  if result.commitParty and result.houseIndex < 0 and
+      result.action == LlmSayToPerson:
     result.houseIndex = bot.homeIndex
-    return
-  if bot.isPushyHost(result.targetName):
-    result.commitParty = false
-    return
-  if result.commitParty or result.message.isAttendanceMessage():
-    if result.houseIndex < 0:
-      let targetHouse = result.targetName.houseIndexForPlayerName()
-      if targetHouse >= 0:
-        result.houseIndex = targetHouse
-    if result.houseIndex >= 0 and
-        not bot.isPushyHost(result.houseIndex.playerNameForHouse()):
-      result.commitParty = true
 
 proc timePhase(bot: Bot): int =
-  ## Returns a coarse strategic time phase.
-  if bot.minutes < HostPrepMinutes:
-    return 0
-  if bot.minutes < InviteStartMinutes:
-    return 1
-  if bot.minutes < HouseEnterMinutes:
-    return 2
-  if bot.minutes < DinnerMinutes:
-    return 3
-  if bot.minutes < PartyLeaveMinutes:
-    return 4
-  if bot.minutes < DayEndMinutes:
-    return 5
-  return 6
+  ## Returns the game hour; a new hour re-asks the LLM so it can react to
+  ## the clock line that just landed in the transcript.
+  bot.minutes div 60
 
 proc foodBand(bot: Bot): int =
   ## Returns a coarse inventory band for interrupt detection.
   let food = bot.inventoryTotal()
-  if food <= LowHostFood:
+  if food <= LowFoodBand:
     return 0
-  if food >= HighFoodForInvites:
+  if food >= HighFoodBand:
     return 2
   return 1
-
-proc commitmentHasCompany(bot: Bot): bool =
-  ## Returns true while a party commitment should still be honored.
-  let houseIndex = bot.committedPartyHouse
-  if houseIndex < 0:
-    return false
-  if bot.hostCommitted and houseIndex == bot.homeIndex:
-    return true
-  if bot.screenKind == HomeMap and bot.currentHouse == houseIndex:
-    return bot.visibleOtherPlayerCount() > 0
-  return true
 
 proc screenNameForPrompt(kind: ScreenKind): string =
   ## Returns a readable screen name for the LLM prompt.
@@ -2254,12 +2228,176 @@ proc decisionStateSignature(bot: Bot): string =
     "|chats=" & bot.visibleChatsSignature() &
     "|crowds=" & bot.houseCrowdsSignature() &
     "|commit=" & $bot.committedPartyHouse &
-    "|commitCompany=" & $bot.commitmentHasCompany() &
     "|looking=" & bot.lookingForFoodsText() &
     "|day=" & $bot.dayNumber
 
+proc namesText(names: HashSet[string]): string =
+  ## Returns a sorted, comma separated name list or "none".
+  var sorted: seq[string]
+  for name in names:
+    sorted.add(name)
+  sorted.sort()
+  if sorted.len == 0:
+    return "none"
+  sorted.join(", ")
+
+proc visibleGnomeNames(bot: Bot): HashSet[string] =
+  ## Returns the names of the other gnomes on screen right now.
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+      continue
+    let playerIndex = objectId - PlayerObjectBase
+    if playerIndex == bot.selfIndex:
+      continue
+    let name = bot.visiblePlayerName(playerIndex)
+    if name.len > 0 and name != bot.playerName:
+      result.incl(name)
+
+proc notYetGreetedText(bot: Bot): string =
+  ## Returns visible gnomes this bot has not greeted today.
+  var pending: HashSet[string]
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+      continue
+    let playerIndex = objectId - PlayerObjectBase
+    if playerIndex == bot.selfIndex:
+      continue
+    let name = bot.visiblePlayerName(playerIndex)
+    if name.len == 0 or name == bot.playerName:
+      continue
+    if name notin bot.greetedToday:
+      pending.incl(name)
+  pending.namesText()
+
+proc pathLengthPixels(points: openArray[Point]): int =
+  ## Returns the walked length of one dense path in pixels.
+  for i in 1 ..< points.len:
+    result += int(sqrt(float(distanceSquared(
+      points[i - 1].x, points[i - 1].y, points[i].x, points[i].y
+    ))))
+
+proc walkMinutes(bot: Bot, pixels: int): int =
+  ## Converts a walking distance into game minutes at this game's clock
+  ## rate, rounded up to a multiple of five.
+  let ticks = float(pixels) / WalkPixelsPerTick * WalkTimeFudge
+  let minutes = ticks / max(0.1, bot.ticksPerMinute)
+  max(5, (int(minutes) + 4) div 5 * 5)
+
+proc walkPixelsToHouse(bot: Bot, houseIndex: int): int =
+  ## Returns the walking distance in pixels to one house door, going
+  ## through the home exit first when inside a house. -1 when unknown.
+  if houseIndex < 0 or houseIndex >= bot.resources.houseValid.len or
+      not bot.resources.houseValid[houseIndex] or bot.mainNav == nil:
+    return -1
+  let house = bot.resources.houses[houseIndex]
+  if bot.screenKind == MainMap:
+    let path = bot.mainNav.pathTo(bot.playerFootX(), bot.playerFootY(), house)
+    if path.len == 0:
+      return -1
+    return path.pathLengthPixels()
+  if bot.screenKind == HomeMap and bot.currentHouse >= 0:
+    if bot.currentHouse == houseIndex:
+      return 0
+    var pixels = 0
+    if bot.homeNav != nil and bot.resources.hasExit:
+      pixels += bot.homeNav.pathTo(
+        bot.playerFootX(), bot.playerFootY(), bot.resources.exit
+      ).pathLengthPixels()
+    let here = bot.resources.houses[bot.currentHouse].center()
+    let path = bot.mainNav.pathTo(here.x, here.y, house)
+    if path.len == 0:
+      return -1
+    return pixels + path.pathLengthPixels()
+  -1
+
+proc walkMinutesText(bot: Bot): string =
+  ## Returns "Anton=35, Yura=70, ..." walk times in game minutes to each
+  ## house door from where the bot stands now, so it can leave in time.
+  for houseIndex in 0 ..< HouseCount:
+    let pixels = bot.walkPixelsToHouse(houseIndex)
+    if pixels < 0:
+      continue
+    if result.len > 0:
+      result.add(", ")
+    result.add(houseIndex.playerNameForHouse() & "=" &
+      $bot.walkMinutes(pixels))
+  if result.len == 0:
+    result = "unknown"
+
+proc leaveByText(bot: Bot, houseIndex: int): string =
+  ## Returns the latest clock time to start walking to one house and be
+  ## inside before dinner, with a small margin, or "now, you are late".
+  let pixels = bot.walkPixelsToHouse(houseIndex)
+  if pixels < 0:
+    return "unknown"
+  let leaveAt = DinnerMinutes - bot.walkMinutes(pixels) - LeaveMarginMinutes
+  if bot.minutes >= DinnerMinutes:
+    return "dinner has passed"
+  if bot.minutes >= leaveAt:
+    return "now, you are late"
+  leaveAt.clockName()
+
+proc nightLeaveByText(bot: Bot): string =
+  ## Returns the latest clock time to start walking home to be inside
+  ## when the day ends at 10:00pm.
+  let pixels = bot.walkPixelsToHouse(bot.homeIndex)
+  if pixels < 0:
+    return "unknown"
+  let leaveAt = DayEndMinutes - bot.walkMinutes(pixels) - LeaveMarginMinutes
+  if bot.minutes >= leaveAt:
+    return "now, you are late"
+  leaveAt.clockName()
+
+proc dinnerTimingText(bot: Bot): string =
+  ## Returns dinner countdown facts: minutes left, when to leave for home,
+  ## and when to leave for the committed party house.
+  let left = DinnerMinutes - bot.minutes
+  result =
+    if left > 0:
+      "minutesUntilDinner=" & $left & "\n"
+    else:
+      "minutesUntilDinner=0 (dinner time has passed today)\n"
+  result.add("leaveForOwnHouseBy=" & bot.leaveByText(bot.homeIndex) &
+    " (only if you host at home; nobody eats at home alone)\n")
+  result.add("leaveForNightBy=" & bot.nightLeaveByText() & "\n")
+  if bot.committedPartyHouse >= 0 and
+      bot.committedPartyHouse != bot.homeIndex:
+    result.add("leaveForCommittedPartyBy=" &
+      bot.leaveByText(bot.committedPartyHouse) & " (" &
+      bot.committedPartyHouse.playerNameForHouse() & "'s house)\n")
+
+proc saidTodayText(bot: Bot): string =
+  ## Returns the last few lines the bot said today, oldest first, so the
+  ## model can avoid saying them again.
+  const MaxLines = 8
+  if bot.saidToday.len == 0:
+    return "none"
+  let start = max(0, bot.saidToday.len - MaxLines)
+  for i in start ..< bot.saidToday.len:
+    if result.len > 0:
+      result.add(" | ")
+    result.add("\"" & bot.saidToday[i] & "\"")
+
+proc locationText(bot: Bot): string =
+  ## Says plainly whether the bot is inside a house or outside, because
+  ## dinner is only served to gnomes who are inside at 6pm.
+  if bot.screenKind == HomeMap and bot.currentHouse >= 0:
+    if bot.currentHouse == bot.homeIndex:
+      return "inside your own house"
+    return "inside " & bot.currentHouse.playerNameForHouse() & "'s house"
+  if bot.screenKind == MainMap:
+    return "outside on the world map (not inside any house)"
+  "unknown"
+
 proc llmUserPrompt(bot: Bot): string =
-  ## Builds one current-state prompt for the LLM.
+  ## Builds one current-state report for the LLM. Facts only: what the
+  ## clock says, where the bot is, what it carries and still wants, whom
+  ## it sees and has greeted, and which actions exist. Strategy and
+  ## manners live in the soul.
   let
     commitment =
       if bot.committedPartyHouse >= 0:
@@ -2281,26 +2419,15 @@ proc llmUserPrompt(bot: Bot): string =
         bot.currentHouse.playerNameForHouse()
       else:
         "none"
-    hostingHint =
-      if bot.isEarlyHostDay():
-        "today is an early day; visit and keep your pantry; hosting " &
-        "now is a sacrifice; if nobody is hosting, take one for the team"
-      elif bot.isLateHostDay():
-        "today is a late day; prefer hosting with a full pantry for " &
-        "food times guests"
-      else:
-        "middle day; visit unless your pantry is huge or nobody else " &
-        "will host"
   result =
     "Current Heartleaf state:\n" &
-    "timeMinutes=" & $bot.minutes & "\n" &
     "day=" & $bot.dayNumber & "\n" &
-    "hostingStrategy=days 1-3 prefer visiting and gathering; hosting " &
-    "early empties your pantry for a small score; last two days " &
-    "prefer hosting for food times guests; if nobody is hosting " &
-    "tonight, take one for the team so people can eat\n" &
-    "todayHosting=" & hostingHint & "\n" &
+    "clock=" & bot.minutes.clockName() & "\n" &
+    "timeMinutes=" & $bot.minutes & "\n" &
     "map=" & bot.screenKind.screenNameForPrompt() & "\n" &
+    "location=" & bot.locationText() & "\n" &
+    "walkMinutesToHouse=" & bot.walkMinutesText() & "\n" &
+    bot.dinnerTimingText() &
     "homeOwner=" & bot.homeIndex.playerNameForHouse() & "\n" &
     "homeHouseIndex=" & $(bot.homeIndex + 1) & "\n" &
     "currentHouseOwner=" & currentHouseOwner & "\n" &
@@ -2308,221 +2435,101 @@ proc llmUserPrompt(bot: Bot): string =
     "foodTotal=" & $bot.inventoryTotal() & "\n" &
     "foodCollected=" & bot.collectedFoodsText() & "\n" &
     "foodLookingFor=" & bot.lookingForFoodsText() & "\n" &
-    "foodTalk=use food names from foodCollected and foodLookingFor; " &
-    "ask nearby gnomes if they have one foodLookingFor; if you hold a " &
-    "food someone asked for, invite them to your party; never say " &
-    "food numbers\n" &
     "partyCommitment=" & commitment & "\n" &
     "partyCommitmentHouseIndex=" & commitmentIndex & "\n" &
-    "strategyFoodLowAt=" & $LowHostFood & "\n" &
-    "strategyFoodHighAt=" & $HighFoodForInvites & "\n" &
-    "clock=" & bot.minutes.clockName() & "\n" &
-    "timeMeaning=timeMinutes is minutes after midnight; " &
-    $HostPrepMinutes & " is 3:00pm, " &
-    $InviteStartMinutes & " is 4:00pm, " &
-    $DinnerMinutes & " is 6:00pm\n" &
-    "hostPrepStartsAt=" & $HostPrepMinutes & "\n" &
-    "inviteStartsAt=" & $InviteStartMinutes & "\n" &
-    "partyPrepStartsAt=" & $HouseEnterMinutes & "\n" &
-    "dinnerStartsAt=" & $DinnerMinutes & "\n" &
-    "partyLeaveStartsAt=" & $PartyLeaveMinutes & "\n" &
-    "rules=before partyPrepStartsAt gather food; after partyPrepStartsAt " &
-    "do not keep gathering; after dinnerStartsAt choose go_to_party " &
-    "unless already safely home or honoring another commitment\n" &
-    "partyChoice=go_to_party at the house of the gnome you like most; " &
-    "set houseIndex to that owner's house and targetName to their name; " &
-    "never pick houseIndex 1 or Ivan just because they are listed first; " &
-    "a gnome who keeps pitching dinner, even with new words, is pushy; " &
-    "do not go to a pushy gnome's house\n" &
+    "yourLinesToday=" & bot.saidTodayText() & "\n" &
+    "greetedToday=" & bot.greetedToday.namesText() & "\n" &
+    "seenTodayNotGreeted=" & bot.notYetGreetedText() & "\n" &
     "visiblePlayers:\n" & bot.visiblePlayersText() & "\n" &
     "visibleHouseCrowds:\n" & bot.houseCrowdsText() & "\n" &
     "gardenMarkers=" & bot.gardenMarkersText() & "\n" &
-    "availableActions=keep_gathering_plants, find_person, find_house, " &
-    "go_home, stand_at_house_garden, stand_next_to_person, say_to_person, " &
-    "go_to_party\n" &
     "Return JSON now."
 
-proc partyFallbackHouse(bot: Bot): int =
-  ## Returns a deterministic party target for deadline guardrails.
-  if bot.committedPartyHouse >= 0:
-    return bot.committedPartyHouse
-  let likedHouse = bot.likedHouseIndex()
-  if likedHouse >= 0 and not bot.isPushyHost(likedHouse.playerNameForHouse()):
-    return likedHouse
-  result = bot.bestVisiblePartyHouse(true)
-  if result >= 0:
+proc dueCommitment(bot: Bot): LlmDecision =
+  ## Returns the decision that carries out what the model itself already
+  ## committed to (commitParty in an earlier reply), once its time has
+  ## come: go_to_party at the house it promised, or go_home when it
+  ## invited people to its own table, from the latest departure time
+  ## until dinner is over. Invalid when nothing is due. This adds no
+  ## policy of its own: it only keeps a promise the soul-driven model
+  ## made, and only while the LLM cannot be asked; a fresh reply always
+  ## replaces it.
+  result = LlmDecision(valid: false, action: LlmInvalid,
+    houseIndex: UnknownHouse, untilMinutes: -1)
+  if bot.committedPartyHouse < 0 or bot.minutes >= DinnerMinutes + 60:
     return
-  if bot.searchHouse >= 0:
-    return bot.searchHouse
-  result = bot.scoutingHouseIndex()
-  if result < 0:
-    result = bot.homeIndex
-
-proc partyTimeDecision(bot: Bot, reason: string): LlmDecision =
-  ## Returns a go-to-party decision for social deadline guardrails.
-  LlmDecision(
-    valid: true,
-    action: LlmGoToParty,
-    houseIndex: bot.partyFallbackHouse(),
-    commitParty: true,
-    reason: reason
-  )
-
-proc prepTimeDecision(bot: Bot, reason: string): LlmDecision =
-  ## Returns a pre-dinner social decision when gathering must stop.
-  let partyHouse = bot.bestVisiblePartyHouse(true)
-  if partyHouse >= 0 or
-      bot.inventoryTotal() <= LowHostFood or
-      bot.isEarlyHostDay():
-    return bot.partyTimeDecision(reason)
-  LlmDecision(
-    valid: true,
-    action: LlmStandAtHouseGarden,
-    houseIndex: bot.homeIndex,
-    reason: reason
-  )
-
-proc enforceTimePolicy(bot: Bot, decision: LlmDecision): LlmDecision =
-  ## Prevents late gathering from overriding dinner and party time.
-  result = decision
-  if bot.minutes < InviteStartMinutes and
-      decision.action == LlmSayToPerson and
-      decision.message.isHostInviteMessage():
-    if bot.minutes >= HostPrepMinutes:
-      result = LlmDecision(
-        valid: true,
-        action: LlmStandAtHouseGarden,
-        houseIndex: bot.homeIndex,
-        reason: "wait until 4pm to invite people"
-      )
-    else:
-      result = LlmDecision(
-        valid: true,
-        action: LlmKeepGatheringPlants,
-        reason: "too early to invite people"
-      )
+  let pixels = bot.walkPixelsToHouse(bot.committedPartyHouse)
+  if pixels < 0:
     return
-  if bot.minutes >= DayEndMinutes:
-    if decision.action != LlmGoToParty:
-      result = LlmDecision(
-        valid: true,
-        action: LlmGoHome,
-        reason: "day is ending"
-      )
+  let leaveAt = DinnerMinutes - bot.walkMinutes(pixels) - LeaveMarginMinutes
+  if bot.minutes < leaveAt:
     return
-  if bot.minutes >= DinnerMinutes:
-    case decision.action
-    of LlmGoToParty, LlmGoHome:
-      return
-    else:
-      result = bot.partyTimeDecision(
-        "dinner time has started; stop gathering and attend a party"
-      )
-      return
-  if bot.minutes >= HouseEnterMinutes and
-      decision.action == LlmKeepGatheringPlants:
-    result = bot.prepTimeDecision(
-      "party planning time has started; stop gathering"
-    )
-    return
-  if bot.minutes >= HostPrepMinutes and
-      bot.inventoryTotal() >= HighFoodForInvites and
-      not bot.isEarlyHostDay() and
-      decision.action == LlmKeepGatheringPlants and
-      bot.committedPartyHouse < 0:
-    result = LlmDecision(
-      valid: true,
-      action: LlmStandAtHouseGarden,
-      houseIndex: bot.homeIndex,
-      reason: "food reserve is ready; prepare at own house"
-    )
+  if bot.committedPartyHouse == bot.homeIndex:
+    result = LlmDecision(valid: true, action: LlmGoHome,
+      houseIndex: UnknownHouse, untilMinutes: -1,
+      reason: "fallback: keeping the promise to host at home")
+  else:
+    result = LlmDecision(valid: true, action: LlmGoToParty,
+      houseIndex: bot.committedPartyHouse,
+      targetName: bot.committedPartyHouse.playerNameForHouse(),
+      commitParty: true, untilMinutes: -1,
+      reason: "fallback: keeping the promise to dine at " &
+        bot.committedPartyHouse.playerNameForHouse() & "'s house")
 
 proc fallbackDecision(bot: Bot): LlmDecision =
-  ## Returns the safest deterministic decision when the LLM is unavailable.
-  result = LlmDecision(
+  ## Returns the decision to play while the LLM is unavailable: a due
+  ## commitment the model made earlier, else keep doing what the model
+  ## last asked for, minus any chat (a fallback never speaks, so a
+  ## pending say_to_person becomes standing next to that person), or
+  ## gather plants when nothing was decided yet today.
+  let due = bot.dueCommitment()
+  if due.valid:
+    return due
+  if bot.hasDecision and bot.decision.valid:
+    result = bot.decision
+    result.message = ""
+    result.reason = "fallback: repeating last decision"
+    if result.action == LlmSayToPerson:
+      result.action = LlmStandNextToPerson
+    return
+  LlmDecision(
     valid: true,
     action: LlmKeepGatheringPlants,
     houseIndex: UnknownHouse,
     reason: "fallback"
   )
-  if bot.committedPartyHouse >= 0 and bot.commitmentHasCompany():
-    result.action = LlmGoToParty
-    result.houseIndex = bot.committedPartyHouse
-    result.commitParty = true
-  elif bot.minutes >= DayEndMinutes:
-    result.action = LlmGoHome
-  elif bot.minutes >= DinnerMinutes:
-    result = bot.partyTimeDecision("fallback dinner party")
-  elif bot.minutes >= HouseEnterMinutes:
-    result = bot.prepTimeDecision("fallback party planning")
-  elif bot.minutes >= HostPrepMinutes and
-      bot.inventoryTotal() >= HighFoodForInvites and
-      not bot.isEarlyHostDay():
-    result.action = LlmStandAtHouseGarden
-    result.houseIndex = bot.homeIndex
-    result.reason = "fallback host preparation"
-  elif bot.shouldGather():
-    result.action = LlmKeepGatheringPlants
-  elif bot.inventoryTotal() >= HighFoodForInvites and
-      not bot.isEarlyHostDay():
-    result.action = LlmStandAtHouseGarden
-    result.houseIndex = bot.homeIndex
-  else:
-    let houseIndex = bot.bestVisiblePartyHouse(true)
-    result.action = LlmGoToParty
-    result.houseIndex =
-      if houseIndex >= 0:
-        houseIndex
-      else:
-        bot.homeIndex
-    result.commitParty = true
 
-proc enforceCommitment(bot: Bot, decision: LlmDecision): LlmDecision =
-  ## Forces party commitments unless the bot is alone at that party.
-  result = decision
-  if bot.committedPartyHouse < 0:
-    return
-  if bot.hostCommitted and bot.committedPartyHouse == bot.homeIndex:
-    if decision.action == LlmSayToPerson:
-      if not decision.commitParty or
-          decision.houseIndex < 0 or
-          decision.houseIndex == bot.homeIndex:
-        return
-    let decisionHouse = bot.decisionHouse(decision)
-    if decision.action == LlmStandAtHouseGarden and
-        (decisionHouse < 0 or decisionHouse == bot.homeIndex):
-      return
-    if decision.action == LlmGoHome:
-      return
-  if not bot.commitmentHasCompany():
-    bot.log("party commitment cleared because no one else is there")
-    if bot.searchHouse == bot.committedPartyHouse:
-      bot.searchHouse = UnknownHouse
-    if bot.partyHouse == bot.committedPartyHouse:
-      bot.partyHouse = UnknownHouse
-    bot.committedPartyHouse = UnknownHouse
-    return
-  if decision.action == LlmGoToParty and
-      decision.houseIndex == bot.committedPartyHouse:
-    return
-  result = LlmDecision(
-    valid: true,
-    action: LlmGoToParty,
-    houseIndex: bot.committedPartyHouse,
-    commitParty: true,
-    reason: "honoring party commitment"
-  )
+proc sameDecisionTarget(a, b: LlmDecision): bool =
+  ## Returns true when two decisions steer toward the same place, so the
+  ## current path can continue instead of being rebuilt.
+  a.action == b.action and
+    a.targetName == b.targetName and
+    a.houseIndex == b.houseIndex
 
-proc applyDecision(bot: Bot, decision: LlmDecision) =
-  ## Stores one parsed LLM decision and updates social commitments.
+proc decisionText(decision: LlmDecision): string =
+  ## Returns one short prose line describing a decision for the
+  ## transcript.
+  result = "I decide: " & decision.action.actionName()
+  if decision.targetName.len > 0:
+    result.add(" " & decision.targetName)
+  if decision.houseIndex >= 0:
+    result.add(" at " & decision.houseIndex.playerNameForHouse() & "'s house")
+  if decision.untilMinutes >= 0:
+    result.add(" until " & decision.untilMinutes.clockName())
+  if decision.reason.len > 0:
+    result.add(" - " & decision.reason)
+
+proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
+  ## Stores one decision and updates the party commitment bookkeeping.
+  ## The current path survives when the new decision heads for the same
+  ## place, so a repeated "keep gathering" does not stutter. Only real
+  ## model decisions are written to the transcript.
   var nextDecision =
     if decision.valid:
       decision
     else:
       bot.fallbackDecision()
   nextDecision = bot.inferSocialCommitment(nextDecision)
-  nextDecision = bot.enforceTimePolicy(nextDecision)
-  nextDecision = bot.enforceCommitment(nextDecision)
   let commitHouse =
     if nextDecision.houseIndex >= 0:
       nextDecision.houseIndex
@@ -2537,10 +2544,8 @@ proc applyDecision(bot: Bot, decision: LlmDecision) =
   elif nextDecision.commitParty and commitHouse >= 0:
     bot.committedPartyHouse = commitHouse
     nextDecision.houseIndex = commitHouse
-    if commitHouse == bot.homeIndex and
-        nextDecision.message.isHostInviteMessage():
-      bot.hostCommitted = true
-      bot.partyHouse = bot.homeIndex
+  let keepPath = bot.hasDecision and
+    bot.decision.sameDecisionTarget(nextDecision)
   bot.decision = nextDecision
   bot.hasDecision = true
   bot.decisionChatSent = false
@@ -2550,8 +2555,15 @@ proc applyDecision(bot: Bot, decision: LlmDecision) =
   bot.decisionTimePhase = bot.timePhase()
   bot.decisionChatSignature = bot.visibleChatsSignature()
   bot.decisionCrowdSignature = bot.houseCrowdsSignature()
-  bot.path.setLen(0)
-  bot.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
+  bot.decisionVisibleNames = bot.visibleGnomeNames()
+  bot.interruptRequested = false
+  if not keepPath:
+    bot.path.setLen(0)
+    bot.goal = Goal(kind: GoalIdle, screenKind: UnknownScreen)
+  ## A decision that merely continues the previous one (another "keep
+  ## gathering") is not worth a transcript line.
+  if fromLlm and decision.valid and not keepPath:
+    bot.recordOwnDecision(nextDecision.decisionText())
   bot.log(
     "llm action " & nextDecision.action.actionName() &
     " house=" & $(nextDecision.houseIndex + 1) &
@@ -2566,7 +2578,7 @@ proc applyLlmReply(bot: Bot, reply: string) =
   if not decision.valid:
     bot.lastLlmError = decision.error
     bot.log("llm parse error " & decision.error)
-  bot.applyDecision(decision)
+  bot.applyDecision(decision, fromLlm = true)
 
 proc startLlmDecision(bot: Bot): bool =
   ## Starts a Bedrock decision request or applies an immediate fallback.
@@ -2632,10 +2644,19 @@ proc pollLlmDecision(bot: Bot): bool =
   bot.llmWaiting = false
   if answer.ok:
     bot.llmPacer.noteSuccess()
+    bot.log("llm reply " & answer.tag & " " & answer.usage)
     bot.applyLlmReply(answer.reply)
   else:
     bot.lastLlmError = answer.error
-    bot.log("llm error " & answer.error)
+    bot.log("llm error status=" & $answer.statusCode & " " & answer.error)
+    if promptCacheEnabled and answer.statusCode == 400 and
+        answer.error.toLowerAscii().contains("cache"):
+      ## The endpoint rejected cache_control; send plain requests from
+      ## now on instead of treating this as a fatal request error.
+      promptCacheEnabled = false
+      bot.log("llm prompt caching rejected, disabled for this game")
+      bot.applyDecision(bot.fallbackDecision())
+      return true
     if answer.permanentBedrockError():
       raise newException(
         TalkingVillagerError,
@@ -2656,10 +2677,6 @@ proc decisionGoal(bot: Bot, decision: LlmDecision): Goal =
   ## Converts one LLM decision into a deterministic navigation goal.
   case decision.action
   of LlmKeepGatheringPlants:
-    if bot.minutes >= DinnerMinutes:
-      return bot.partyGoal()
-    if bot.minutes >= HouseEnterMinutes:
-      return bot.dinnerGatherGoal()
     if bot.screenKind == HomeMap:
       return bot.exitGoal()
     if bot.screenKind == MainMap:
@@ -2685,6 +2702,19 @@ proc decisionGoal(bot: Bot, decision: LlmDecision): Goal =
         return bot.firstDinerGoal()
       return bot.exitGoal()
     if bot.screenKind == MainMap:
+      return bot.enterHouseGoal(houseIndex)
+    Goal(kind: GoalIdle, screenKind: bot.screenKind)
+  of LlmStayInside:
+    ## Stay where you are when inside; when outside, head for the house
+    ## you promised, else home.
+    if bot.screenKind == HomeMap:
+      return bot.firstDinerGoal()
+    if bot.screenKind == MainMap:
+      let houseIndex =
+        if bot.committedPartyHouse >= 0:
+          bot.committedPartyHouse
+        else:
+          bot.homeIndex
       return bot.enterHouseGoal(houseIndex)
     Goal(kind: GoalIdle, screenKind: bot.screenKind)
   of LlmInvalid:
@@ -2786,14 +2816,20 @@ proc interactionMask(bot: Bot, goal: Goal): uint8 =
     0
 
 proc decisionComplete(bot: Bot): bool =
-  ## Returns true when the current LLM action has completed.
+  ## Returns true when the current LLM action has completed. A decision
+  ## with untilTime keeps going (waiting at a door, gathering, staying
+  ## home) until the clock reaches it; interrupts still apply.
   if not bot.hasDecision:
     return true
+  if bot.decision.untilMinutes >= 0 and
+      bot.decision.action != LlmSayToPerson:
+    if bot.decision.action == LlmKeepGatheringPlants and
+        not bot.shouldGather():
+      return true
+    return bot.minutes >= bot.decision.untilMinutes
   return case bot.decision.action
   of LlmKeepGatheringPlants:
-    if not bot.shouldGather():
-      return true
-    bot.inventoryTotal() >= HighFoodForInvites
+    not bot.shouldGather()
   of LlmFindPerson, LlmStandNextToPerson:
     bot.visiblePlayerNear(bot.decision.targetName)
   of LlmSayToPerson:
@@ -2805,33 +2841,101 @@ proc decisionComplete(bot: Bot): bool =
   of LlmGoToParty:
     let houseIndex = bot.decisionHouse(bot.decision)
     bot.screenKind == HomeMap and bot.currentHouse == houseIndex
+  of LlmStayInside:
+    ## Staying is open-ended: it ends on untilTime (handled above) or an
+    ## interrupt, never by itself.
+    false
   of LlmInvalid:
     true
 
+proc farthestWalkMinutes(bot: Bot): int =
+  ## Returns the walk time in game minutes to the farthest house door.
+  for houseIndex in 0 ..< HouseCount:
+    let pixels = bot.walkPixelsToHouse(houseIndex)
+    if pixels >= 0:
+      result = max(result, bot.walkMinutes(pixels))
+
+proc maybeNoteLeaveTime(bot: Bot) =
+  ## Records that a departure time has arrived and flags an interrupt so
+  ## the model gets to react; repeats every LeaveNudgeMinutes while the
+  ## bot is still outside, since being late gets worse by the minute.
+  ## Before dinner the reference point is the committed house, or, with
+  ## no commitment, the farthest table (so an undecided bot is told to
+  ## choose, not sent home). In the evening it is home, for 10:00pm.
+  if bot.screenKind != MainMap or not bot.localized:
+    return
+  if bot.leaveTimeNoted and
+      bot.minutes - bot.leaveTimeNotedMinutes < LeaveNudgeMinutes:
+    return
+  var text = ""
+  if bot.minutes < DinnerMinutes:
+    if bot.committedPartyHouse >= 0:
+      let pixels = bot.walkPixelsToHouse(bot.committedPartyHouse)
+      if pixels < 0:
+        return
+      let walk = bot.walkMinutes(pixels)
+      if bot.minutes < DinnerMinutes - walk - LeaveMarginMinutes:
+        return
+      let where =
+        if bot.committedPartyHouse == bot.homeIndex:
+          "your own house, where you host"
+        else:
+          bot.committedPartyHouse.playerNameForHouse() & "'s house"
+      text = "Latest departure time for dinner: walking to " & where &
+        " takes about " & $walk & " minutes and dinner is at 6:00pm."
+    else:
+      let walk = bot.farthestWalkMinutes()
+      if walk <= 0 or bot.minutes < DinnerMinutes - walk - LeaveMarginMinutes:
+        return
+      text = "Latest departure time for dinner: you have not promised " &
+        "any table yet; the farthest house is about " & $walk &
+        " minutes away and dinner is at 6:00pm. Nobody eats at home " &
+        "alone; pick a table and go, or host with guests coming."
+  elif bot.minutes < DayEndMinutes:
+    let pixels = bot.walkPixelsToHouse(bot.homeIndex)
+    if pixels < 0:
+      return
+    let walk = bot.walkMinutes(pixels)
+    if bot.minutes < DayEndMinutes - walk - LeaveMarginMinutes:
+      return
+    text = "Latest departure time for the night: walking home takes " &
+      "about " & $walk & " minutes and the day ends at 10:00pm."
+  else:
+    return
+  bot.leaveTimeNoted = true
+  bot.leaveTimeNotedMinutes = bot.minutes
+  bot.interruptRequested = true
+  bot.recordEvent(text)
+  bot.log("leave time: " & text)
+
 proc decisionInterrupted(bot: Bot): bool =
-  ## Returns true when major state changes should interrupt an action.
+  ## Returns true when something happened that the model should react to:
+  ## the bot is stuck, a new chat bubble appeared, a gnome was seen for
+  ## the first time today, the hour changed, the food band changed, or the
+  ## visible house crowds changed. Interrupts wait DecisionRetryTicks after
+  ## a decision so a burst of events costs one request, not several.
   if not bot.hasDecision:
     return true
   if bot.frameTick - bot.decisionStartedTick < DecisionRetryTicks:
     return false
   if bot.stuckTicks >= DecisionStuckTicks:
     return true
+  if bot.interruptRequested:
+    return true
+  ## Waiting at a door is for meeting people: a gnome who walks into
+  ## view is a reason to ask the model again right now.
+  if bot.decision.action in {LlmStandAtHouseGarden, LlmFindHouse}:
+    for name in bot.visibleGnomeNames():
+      if name notin bot.decisionVisibleNames:
+        return true
   let chatSignature = bot.visibleChatsSignature()
   if chatSignature.len > 0 and chatSignature != bot.decisionChatSignature:
     return true
   if bot.timePhase() != bot.decisionTimePhase:
     return true
-  let foodBand = bot.foodBand()
-  if foodBand != bot.decisionFoodBand:
-    if bot.decision.action == LlmKeepGatheringPlants:
-      return foodBand == 2
+  if bot.foodBand() != bot.decisionFoodBand:
     return true
-  let crowdSignature = bot.houseCrowdsSignature()
-  if crowdSignature == bot.decisionCrowdSignature:
-    return false
-  if bot.decision.action == LlmKeepGatheringPlants:
-    return bot.minutes >= LatePartySearchMinutes and crowdSignature != "none"
-  return true
+  bot.houseCrowdsSignature() != bot.decisionCrowdSignature
 
 proc needsFreshDecision(bot: Bot): bool =
   ## Returns true when the bot should ask the LLM again.
@@ -2859,9 +2963,19 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
   if bot.decision.targetName.len > 0 and
       not bot.visiblePlayerNear(bot.decision.targetName):
     return
+  ## Saying the very same line twice in a day reads as a scripted bot;
+  ## the soul forbids it and the state report shows today's lines, but
+  ## if the model still repeats itself the line is dropped, not sent.
+  if bot.decision.message in bot.saidToday:
+    bot.decisionChatSent = true
+    bot.log("chat suppressed, already said today: " & bot.decision.message)
+    return
   ws.send(blobFromChat(bot.decision.message), BinaryMessage)
   bot.recordOwnChat(bot.decision.message)
+  bot.saidToday.add(bot.decision.message)
   bot.decisionChatSent = true
+  if bot.decision.targetName.len > 0:
+    bot.greetedToday.incl(bot.decision.targetName)
   bot.log("chat " & bot.decision.message)
 
 proc ensurePath(bot: Bot, goal: Goal) =
@@ -3018,36 +3132,44 @@ proc firstMovingPathTarget(bot: Bot, goal: Goal): Point =
   result = Point(x: goal.x, y: goal.y)
 
 proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
-  ## Chooses the next input mask for one game frame.
+  ## Chooses the next input mask for one game frame. A Bedrock request in
+  ## flight never stops the bot: it keeps walking, collecting, and
+  ## chatting on its current decision until the reply replaces it. Stuck
+  ## detection is paused while waiting so a stale decision cannot trigger
+  ## a stuck interrupt before the new one lands.
   bot.analyze()
   bot.scanHeardChats()
+  bot.scanSeenGnomes()
   bot.maybeRecordClock()
+  bot.maybeRecordCarry()
+  bot.maybeRecordDinner()
+  bot.maybeNoteLeaveTime()
   if not bot.localized:
     bot.desiredMask = 0
     bot.hasTarget = false
     return 0
   discard bot.pollLlmDecision()
-  if bot.llmWaiting:
-    bot.desiredMask = 0
-    bot.hasTarget = false
-    bot.updateStuck(0)
-    return 0
   if bot.needsFreshDecision():
     if bot.mayAskLlm():
-      if bot.startLlmDecision():
-        bot.desiredMask = 0
-        bot.hasTarget = false
-        bot.updateStuck(0)
-        return 0
-    elif not bot.hasDecision or (bot.decisionComplete() and
-        bot.frameTick - bot.decisionStartedTick >= DecisionRetryTicks):
-      bot.applyDecision(bot.fallbackDecision())
+      discard bot.startLlmDecision()
+    else:
+      let fallback = bot.fallbackDecision()
+      if not bot.hasDecision or
+          not bot.decision.sameDecisionTarget(fallback):
+        bot.applyDecision(fallback)
+  elif bot.llmWaiting:
+    ## A request may hang for seconds that are hours of game time; a
+    ## commitment that comes due meanwhile is carried out at once, and
+    ## the reply, when it lands, still replaces it.
+    let due = bot.dueCommitment()
+    if due.valid and not bot.decision.sameDecisionTarget(due):
+      bot.applyDecision(due)
   let goal = bot.chooseGoal()
   let action = bot.interactionMask(goal)
   if action != 0:
     bot.desiredMask = action
     bot.hasTarget = false
-    bot.updateStuck(action)
+    bot.updateStuck(if bot.llmWaiting: 0'u8 else: action)
     return action
   bot.ensurePath(goal)
   var target = bot.pathTarget(goal)
@@ -3061,7 +3183,7 @@ proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
   if bot.unstuckTicks > 0 and result != 0:
     result = UnstuckMasks[bot.unstuckMaskIndex]
   bot.desiredMask = result
-  bot.updateStuck(result)
+  bot.updateStuck(if bot.llmWaiting: 0'u8 else: result)
 
 proc queryEscape(value: string): string =
   ## Escapes a query string component.

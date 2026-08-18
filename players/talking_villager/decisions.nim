@@ -10,10 +10,14 @@ const
   ## that kept the whole table silent. Requests are now spaced, and after
   ## a throttled or otherwise transient failure the bot waits with
   ## exponential backoff (jittered so nine bots do not retry in lockstep)
-  ## before asking again, playing the scripted fallback meanwhile.
+  ## before asking again, playing the fallback meanwhile. The cap is
+  ## short on purpose: a league day is 100 real seconds, and a 60 s
+  ## backoff once cost bots most of an afternoon (they never got to
+  ## decide to go inside for dinner). Throttling is per minute, so
+  ## retrying every 4-12 s with 3 s spacing cannot storm the quota.
   LlmMinRequestTicks* = 72
   LlmBackoffMinTicks* = 96
-  LlmBackoffMaxTicks* = 1440
+  LlmBackoffMaxTicks* = 288
   LlmBackoffJitter = 0.5
   ## Fatal: a villager without an LLM must not play (scripted chat is not
   ## allowed in the league), so it exits with this message instead.
@@ -78,6 +82,7 @@ type
     LlmStandNextToPerson
     LlmSayToPerson
     LlmGoToParty
+    LlmStayInside
 
   LlmDecision* = object
     valid*: bool
@@ -86,6 +91,10 @@ type
     houseIndex*: int
     message*: string
     commitParty*: bool
+    ## Optional clock (day minutes) until which the action keeps going,
+    ## e.g. wait at the door until 5:15pm; -1 when the action just runs
+    ## to completion.
+    untilMinutes*: int
     reason*: string
     error*: string
 
@@ -158,6 +167,8 @@ proc actionName*(action: LlmActionKind): string =
     "say_to_person"
   of LlmGoToParty:
     "go_to_party"
+  of LlmStayInside:
+    "stay_inside"
 
 proc parseLlmAction*(text: string): LlmActionKind =
   ## Parses one strict JSON action name.
@@ -178,6 +189,8 @@ proc parseLlmAction*(text: string): LlmActionKind =
     LlmSayToPerson
   of "go_to_party":
     LlmGoToParty
+  of "stay_inside", "stay", "stay_here", "wait_inside":
+    LlmStayInside
   else:
     LlmInvalid
 
@@ -221,6 +234,45 @@ proc houseField(node: JsonNode, name: string): int =
   if value >= 1 and value <= HouseCount:
     result = value - 1
 
+proc parseUntilMinutes*(node: JsonNode): int =
+  ## Reads the optional untilTime field as day minutes: a clock string
+  ## like "5:15pm" or "17:15", or an integer of minutes after midnight.
+  ## Returns -1 when absent or unreadable.
+  result = -1
+  if not node.hasKey("untilTime"):
+    return
+  let value = node["untilTime"]
+  case value.kind
+  of JInt:
+    let minutes = value.getInt()
+    if minutes >= 0 and minutes < 24 * 60:
+      result = minutes
+  of JString:
+    let text = value.getStr().strip().toLowerAscii()
+    if text.len == 0:
+      return
+    let clock = text.parseClockMinutes()
+    if clock >= 0:
+      return clock
+    let parts = text.split(':')
+    if parts.len == 2:
+      try:
+        let hour = parseInt(parts[0].strip())
+        let minute = parseInt(parts[1].strip())
+        if hour in 0 .. 23 and minute in 0 .. 59:
+          result = hour * 60 + minute
+      except ValueError:
+        discard
+    else:
+      try:
+        let minutes = parseInt(text)
+        if minutes >= 0 and minutes < 24 * 60:
+          result = minutes
+      except ValueError:
+        discard
+  else:
+    discard
+
 proc parseLlmDecision*(
   text: string,
   selfNames: openArray[string] = []
@@ -231,7 +283,8 @@ proc parseLlmDecision*(
   result = LlmDecision(
     valid: false,
     action: LlmInvalid,
-    houseIndex: UnknownHouse
+    houseIndex: UnknownHouse,
+    untilMinutes: -1
   )
   let body = text.jsonText()
   if body.len == 0:
@@ -259,4 +312,32 @@ proc parseLlmDecision*(
   result.message = node.stringField("message")
     .stripSelfPrefix(selfNames).cleanDecisionText()
   result.commitParty = node.boolField("commitParty")
+  result.untilMinutes = node.parseUntilMinutes()
   result.reason = node.stringField("reason")
+
+proc foodNamesIn*(text: string): seq[string] =
+  ## Returns the food names in "Carrot x2, Beet" style text.
+  for part in text.split(","):
+    var name = part.strip()
+    let at = name.rfind(" x")
+    if at > 0 and at + 2 < name.len and name[at + 2].isDigit():
+      name = name[0 ..< at]
+    if name.len > 0 and name != "none":
+      result.add(name)
+
+proc dinnerLabelField*(label, key: string): string =
+  ## Returns the value of one "key=value" field in a dinner label. Values
+  ## run to the next " key=" or the end, so foods= (which contains
+  ## spaces) must be the last field.
+  let start = label.find(" " & key & "=")
+  if start < 0:
+    return ""
+  let valueStart = start + key.len + 2
+  var stop = label.len
+  for other in ["host", "wasHost", "score", "guests", "foods"]:
+    if other == key:
+      continue
+    let at = label.find(" " & other & "=", valueStart)
+    if at >= 0 and at < stop:
+      stop = at
+  label[valueStart ..< stop].strip()

@@ -37,18 +37,13 @@ const
   MinSpawnSpacing = 20
   SpawnScanStep = 4
   HouseSpawnMaxDistance = 96
-  TicksPerSecond = 24
-  DayRealMinutes = 3
-  DayTicks = DayRealMinutes * 60 * TicksPerSecond
   ScoreScreenTicks = 10 * TicksPerSecond
   DinnerScreenTicks = 10 * TicksPerSecond
   DinnerTallyMinutes = DinnerMinutes
   DinnerEatRounds = 3
   NewFoodEatScore = 3
   LeftoverEatScore = 1
-  DefaultDaySeconds = DayRealMinutes * 60
   DayStepMinutes = 5
-  DayTotalMinutes = DayEndMinutes - DayStartMinutes
   DayStepCount = DayTotalMinutes div DayStepMinutes
   DuskStartMinutes = 17 * 60
   DayTintCount = 5
@@ -1753,6 +1748,32 @@ proc cameraYFor(sim: SimServer, player: Player): int =
     world.height - ViewportHeight
   )
 
+proc foodListText(foods: FoodCounts): string =
+  ## Returns "Carrot x2, Beet" style text for one food count set.
+  for foodIndex, count in foods:
+    if count <= 0:
+      continue
+    if result.len > 0:
+      result.add(", ")
+    result.add(foodIndex.foodName())
+    if count > 1:
+      result.add(" x" & $count)
+  if result.len == 0:
+    result = "none"
+
+proc dinnerLabel(record: DinnerRecord, playerIndex: int): string =
+  ## Returns the dinner overlay sprite label. Besides the player index it
+  ## carries the dinner result as text so sprite-reading bots learn whose
+  ## table they sat at, who else was there, what was eaten or served, and
+  ## the score, without reading overlay pixels. foods= is last because
+  ## food names contain spaces.
+  DinnerLabelPrefix & $playerIndex &
+    " host=" & record.hostName &
+    " wasHost=" & $record.wasHost &
+    " score=" & $record.score &
+    " guests=" & record.guestNames.join(",") &
+    " foods=" & record.foods.foodListText()
+
 proc addScreenOverlay(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1766,7 +1787,7 @@ proc addScreenOverlay(
     label = ""
   if player.dinnerTicks > 0 and player.dinnerRecord != nil:
     overlay = sim.dinnerOverlaySprite(player.dinnerRecord)
-    label = DinnerLabelPrefix & $playerIndex
+    label = player.dinnerRecord.dinnerLabel(playerIndex)
   elif sim.scoreTicks > 0:
     overlay = sim.scoreOverlaySprite()
     label = ScoreLabelPrefix & $playerIndex
