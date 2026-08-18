@@ -12,7 +12,7 @@ const
   DefaultBedrockModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
   DefaultBedrockTimeoutSeconds = 30
   ReconnectDelayMs = 1000
-  ReconnectGiveUpSeconds = 60.0
+  ReconnectGiveUpSeconds = 8.0
   DefaultBedrockMaxTokens = 192
   BedrockTemperature = 0.2
 
