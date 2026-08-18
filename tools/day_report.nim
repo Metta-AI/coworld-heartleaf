@@ -1,19 +1,13 @@
-## Re-simulate a recorded Heartleaf replay and print, per day, the things
-## that decide whether the villagers played the village plan: who scored
-## at dinner and how, where every gnome was at 3:30pm (hosts should be at
-## their own door), where every gnome was inside at 6:00pm (nobody alone at
-## home, nobody outside, nobody at a guest farmer's table), and whether
-## everyone was inside their own house when the day ended at 10:00pm.
+## Re-simulate a recorded Heartleaf replay and print, per day, where every
+## gnome was at 3:30pm, 6:00pm, and 10:00pm, then who had the highest
+## cumulative score that night.
 ##
 ## Like expand_replay, playback re-simulates the recorded inputs through the
 ## real game, so build this from the SAME game version that recorded the
 ## replay.
 ##
 ## Usage:
-##   day_report [--host NAME] <replay.(json|bitreplay)>
-##
-## `--host NAME` marks one gnome (the scripted host_villager) so guests at
-## its table are called out.
+##   day_report <replay.(json|bitreplay)>
 
 import
   std/[algorithm, os, strutils, tables],
@@ -28,7 +22,7 @@ const
   DinnerCheckMinutes = DinnerMinutes
   NightCheckMinutes = DayEndMinutes - 5
   DoorRadius = 110
-  UsageText = "Usage: day_report [--host NAME] <replay.(json|bitreplay)>"
+  UsageText = "Usage: day_report <replay.(json|bitreplay)>"
 
 type
   DinnerRow = object
@@ -45,6 +39,7 @@ type
     dinner: Table[string, DinnerRow]      ## gnome -> their dinner result
     insideAt10: Table[string, int]        ## gnome -> house index or -1
     homeIndex: Table[string, int]
+    score: Table[string, int]             ## gnome -> cumulative score
 
 proc fail(message: string) =
   stderr.writeLine(message)
@@ -73,9 +68,7 @@ proc nearRect(x, y: int, rect: Rect, radius: int): bool =
   pointRectDistanceSquared(x, y, rect) <= radius * radius
 
 proc main() =
-  var
-    replayPath = ""
-    hostName = ""
+  var replayPath = ""
   let args = commandLineParams()
   var i = 0
   while i < args.len:
@@ -83,10 +76,6 @@ proc main() =
     of "--help", "-h":
       echo UsageText
       quit(0)
-    of "--host":
-      inc i
-      if i >= args.len: fail("--host needs a value\n" & UsageText)
-      hostName = args[i]
     else:
       if args[i].startsWith("--"):
         fail("unknown option: " & args[i] & "\n" & UsageText)
@@ -123,6 +112,7 @@ proc main() =
         continue
       let f = addr factsFor(day)
       f[].homeIndex[name] = snapshot.homeIndex
+      f[].score[name] = snapshot.score
       if minutes == DoorCheckMinutes and not f[].doorAt330.hasKey(name):
         var where = "outside, away from any door"
         if snapshot.houseIndex >= 0:
@@ -164,20 +154,6 @@ proc main() =
     for name in f.homeIndex.keys:
       names.add(name)
     names.sort()
-    ## Top scorers tonight.
-    var scored: seq[(string, int)]
-    for name, row in f.dinner:
-      if row.wasHost:
-        scored.add((name, row.score))
-    scored.sort(proc(a, b: (string, int)): int = cmp(b[1], a[1]))
-    if scored.len == 0:
-      echo "  nobody hosted a dinner"
-    else:
-      var text = "  hosts tonight:"
-      for (name, score) in scored:
-        text.add(" " & name & "=" & $score & " (" &
-          $f.dinner[name].guests & " guests, " & $f.dinner[name].food & " food)")
-      echo text
     for name in names:
       let home = f.homeIndex[name]
       let door = f.doorAt330.getOrDefault(name, "?")
@@ -195,8 +171,6 @@ proc main() =
         else:
           let owner = house.playerNameForHouse()
           six = "guest at " & owner
-          if owner == hostName:
-            six.add(" (THE HOST_VILLAGER)")
           if not f.dinner.hasKey(name):
             six.add(" but no dinner served")
       var ten = "?"
@@ -206,11 +180,24 @@ proc main() =
           if house < 0: "OUTSIDE"
           elif house == home: "home"
           else: "inside " & house.playerNameForHouse() & "'s house"
-      let tag = if name == hostName: " [host_villager]" else: ""
-      echo "  ", name.alignLeft(7), tag.alignLeft(16),
+      echo "  ", name.alignLeft(7),
         " 3:30pm: ", door.alignLeft(28),
         " 6pm: ", six.alignLeft(34),
         " 10pm: ", ten
+    var best = -1
+    var winners: seq[string]
+    for name in names:
+      let score = f.score.getOrDefault(name, 0)
+      if score > best:
+        best = score
+        winners = @[name]
+      elif score == best:
+        winners.add(name)
+    if names.len > 0:
+      var text = "  highest score:"
+      for name in winners:
+        text.add(" " & name & "=" & $f.score.getOrDefault(name, 0))
+      echo text
   if replay.hashValidationFailed:
     echo "HASH MISMATCH at tick ", replay.hashMismatchTick,
       " (build day_report from the game version that recorded this replay)"
