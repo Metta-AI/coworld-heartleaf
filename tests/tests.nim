@@ -126,39 +126,87 @@ doAssert "none".foodNamesIn().len == 0
 
 echo "Testing LLM pacing and backoff"
 var pacer = initLlmPacer(42)
-doAssert pacer.canRequest(0), "first request should be allowed at once"
-pacer.noteRequest(0)
-doAssert not pacer.canRequest(LlmMinRequestTicks - 1),
+var now = 1000.0
+doAssert pacer.canRequest(now), "first request should be allowed at once"
+pacer.noteRequest(now)
+doAssert not pacer.canRequest(now + LlmMinRequestSeconds - 0.1),
   "requests must be spaced by the minimum interval"
-doAssert pacer.canRequest(LlmMinRequestTicks),
+doAssert pacer.canRequest(now + LlmMinRequestSeconds),
   "spacing should reopen after the minimum interval"
-pacer.noteRequest(LlmMinRequestTicks)
-let firstWait = pacer.noteTransientError(LlmMinRequestTicks)
-doAssert firstWait >= LlmBackoffMinTicks and
-  firstWait <= LlmBackoffMinTicks + LlmBackoffMinTicks div 2,
+now += LlmMinRequestSeconds
+pacer.noteRequest(now)
+let firstWait = pacer.noteTransientError(now)
+doAssert firstWait >= LlmBackoffMinSeconds and
+  firstWait <= LlmBackoffMinSeconds * 1.5,
   "first backoff should be the minimum plus up to 50% jitter"
-doAssert not pacer.canRequest(LlmMinRequestTicks + firstWait - 1),
+doAssert pacer.consecutiveFailures() == 1
+doAssert not pacer.canRequest(now + firstWait - 0.1),
   "requests must wait out the backoff"
-doAssert pacer.canRequest(LlmMinRequestTicks + firstWait),
+doAssert pacer.canRequest(now + firstWait),
   "requests should resume after the backoff"
-var lastWait = firstWait
-var tick = LlmMinRequestTicks + firstWait
+doAssert abs(pacer.secondsUntilRequest(now) - firstWait) < 0.001,
+  "secondsUntilRequest should report the backoff"
+var lastBackoff = pacer.backoffSeconds()
+now += firstWait
 for _ in 0 ..< 8:
-  pacer.noteRequest(tick)
-  let wait = pacer.noteTransientError(tick)
-  doAssert pacer.backoffTicks() >= lastWait div 2 * 2 or
-    pacer.backoffTicks() == LlmBackoffMaxTicks,
-    "backoff should grow until the cap"
-  lastWait = wait
-  tick += wait
-doAssert pacer.backoffTicks() == LlmBackoffMaxTicks,
+  pacer.noteRequest(now)
+  let wait = pacer.noteTransientError(now)
+  doAssert pacer.backoffSeconds() == min(lastBackoff * 2.0, LlmBackoffMaxSeconds),
+    "backoff should double until the cap"
+  doAssert wait >= pacer.backoffSeconds() and wait <= pacer.backoffSeconds() * 1.5,
+    "jitter must stay within 50% of the base"
+  lastBackoff = pacer.backoffSeconds()
+  now += wait
+doAssert pacer.backoffSeconds() == LlmBackoffMaxSeconds,
   "backoff should cap at the maximum"
-doAssert lastWait <= LlmBackoffMaxTicks + LlmBackoffMaxTicks div 2,
-  "jitter must not push the wait past cap plus 50%"
+doAssert pacer.consecutiveFailures() == 9
 pacer.noteSuccess()
-doAssert pacer.backoffTicks() == 0, "success should clear the backoff"
-doAssert pacer.canRequest(tick + LlmMinRequestTicks),
+doAssert pacer.backoffSeconds() == 0.0, "success should clear the backoff"
+doAssert pacer.consecutiveFailures() == 0
+doAssert pacer.canRequest(now + LlmMinRequestSeconds),
   "after success only the minimum spacing applies"
+
+## Retry-After wins when it is longer than the computed backoff.
+now += 200.0
+pacer.noteRequest(now)
+let honored = pacer.noteTransientError(now, retryAfter = 45.0)
+doAssert honored == 45.0, "Retry-After should extend the wait"
+doAssert not pacer.canRequest(now + 44.0)
+doAssert pacer.canRequest(now + 45.0)
+pacer.noteSuccess()
+
+## A spent daily quota has its own tier (tuned to match the minute one).
+now += 200.0
+pacer.noteRequest(now)
+let dailyWait = pacer.noteTransientError(now, dailyQuota = true)
+doAssert dailyWait >= LlmDailyBackoffMinSeconds and
+  dailyWait <= LlmDailyBackoffMinSeconds * 1.5,
+  "daily quota backoff should start at its own minimum"
+doAssert LlmDailyBackoffMinSeconds <= 30.0,
+  "a daily-quota hit must not cost more than a fraction of a game day"
+now += dailyWait
+for _ in 0 ..< 6:
+  pacer.noteRequest(now)
+  now += pacer.noteTransientError(now, dailyQuota = true)
+doAssert pacer.backoffSeconds() == LlmDailyBackoffMaxSeconds,
+  "daily quota backoff should cap at its own maximum"
+pacer.noteSuccess()
+
+## The rolling minute budget closes the pacer even when nothing failed.
+var budgetPacer = initLlmPacer(7)
+now = 5000.0
+for i in 0 ..< LlmRequestsPerMinute:
+  doAssert budgetPacer.canRequest(now), "budget should allow request " & $i
+  budgetPacer.noteRequest(now)
+  now += LlmMinRequestSeconds
+doAssert budgetPacer.requestsInLastMinute(now) == LlmRequestsPerMinute
+doAssert not budgetPacer.canRequest(now),
+  "the per-minute budget must close after LlmRequestsPerMinute requests"
+doAssert budgetPacer.secondsUntilRequest(now) > 0.0
+doAssert budgetPacer.canRequest(5000.0 + 60.0),
+  "the budget should reopen once the oldest request leaves the window"
+doAssert LlmMinRequestSeconds * float(LlmRequestsPerMinute) <= 60.0,
+  "the floor must not make the budget unreachable"
 
 echo "Testing food names"
 let namedFoods = replayFoodNames()

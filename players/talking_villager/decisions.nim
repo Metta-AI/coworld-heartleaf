@@ -4,21 +4,32 @@ import heartleaf/[common, protocol]
 
 const
   UnknownHouse = -1
-  ## Bedrock pacing, in 24 Hz game ticks. Every villager in every hosted
-  ## game shares one Bedrock quota, and a throttled reply used to trigger
-  ## an immediate re-request, so one busy minute became a request storm
-  ## that kept the whole table silent. Requests are now spaced, and after
-  ## a throttled or otherwise transient failure the bot waits with
-  ## exponential backoff (jittered so nine bots do not retry in lockstep)
-  ## before asking again, playing the fallback meanwhile. The cap is
-  ## short on purpose: a league day is 100 real seconds, and a 60 s
-  ## backoff once cost bots most of an afternoon (they never got to
-  ## decide to go inside for dinner). Throttling is per minute, so
-  ## retrying every 4-12 s with 3 s spacing cannot storm the quota.
-  LlmMinRequestTicks* = 72
-  LlmBackoffMinTicks* = 96
-  LlmBackoffMaxTicks* = 288
+  ## Bedrock pacing, in wall-clock seconds. Every villager in every hosted
+  ## game shares one account-wide Bedrock quota, so a bot that re-asks the
+  ## moment a throttled reply comes back turns one busy minute into a
+  ## request storm that silences every table on the account. Three
+  ## limits apply, all measured in real time (throttling is real time, so
+  ## game ticks would under-wait whenever a sim runs faster than 24 Hz):
+  ## a floor between two requests, a rolling per-minute budget, and an
+  ## exponential backoff after a throttled or otherwise transient failure
+  ## (jittered so nine bots do not retry in lockstep). A Retry-After
+  ## header from the endpoint always wins over the computed wait. Backoff
+  ## hurts play (the fallback never chats), which is why the cap is one
+  ## game day, but re-poking a spent quota every few seconds helps no one
+  ## and is exactly what got the account throttled. "Too many tokens per
+  ## day" keeps its own tier so it can be tuned apart, but it uses the
+  ## same numbers: measured on 2026-08-18 those replies cleared within a
+  ## minute or two, and a 120 s minimum cost each bot more than a game
+  ## day of scripted play per hit while the load it saved was nil next to
+  ## the healthy 10 requests a minute.
+  LlmMinRequestSeconds* = 4.0
+  LlmRequestsPerMinute* = 10
+  LlmBackoffMinSeconds* = 8.0
+  LlmBackoffMaxSeconds* = 100.0
+  LlmDailyBackoffMinSeconds* = 8.0
+  LlmDailyBackoffMaxSeconds* = 100.0
   LlmBackoffJitter = 0.5
+  LlmBudgetWindowSeconds = 60.0
   ## Fatal: a villager without an LLM must not play (scripted chat is not
   ## allowed in the league), so it exits with this message instead.
   BedrockNotConfiguredMessage* =
@@ -29,47 +40,102 @@ const
 
 type
   LlmPacer* = object
-    ## Spaces Bedrock requests and backs off after transient failures.
-    lastRequestTick: int
-    backoffTicks: int
-    blockedUntilTick: int
+    ## Spaces Bedrock requests, keeps them under a per-minute budget, and
+    ## backs off after transient failures. Times are epoch seconds.
+    requestTimes: seq[float]
+    backoffSeconds: float
+    blockedUntil: float
+    consecutiveFailures: int
     rng: Rand
 
 proc initLlmPacer*(seed: int): LlmPacer =
   ## Returns a pacer that allows an immediate first request.
-  result.lastRequestTick = -LlmMinRequestTicks
   result.rng = initRand(seed)
 
-proc canRequest*(pacer: LlmPacer, tick: int): bool =
-  ## Returns true when a new Bedrock request may start now.
-  tick - pacer.lastRequestTick >= LlmMinRequestTicks and
-    tick >= pacer.blockedUntilTick
+proc pruneRequests(pacer: var LlmPacer, now: float) =
+  ## Drops request timestamps that left the budget window.
+  var keep: seq[float]
+  for time in pacer.requestTimes:
+    if now - time < LlmBudgetWindowSeconds:
+      keep.add(time)
+  pacer.requestTimes = keep
 
-proc noteRequest*(pacer: var LlmPacer, tick: int) =
-  ## Records that a request started on this tick.
-  pacer.lastRequestTick = tick
+proc requestsInLastMinute*(pacer: LlmPacer, now: float): int =
+  ## Returns how many requests started inside the rolling budget window.
+  for time in pacer.requestTimes:
+    if now - time < LlmBudgetWindowSeconds:
+      inc result
+
+proc lastRequestTime(pacer: LlmPacer): float =
+  ## Returns when the most recent request started, or a distant past.
+  if pacer.requestTimes.len == 0:
+    return -1.0e9
+  pacer.requestTimes.max()
+
+proc canRequest*(pacer: LlmPacer, now: float): bool =
+  ## Returns true when a new Bedrock request may start now: the floor
+  ## since the last request has passed, the rolling minute still has
+  ## budget, and no backoff is in force.
+  now - pacer.lastRequestTime() >= LlmMinRequestSeconds and
+    pacer.requestsInLastMinute(now) < LlmRequestsPerMinute and
+    now >= pacer.blockedUntil
+
+proc noteRequest*(pacer: var LlmPacer, now: float) =
+  ## Records that a request started now.
+  pacer.pruneRequests(now)
+  pacer.requestTimes.add(now)
 
 proc noteSuccess*(pacer: var LlmPacer) =
   ## Clears the backoff after a usable reply.
-  pacer.backoffTicks = 0
-  pacer.blockedUntilTick = 0
+  pacer.backoffSeconds = 0.0
+  pacer.blockedUntil = 0.0
+  pacer.consecutiveFailures = 0
 
-proc noteTransientError*(pacer: var LlmPacer, tick: int): int =
+proc noteTransientError*(
+  pacer: var LlmPacer,
+  now: float,
+  retryAfter = 0.0,
+  dailyQuota = false
+): float =
   ## Doubles the backoff after a throttled or transient failure and
-  ## returns how many ticks the pacer will now wait.
-  pacer.backoffTicks =
-    if pacer.backoffTicks == 0:
-      LlmBackoffMinTicks
+  ## returns how many seconds the pacer will now wait. A spent daily
+  ## quota uses its own (currently identical) tier, and a Retry-After
+  ## from the endpoint (seconds) is honored when longer.
+  inc pacer.consecutiveFailures
+  let
+    minSeconds =
+      if dailyQuota: LlmDailyBackoffMinSeconds else: LlmBackoffMinSeconds
+    maxSeconds =
+      if dailyQuota: LlmDailyBackoffMaxSeconds else: LlmBackoffMaxSeconds
+  pacer.backoffSeconds =
+    if pacer.backoffSeconds < minSeconds:
+      minSeconds
     else:
-      min(pacer.backoffTicks * 2, LlmBackoffMaxTicks)
-  let jitter = int(float(pacer.backoffTicks) * LlmBackoffJitter *
-    pacer.rng.rand(1.0))
-  result = pacer.backoffTicks + jitter
-  pacer.blockedUntilTick = tick + result
+      min(pacer.backoffSeconds * 2.0, maxSeconds)
+  let jitter = pacer.backoffSeconds * LlmBackoffJitter * pacer.rng.rand(1.0)
+  result = max(pacer.backoffSeconds + jitter, retryAfter)
+  pacer.blockedUntil = max(pacer.blockedUntil, now + result)
 
-proc backoffTicks*(pacer: LlmPacer): int =
+proc backoffSeconds*(pacer: LlmPacer): float =
   ## Returns the current backoff length without jitter, 0 when healthy.
-  pacer.backoffTicks
+  pacer.backoffSeconds
+
+proc consecutiveFailures*(pacer: LlmPacer): int =
+  ## Returns how many transient failures happened since the last success.
+  pacer.consecutiveFailures
+
+proc secondsUntilRequest*(pacer: LlmPacer, now: float): float =
+  ## Returns how long until the pacer would allow a request, 0 when open.
+  ## The budget window is approximated by the oldest request's expiry.
+  var waitUntil = max(pacer.blockedUntil,
+    pacer.lastRequestTime() + LlmMinRequestSeconds)
+  if pacer.requestsInLastMinute(now) >= LlmRequestsPerMinute:
+    var oldest = now
+    for time in pacer.requestTimes:
+      if now - time < LlmBudgetWindowSeconds and time < oldest:
+        oldest = time
+    waitUntil = max(waitUntil, oldest + LlmBudgetWindowSeconds)
+  max(0.0, waitUntil - now)
 
 type
   LlmActionKind* = enum

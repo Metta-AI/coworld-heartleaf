@@ -145,6 +145,8 @@ type
     error: string
     ## Token accounting from the response, for throttling diagnosis.
     usage: string
+    ## Seconds the endpoint asked us to wait (Retry-After), 0 when absent.
+    retryAfter: float
 
   TalkingVillagerError = object of CatchableError
 
@@ -320,6 +322,12 @@ proc transientBedrockError(answer: BedrockResult): bool =
       message.contains("couldn't connect") or
       message.contains("could not connect"):
     return true
+
+proc dailyQuotaError(answer: BedrockResult): bool =
+  ## Returns true when the throttle is the account's daily token quota
+  ## ("Too many tokens per day"), which will not clear for a long time.
+  let message = answer.error.toLowerAscii()
+  message.contains("per day") or message.contains("daily")
 
 proc permanentBedrockError(answer: BedrockResult): bool =
   ## Returns true for Bedrock failures that should stop the bot: the
@@ -504,6 +512,12 @@ proc pollTalkToBedrock(): BedrockResult =
   result.statusCode = response.code
   if response.code != 200:
     result.error = response.body
+    ## Retry-After in seconds; HTTP-date forms are ignored.
+    if response.headers.contains("Retry-After"):
+      try:
+        result.retryAfter = parseFloat(response.headers["Retry-After"].strip())
+      except ValueError:
+        discard
     return
   try:
     result.reply = response.body.parseBedrockReply()
@@ -2604,9 +2618,9 @@ proc startLlmDecision(bot: Bot): bool =
     let answer = BedrockResult(done: true, error: e.msg)
     if answer.transientBedrockError():
       bot.lastLlmError = e.msg
-      let waitTicks = bot.llmPacer.noteTransientError(bot.frameTick)
+      let wait = bot.llmPacer.noteTransientError(epochTime())
       bot.log("llm transient start error " & e.msg & ", backing off " &
-        $(waitTicks div 24) & "s, using fallback")
+        formatFloat(wait, ffDecimal, 1) & "s, using fallback")
       bot.applyDecision(bot.fallbackDecision())
       return false
     raise newException(
@@ -2616,7 +2630,8 @@ proc startLlmDecision(bot: Bot): bool =
   if not started:
     raise newException(TalkingVillagerError, BedrockNotConfiguredMessage)
   bot.llmWaiting = true
-  bot.llmPacer.noteRequest(bot.frameTick)
+  let now = epochTime()
+  bot.llmPacer.noteRequest(now)
   bot.decisionStartedTick = bot.frameTick
   let latency = bedrockPerformanceLatency()
   let latencyName =
@@ -2624,11 +2639,14 @@ proc startLlmDecision(bot: Bot): bool =
       latency
     else:
       "default"
+  ## rpm is this bot's requests in the trailing real minute, including
+  ## this one, so a log can be profiled for request rate at a glance.
   bot.log(
     "llm request " & bot.llmTag &
     " model=" & bedrockModel() &
     " region=" & bedrockRegion() &
-    " latency=" & latencyName
+    " latency=" & latencyName &
+    " rpm=" & $bot.llmPacer.requestsInLastMinute(now)
   )
   return true
 
@@ -2665,9 +2683,21 @@ proc pollLlmDecision(bot: Bot): bool =
     ## Transient errors and unusable 200 bodies (empty text, parse
     ## failures) both keep the bot in the game on the scripted fallback.
     if answer.transientBedrockError():
-      let waitTicks = bot.llmPacer.noteTransientError(bot.frameTick)
-      bot.log("llm transient error, backing off " &
-        $(waitTicks div 24) & "s, using fallback")
+      let daily = answer.dailyQuotaError()
+      let wait = bot.llmPacer.noteTransientError(
+        epochTime(), answer.retryAfter, daily
+      )
+      bot.log(
+        (if daily: "llm daily quota spent" else: "llm transient error") &
+        ", failure " & $bot.llmPacer.consecutiveFailures() &
+        " in a row, backing off " & formatFloat(wait, ffDecimal, 1) &
+        "s" &
+        (if answer.retryAfter > 0.0:
+          " (retry-after " & formatFloat(answer.retryAfter, ffDecimal, 0) & "s)"
+        else:
+          "") &
+        ", using fallback"
+      )
     else:
       bot.log("llm error is not permanent, using fallback")
     bot.applyDecision(bot.fallbackDecision())
@@ -2947,9 +2977,10 @@ proc needsFreshDecision(bot: Bot): bool =
 
 proc mayAskLlm(bot: Bot): bool =
   ## Returns true when pacing allows a Bedrock request right now. While
-  ## spaced or backing off, the bot keeps playing its current or fallback
-  ## decision instead (the fallback never chats).
-  bot.llmPacer.canRequest(bot.frameTick)
+  ## spaced, over the minute budget, or backing off, the bot keeps
+  ## playing its current or fallback decision instead (the fallback
+  ## never chats).
+  bot.llmPacer.canRequest(epochTime())
 
 proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
   ## Sends the chat text chosen by the current LLM decision.
