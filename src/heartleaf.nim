@@ -40,8 +40,6 @@ const
   ScoreScreenTicks = 10 * TicksPerSecond
   DinnerScreenTicks = 10 * TicksPerSecond
   DinnerTallyMinutes = DinnerMinutes
-  DinnerEatRounds = 3
-  NewFoodEatScore = 3
   LeftoverEatScore = 1
   DayStepMinutes = 5
   DayStepCount = DayTotalMinutes div DayStepMinutes

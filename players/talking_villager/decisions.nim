@@ -12,13 +12,12 @@ const
   ## game ticks would under-wait whenever a sim runs faster than 24 Hz):
   ## a floor between two requests, a rolling per-minute budget, and an
   ## exponential backoff after a throttled or otherwise transient failure
-  ## (jittered so nine bots do not retry in lockstep). Cheap rejections use
-  ## a short tier; a spent daily quota keeps the longer tier. A Retry-After
-  ## header from the endpoint always wins over the computed wait.
+  ## (jittered so nine bots do not retry in lockstep). A Retry-After header
+  ## from the endpoint always wins over the computed wait.
   LlmMinRequestSeconds* = 4.0
   LlmRequestsPerMinute* = 10
-  LlmBackoffMinSeconds* = 4.0
-  LlmBackoffMaxSeconds* = 16.0
+  LlmBackoffMinSeconds* = 8.0
+  LlmBackoffMaxSeconds* = 100.0
   LlmDailyBackoffMinSeconds* = 8.0
   LlmDailyBackoffMaxSeconds* = 100.0
   LlmBackoffJitter = 0.5
@@ -93,19 +92,18 @@ proc noteTransientError*(
 ): float =
   ## Doubles the backoff after a throttled or transient failure and
   ## returns how many seconds the pacer will now wait. A spent daily
-  ## quota uses the longer tier, and a Retry-After from the endpoint
-  ## (seconds) is honored when longer.
+  ## quota uses the long hard-stop tier, and a Retry-After from the
+  ## endpoint (seconds) is honored when longer.
   inc pacer.consecutiveFailures
-  let
-    minSeconds =
-      if dailyQuota: LlmDailyBackoffMinSeconds else: LlmBackoffMinSeconds
-    maxSeconds =
-      if dailyQuota: LlmDailyBackoffMaxSeconds else: LlmBackoffMaxSeconds
-  pacer.backoffSeconds =
-    if pacer.backoffSeconds < minSeconds:
-      minSeconds
-    else:
-      min(pacer.backoffSeconds * 2.0, maxSeconds)
+  if dailyQuota:
+    ## A daily quota rejection is a long hard stop, not a quick retry.
+    pacer.backoffSeconds = LlmDailyBackoffMaxSeconds
+  else:
+    pacer.backoffSeconds =
+      if pacer.backoffSeconds < LlmBackoffMinSeconds:
+        LlmBackoffMinSeconds
+      else:
+        min(pacer.backoffSeconds * 2.0, LlmBackoffMaxSeconds)
   let jitter = pacer.backoffSeconds * LlmBackoffJitter * pacer.rng.rand(1.0)
   result = max(pacer.backoffSeconds + jitter, retryAfter)
   pacer.blockedUntil = max(pacer.blockedUntil, now + result)

@@ -175,21 +175,19 @@ doAssert not pacer.canRequest(now + 44.0)
 doAssert pacer.canRequest(now + 45.0)
 pacer.noteSuccess()
 
-## A spent daily quota has its own tier (tuned to match the minute one).
+## A spent daily quota is a long hard stop.
 now += 200.0
 pacer.noteRequest(now)
 let dailyWait = pacer.noteTransientError(now, dailyQuota = true)
-doAssert dailyWait >= LlmDailyBackoffMinSeconds and
-  dailyWait <= LlmDailyBackoffMinSeconds * 1.5,
-  "daily quota backoff should start at its own minimum"
-doAssert LlmDailyBackoffMinSeconds <= 30.0,
-  "a daily-quota hit must not cost more than a fraction of a game day"
+doAssert dailyWait >= LlmDailyBackoffMaxSeconds and
+  dailyWait <= LlmDailyBackoffMaxSeconds * 1.5,
+  "daily quota backoff should immediately use the long hard-stop tier"
 now += dailyWait
-for _ in 0 ..< 6:
+for _ in 0 ..< 2:
   pacer.noteRequest(now)
   now += pacer.noteTransientError(now, dailyQuota = true)
 doAssert pacer.backoffSeconds() == LlmDailyBackoffMaxSeconds,
-  "daily quota backoff should cap at its own maximum"
+  "daily quota backoff should remain at the long hard-stop maximum"
 pacer.noteSuccess()
 
 ## The rolling minute budget closes the pacer even when nothing failed.
