@@ -52,8 +52,8 @@ const
   ## After this many minutes past dinner without a dinner overlay the bot
   ## records that it missed dinner.
   DinnerMissedGraceMinutes = 5
-  FallbackHostFailureNightsBeforeGuest = 3
   FallbackInvitationCap = 5
+  FallbackInvitationTemplateCount = 5
   FallbackInvitationIntervalMinutes = 180
   FallbackInvitationStartMinutes = 8 * 60
   ## Walk-time estimates for the state report: top speed in pixels per
@@ -223,16 +223,11 @@ type
     fallbackDinnerReasonCode: string
     fallbackDinnerTransition: string
     fallbackDinnerTarget: int
-    fallbackPreferredMode: string
     fallbackDinnerSignal: string
     fallbackDinnerRunnerUp: string
     fallbackDinnerPantryItems: int
     fallbackDinnerObservedVisitors: int
     fallbackDinnerGuestCount: int
-    fallbackHostEmptyNights: int
-    fallbackGuestWorkedTarget: int
-    fallbackGuestAvoidTarget: int
-    fallbackHostEvidence: bool
     fallbackDinnerRecordedDay: int
     fallbackInvitationCount: int
     fallbackInvitationAttempts: int
@@ -776,7 +771,7 @@ decisions to a game trace when an episode identifier is available outside
 the player runtime. `source` is `llm` or `fallback`; chat fields describe
 whether the decision's message was sent or suppressed. Attempt records
 contain status, error class, latency, chosen wait, and usability fields.
-Fallback dinner records contain the selected mode, rule, target house,
+Fallback dinner records contain the host-only mode, rule, target house,
 reason code, pantry item count, observed visitor count, 6pm presence,
 guest count, invitation counts, named-villager count, and realized
 outcome. `observedVisitors` is the number of visitors observed at the
@@ -1919,48 +1914,15 @@ proc guestNamesCount(text: string): int =
 
 proc adaptFallbackDinner(
   bot: Bot,
-  served: bool,
-  targetHouse: int
+  served: bool
 ) =
-  ## Updates fallback mode state from one realized dinner outcome.
-  if bot.fallbackDinnerMode == "host-at-home":
-    if bot.fallbackDinnerObservedVisitors > 0 or
-        bot.fallbackDinnerGuestCount > 0:
-      bot.fallbackHostEvidence = true
-    if served:
-      bot.fallbackHostEmptyNights = 0
-      bot.fallbackPreferredMode = "host-at-home"
-      bot.fallbackHostEvidence = true
-      bot.fallbackDinnerTransition =
-        "host dinner served; staying in host-at-home"
-    else:
-      inc bot.fallbackHostEmptyNights
-      if bot.fallbackHostEmptyNights >= FallbackHostFailureNightsBeforeGuest:
-        bot.fallbackPreferredMode = "guest-at-house"
-        bot.fallbackDinnerTransition =
-          "host dinner failed repeatedly; returning to guest-at-house"
-      else:
-        bot.fallbackPreferredMode = "host-at-home"
-        bot.fallbackDinnerTransition =
-          "host dinner empty; retaining host-at-home"
-  elif served:
-    bot.fallbackGuestAvoidTarget = UnknownHouse
-    if bot.fallbackDinnerObservedVisitors > 0:
-      bot.fallbackHostEvidence = true
-      bot.fallbackPreferredMode = "host-at-home"
-      bot.fallbackDinnerTransition =
-        "guest dinner served; observed home visitor; switching to host-at-home"
-    else:
-      bot.fallbackPreferredMode = "guest-at-house"
-      bot.fallbackGuestWorkedTarget = targetHouse
-      bot.fallbackDinnerTransition =
-        "guest dinner served; staying in guest-at-house"
-  else:
-    bot.fallbackPreferredMode = "guest-at-house"
-    bot.fallbackHostEmptyNights = 0
-    bot.fallbackGuestAvoidTarget = targetHouse
+  ## Records the realized outcome while retaining the host-only policy.
+  if served:
     bot.fallbackDinnerTransition =
-      "guest dinner failed; trying the next guest house"
+      "host dinner served; staying in host-at-home"
+  else:
+    bot.fallbackDinnerTransition =
+      "host dinner empty; retaining host-at-home"
 
 proc houseCrowdOthers(bot: Bot, houseIndex: int): int
 
@@ -1995,12 +1957,9 @@ proc maybeRecordDinner(bot: Bot) =
       let foods = label.dinnerLabelField("foods").foodNamesIn()
       bot.fallbackDinnerGuestCount = guests.guestNamesCount()
       let served =
-        if bot.fallbackDinnerMode == "host-at-home":
-          wasHost and bot.fallbackDinnerGuestCount > 0 and
-            foods.len > 0 and not summary.contains("nobody came")
-        else:
-          foods.len > 0
-      bot.adaptFallbackDinner(served, bot.fallbackDinnerTarget)
+        wasHost and bot.fallbackDinnerGuestCount > 0 and
+          foods.len > 0 and not summary.contains("nobody came")
+      bot.adaptFallbackDinner(served)
       bot.recordArtifactFallbackDinner(
         summary,
         bot.dinnerHouse == bot.fallbackDinnerTarget,
@@ -2022,7 +1981,7 @@ proc maybeRecordDinner(bot: Bot) =
         "'s house at 6pm but no dinner was served there (the host was " &
         "not inside)."
   if bot.fallbackDinnerMode.len > 0:
-    bot.adaptFallbackDinner(false, bot.fallbackDinnerTarget)
+    bot.adaptFallbackDinner(false)
     bot.recordArtifactFallbackDinner(
       missed,
       bot.dinnerHouse == bot.fallbackDinnerTarget,
@@ -2106,9 +2065,6 @@ proc initBot(name: string, slot: int, soul: string): Bot =
   result.greetedToday = initHashSet[string]()
   result.dinnerHouse = UnknownHouse
   result.fallbackDinnerTarget = UnknownHouse
-  result.fallbackGuestWorkedTarget = UnknownHouse
-  result.fallbackGuestAvoidTarget = UnknownHouse
-  result.fallbackHostEvidence = false
   result.fallbackInvitationNamed = initHashSet[string]()
   result.fallbackInvitationLastMinutes = -1
   result.clockAnchorMinutes = -1
@@ -2794,90 +2750,6 @@ proc dinnerLeaveAt(bot: Bot, houseIndex: int): int =
     return -1
   DinnerMinutes - bot.walkMinutes(pixels) - LeaveMarginMinutes
 
-proc fallbackGuestHouse(bot: Bot): int =
-  ## Chooses a live, reachable other house for adaptive fallback dinner.
-  var candidates: seq[tuple[
-    house: int,
-    pixels: int,
-    signal: int,
-    ownerPresent: bool,
-    crowd: int
-  ]]
-  for house in 0 ..< HouseCount:
-    if house == bot.homeIndex:
-      continue
-    let pixels = bot.walkPixelsToHouse(house)
-    if pixels < 0:
-      continue
-    let ownerPresent = bot.houseOwnerPresent(house)
-    let crowd = bot.houseCrowdOthers(house)
-    candidates.add((
-      house: house,
-      pixels: pixels,
-      signal: crowd + (if ownerPresent: 1 else: 0),
-      ownerPresent: ownerPresent,
-      crowd: crowd
-    ))
-  if candidates.len == 0:
-    bot.fallbackDinnerSignal = "none"
-    bot.fallbackDinnerRunnerUp = "none"
-    return UnknownHouse
-  if bot.fallbackGuestAvoidTarget >= 0 and candidates.len > 1:
-    var alternatives: seq[typeof(candidates[0])]
-    for candidate in candidates:
-      if candidate.house != bot.fallbackGuestAvoidTarget:
-        alternatives.add(candidate)
-    if alternatives.len > 0:
-      candidates = alternatives
-  candidates.sort(proc(a, b: typeof(candidates[0])): int =
-    if a.signal != b.signal:
-      cmp(b.signal, a.signal)
-    elif a.pixels != b.pixels:
-      cmp(a.pixels, b.pixels)
-    else:
-      cmp(a.house, b.house))
-  var tieEnd = 0
-  while tieEnd < candidates.len and
-      candidates[tieEnd].signal == candidates[0].signal and
-      candidates[tieEnd].pixels == candidates[0].pixels:
-    inc tieEnd
-  var chosenIndex = -1
-  if bot.fallbackGuestWorkedTarget >= 0:
-    for index, candidate in candidates:
-      if candidate.house == bot.fallbackGuestWorkedTarget:
-        chosenIndex = index
-        break
-  if chosenIndex < 0:
-    chosenIndex = (bot.slot + bot.dayIndex) mod max(1, tieEnd)
-  let chosen = candidates[chosenIndex]
-  if chosen.house == bot.fallbackGuestWorkedTarget:
-    bot.fallbackDinnerSignal =
-      "worked target crowd=" & $chosen.crowd &
-      " ownerPresent=" & $chosen.ownerPresent
-  elif chosen.signal > 0:
-    bot.fallbackDinnerSignal =
-      "crowd=" & $chosen.crowd &
-      " ownerPresent=" & $chosen.ownerPresent
-  else:
-    bot.fallbackDinnerSignal = "no visible occupancy signal"
-  if candidates.len > 1:
-    let runner = candidates[if chosenIndex == 0: 1 else: 0]
-    bot.fallbackDinnerRunnerUp =
-      "house=" & $runner.house &
-      " signal=" & $runner.signal &
-      " pixels=" & $runner.pixels
-  else:
-    bot.fallbackDinnerRunnerUp = "none"
-  chosen.house
-
-proc fallbackGuestEligible(bot: Bot): bool =
-  ## Returns whether direct evidence justifies giving a rival the table.
-  ## A single empty host night is never enough, and the guest branch only
-  ## opens after a house has already served this bot successfully.
-  bot.fallbackPreferredMode == "guest-at-house" and
-    bot.fallbackHostEmptyNights >= FallbackHostFailureNightsBeforeGuest and
-    bot.fallbackGuestWorkedTarget >= 0
-
 proc fallbackInvitationTarget(bot: Bot): string =
   ## Chooses a currently visible villager, preferring one not named today.
   var candidates: seq[string]
@@ -2917,7 +2789,7 @@ proc fallbackInvitationMessage(
     house = houseOwner & "'s house"
     time = bot.minutes.clockName()
     food = bot.collectedFoodsText()
-  case templateIndex mod FallbackInvitationCap:
+  case templateIndex mod FallbackInvitationTemplateCount:
   of 0:
     targetName & ", I'm hosting dinner at " & house & " at " & time &
       " with " & food & "."
@@ -3035,69 +2907,16 @@ proc fallbackDecision(bot: Bot): LlmDecision =
     return bot.fallbackInvitationDecision()
   if bot.minutes < DinnerMinutes:
     if bot.fallbackDinnerMode.len == 0:
-      let guestMode = bot.fallbackGuestEligible()
       bot.fallbackDinnerPantryItems = bot.inventoryTotal()
-      if guestMode:
-        bot.fallbackDinnerMode = "guest-at-house"
-        bot.fallbackDinnerTarget = bot.fallbackGuestHouse()
-        if bot.fallbackDinnerTarget < 0:
-          bot.fallbackDinnerMode = "host-at-home"
-          bot.fallbackDinnerTarget = bot.homeIndex
-          bot.fallbackDinnerReasonCode = "guest_target_unavailable"
-          bot.fallbackDinnerReason =
-            "adaptive fallback: guest target unavailable; switching to host-at-home"
-          bot.fallbackDinnerSignal = "own home"
-          bot.fallbackDinnerRunnerUp = "none"
-        else:
-          bot.fallbackDinnerReasonCode =
-            if bot.fallbackGuestAvoidTarget >= 0:
-              "guest_after_failed_target"
-            elif bot.fallbackGuestWorkedTarget >= 0:
-              "guest_worked_target"
-            else:
-              "guest_default_live_occupancy"
-          bot.fallbackDinnerReason =
-            if bot.fallbackDinnerReasonCode == "guest_after_failed_target":
-              "adaptive fallback: trying the next live guest house"
-            elif bot.fallbackDinnerReasonCode == "guest_worked_target":
-              "adaptive fallback: returning to a house that served dinner"
-            else:
-              "adaptive fallback: defaulting to the best live guest house"
-      else:
-        bot.fallbackDinnerMode = "host-at-home"
-        bot.fallbackDinnerTarget = bot.homeIndex
-        bot.fallbackDinnerReasonCode =
-          if bot.fallbackPreferredMode.len == 0:
-            "host_default"
-          elif bot.fallbackHostEvidence:
-            "host_observed_visitor"
-          else:
-            "host_waiting_for_guests"
-        bot.fallbackDinnerReason =
-          case bot.fallbackDinnerReasonCode
-          of "host_default":
-            "adaptive fallback: first dinner hosts at home"
-          of "host_observed_visitor":
-            "adaptive fallback: observed a visitor at home"
-          else:
-            "adaptive fallback: retaining host mode until guest evidence"
-        bot.fallbackDinnerSignal = "own home"
-        bot.fallbackDinnerRunnerUp = "none"
-    let targetHouse =
-      if bot.fallbackDinnerMode == "guest-at-house":
-        bot.fallbackDinnerTarget
-      else:
-        bot.homeIndex
-    let leaveAt = bot.dinnerLeaveAt(targetHouse)
+      bot.fallbackDinnerMode = "host-at-home"
+      bot.fallbackDinnerTarget = bot.homeIndex
+      bot.fallbackDinnerReasonCode = "host_only"
+      bot.fallbackDinnerReason =
+        "adaptive fallback: host at home"
+      bot.fallbackDinnerSignal = "own home"
+      bot.fallbackDinnerRunnerUp = "none"
+    let leaveAt = bot.dinnerLeaveAt(bot.homeIndex)
     if leaveAt >= 0 and bot.minutes >= leaveAt:
-      if bot.fallbackDinnerMode == "guest-at-house":
-        return LlmDecision(
-          valid: true,
-          action: LlmGoToParty,
-          houseIndex: targetHouse,
-          commitParty: true,
-          reason: bot.fallbackDinnerReason
-        )
       return LlmDecision(
         valid: true,
         action: LlmGoHome,
@@ -3109,16 +2928,6 @@ proc fallbackDecision(bot: Bot): LlmDecision =
       action: LlmKeepGatheringPlants,
       houseIndex: UnknownHouse,
       reason: "fallback: gathering until dinner departure"
-    )
-  if bot.fallbackDinnerMode == "guest-at-house" and
-      bot.screenKind == HomeMap and
-      bot.currentHouse == bot.fallbackDinnerTarget:
-    return LlmDecision(
-      valid: true,
-      action: LlmStayInside,
-      houseIndex: bot.fallbackDinnerTarget,
-      untilMinutes: DayEndMinutes,
-      reason: bot.fallbackDinnerReason
     )
   if bot.screenKind == HomeMap and bot.currentHouse == bot.homeIndex:
     return LlmDecision(
