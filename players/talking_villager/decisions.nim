@@ -71,6 +71,7 @@ proc canRequest*(pacer: LlmPacer, now: float): bool =
   ## budget, and no backoff is in force.
   now - pacer.lastRequestTime() >= LlmMinRequestSeconds and
     pacer.requestsInLastMinute(now) < LlmRequestsPerMinute and
+    ## Tolerate the floating-point boundary at the end of a backoff.
     now + 1.0e-6 >= pacer.blockedUntil
 
 proc noteRequest*(pacer: var LlmPacer, now: float) =
