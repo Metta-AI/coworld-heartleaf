@@ -39,8 +39,8 @@ const
   ## is rarely reached; when it is, whole oldest days are dropped.
   ChatHistoryLimit = 600
   ## Recent lines compared for near-duplicate chat suppression.
-  RecentChatLines = 20
-  ChatSimilarityThreshold = 0.8
+  RecentChatLines = 8
+  ChatSimilarityThreshold = 0.85
   ## Food bands for interrupt detection only: crossing a band re-asks the
   ## LLM because "how much I carry" changed enough to matter.
   LowFoodBand = 2
@@ -153,6 +153,10 @@ type
 
   TalkingVillagerError = object of CatchableError
 
+  ChatLine = object
+    normalized: string
+    targetName: string
+
   Bot = ref object
     name: string
     playerName: string
@@ -235,8 +239,9 @@ type
     ## Chat lines said today, newest last, for the state report and the
     ## repeated-line guard.
     saidToday: seq[string]
-    ## Normalized chat lines said during the whole game, newest last.
-    saidGame: seq[string]
+    ## Normalized chat lines and targets said during the whole game,
+    ## newest last.
+    saidGame: seq[ChatLine]
     chatSentCount: int
     chatSuppressedCount: int
     llmWaiting: bool
@@ -3013,7 +3018,7 @@ proc chatTokenSet(message: string): HashSet[string] =
     result.incl(token)
 
 proc chatLinesHighlySimilar(left, right: string): bool =
-  ## Returns true when two chat lines have at least 80% token overlap.
+  ## Returns true when two chat lines have at least 85% token overlap.
   let leftTokens = chatTokenSet(left)
   let rightTokens = chatTokenSet(right)
   if leftTokens.len == 0 or rightTokens.len == 0:
@@ -3025,16 +3030,33 @@ proc chatLinesHighlySimilar(left, right: string): bool =
   let unionSize = leftTokens.len + rightTokens.len - intersection
   float(intersection) / float(unionSize) >= ChatSimilarityThreshold
 
-proc duplicateChatReason(bot: Bot, normalized: string): string =
+proc duplicateChatReason(
+  bot: Bot,
+  normalized,
+  targetName: string
+): string =
   ## Returns why a normalized chat line should be suppressed, if any.
   if normalized.len == 0:
     return
+  for prior in bot.saidToday:
+    if normalizedChatLine(prior) == normalized:
+      return "already said today"
+  var gameCount = 0
   for prior in bot.saidGame:
-    if prior == normalized:
-      return "already said in game"
+    if prior.normalized != normalized:
+      continue
+    inc gameCount
+    if prior.targetName == targetName:
+      if targetName.len > 0:
+        return "already said to " & targetName
+      return "already said with the same target"
+  if gameCount >= 2:
+    return "already said twice in game"
   let start = max(0, bot.saidGame.len - RecentChatLines)
   for i in start ..< bot.saidGame.len:
-    if chatLinesHighlySimilar(normalized, bot.saidGame[i]):
+    if bot.saidGame[i].normalized == normalized:
+      continue
+    if chatLinesHighlySimilar(normalized, bot.saidGame[i].normalized):
       return "similar to a recent line"
 
 proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
@@ -3050,7 +3072,10 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
       not bot.visiblePlayerNear(bot.decision.targetName):
     return
   let normalized = normalizedChatLine(bot.decision.message)
-  let duplicateReason = bot.duplicateChatReason(normalized)
+  let duplicateReason = bot.duplicateChatReason(
+    normalized,
+    bot.decision.targetName
+  )
   if duplicateReason.len > 0:
     bot.decisionChatSent = true
     inc bot.chatSuppressedCount
@@ -3060,7 +3085,10 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
   ws.send(blobFromChat(bot.decision.message), BinaryMessage)
   bot.recordOwnChat(bot.decision.message)
   bot.saidToday.add(bot.decision.message)
-  bot.saidGame.add(normalized)
+  bot.saidGame.add(ChatLine(
+    normalized: normalized,
+    targetName: bot.decision.targetName
+  ))
   inc bot.chatSentCount
   bot.decisionChatSent = true
   if bot.decision.targetName.len > 0:
