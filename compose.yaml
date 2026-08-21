@@ -27,6 +27,13 @@ services:
       context: .
       dockerfile: players/friendly_villager/Dockerfile
       network: host
+  tablemate:
+    image: coworld-heartleaf-tablemate:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: players/tablemate/Dockerfile
+      network: host
   fatherly_villager:
     image: coworld-heartleaf-fatherly-villager:latest
     platform: linux/amd64

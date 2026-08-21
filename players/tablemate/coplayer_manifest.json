@@ -1,0 +1,8 @@
+{
+  "author": "aaron@softmax.com",
+  "name": "tablemate",
+  "image_uri": "public.ecr.aws/s3j4p9s7/aaron/players/tablemate:latest",
+  "binary": "/bin/tablemate",
+  "description": "Warm host gnome who fills the table and makes everyone feel welcome.",
+  "games": ["heartleaf"]
+}

@@ -38,6 +38,9 @@ const
   ## clock lines plus 50-120 own chats plus whatever is overheard, so 600
   ## is rarely reached; when it is, whole oldest days are dropped.
   ChatHistoryLimit = 600
+  ## Recent lines compared for near-duplicate chat suppression.
+  RecentChatLines = 20
+  ChatSimilarityThreshold = 0.8
   ## Food bands for interrupt detection only: crossing a band re-asks the
   ## LLM because "how much I carry" changed enough to matter.
   LowFoodBand = 2
@@ -232,6 +235,10 @@ type
     ## Chat lines said today, newest last, for the state report and the
     ## repeated-line guard.
     saidToday: seq[string]
+    ## Normalized chat lines said during the whole game, newest last.
+    saidGame: seq[string]
+    chatSentCount: int
+    chatSuppressedCount: int
     llmWaiting: bool
     llmTag: string
     llmSerial: int
@@ -670,6 +677,11 @@ proc clockText(bot: Bot): string =
 proc log(bot: Bot, text: string) =
   ## Writes one bot activity log line.
   echo bot.logName(), ": ", text, " (", bot.clockText(), ")"
+
+proc logChatSummary(bot: Bot) =
+  ## Logs chat sends and duplicate suppressions for the whole game.
+  bot.log("chat summary: said=" & $bot.chatSentCount & " suppressed=" &
+    $bot.chatSuppressedCount)
 
 proc visiblePlayerName(bot: Bot, playerIndex: int): string =
   ## Returns the visible name for one player index.
@@ -2982,6 +2994,49 @@ proc mayAskLlm(bot: Bot): bool =
   ## never chats).
   bot.llmPacer.canRequest(epochTime())
 
+proc normalizedChatLine(message: string): string =
+  ## Normalizes chat for whole-game duplicate detection.
+  var pendingWhitespace = false
+  for ch in message.toLowerAscii:
+    if (ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9'):
+      if pendingWhitespace and result.len > 0:
+        result.add(' ')
+      result.add(ch)
+      pendingWhitespace = false
+    elif ch in {' ', '\t', '\r', '\n'}:
+      pendingWhitespace = true
+
+proc chatTokenSet(message: string): HashSet[string] =
+  ## Splits a normalized chat line into unique word tokens.
+  result = initHashSet[string]()
+  for token in message.splitWhitespace:
+    result.incl(token)
+
+proc chatLinesHighlySimilar(left, right: string): bool =
+  ## Returns true when two chat lines have at least 80% token overlap.
+  let leftTokens = chatTokenSet(left)
+  let rightTokens = chatTokenSet(right)
+  if leftTokens.len == 0 or rightTokens.len == 0:
+    return false
+  var intersection = 0
+  for token in leftTokens:
+    if token in rightTokens:
+      inc intersection
+  let unionSize = leftTokens.len + rightTokens.len - intersection
+  float(intersection) / float(unionSize) >= ChatSimilarityThreshold
+
+proc duplicateChatReason(bot: Bot, normalized: string): string =
+  ## Returns why a normalized chat line should be suppressed, if any.
+  if normalized.len == 0:
+    return
+  for prior in bot.saidGame:
+    if prior == normalized:
+      return "already said in game"
+  let start = max(0, bot.saidGame.len - RecentChatLines)
+  for i in start ..< bot.saidGame.len:
+    if chatLinesHighlySimilar(normalized, bot.saidGame[i]):
+      return "similar to a recent line"
+
 proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
   ## Sends the chat text chosen by the current LLM decision.
   if not bot.hasDecision or bot.decisionChatSent:
@@ -2994,16 +3049,19 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
   if bot.decision.targetName.len > 0 and
       not bot.visiblePlayerNear(bot.decision.targetName):
     return
-  ## Saying the very same line twice in a day reads as a scripted bot;
-  ## the soul forbids it and the state report shows today's lines, but
-  ## if the model still repeats itself the line is dropped, not sent.
-  if bot.decision.message in bot.saidToday:
+  let normalized = normalizedChatLine(bot.decision.message)
+  let duplicateReason = bot.duplicateChatReason(normalized)
+  if duplicateReason.len > 0:
     bot.decisionChatSent = true
-    bot.log("chat suppressed, already said today: " & bot.decision.message)
+    inc bot.chatSuppressedCount
+    bot.log("chat suppressed, " & duplicateReason & ": " &
+      bot.decision.message)
     return
   ws.send(blobFromChat(bot.decision.message), BinaryMessage)
   bot.recordOwnChat(bot.decision.message)
   bot.saidToday.add(bot.decision.message)
+  bot.saidGame.add(normalized)
+  inc bot.chatSentCount
   bot.decisionChatSent = true
   if bot.decision.targetName.len > 0:
     bot.greetedToday.incl(bot.decision.targetName)
@@ -3328,6 +3386,7 @@ proc runBot(
     requireBedrockConfig()
   except TalkingVillagerError as e:
     echo bot.name, " fatal: ", e.msg
+    bot.logChatSummary()
     quit(1)
   ## Hosted runs (exitOnDisconnect) keep reconnecting through mid-game
   ## drops and only exit once the server has been unreachable for
@@ -3351,6 +3410,7 @@ proc runBot(
           bot.lastMask = nextMask
     except TalkingVillagerError as e:
       echo bot.name, " fatal: ", e.msg
+      bot.logChatSummary()
       quit(1)
     except CatchableError as e:
       echo bot.name, " reconnecting: ", e.msg
@@ -3362,6 +3422,7 @@ proc runBot(
             "s, exiting"
           break
       sleep(ReconnectDelayMs)
+  bot.logChatSummary()
 
 proc talkingVillagerMain*(defaultName = DefaultName, soul: string) =
   ## Parses bot CLI options and runs one talking Villager bot.
