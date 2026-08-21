@@ -95,15 +95,16 @@ proc noteTransientError*(
   ## quota uses the long hard-stop tier, and a Retry-After from the
   ## endpoint (seconds) is honored when longer.
   inc pacer.consecutiveFailures
-  if dailyQuota:
-    ## A daily quota rejection is a long hard stop, not a quick retry.
-    pacer.backoffSeconds = LlmDailyBackoffMaxSeconds
-  else:
-    pacer.backoffSeconds =
-      if pacer.backoffSeconds < LlmBackoffMinSeconds:
-        LlmBackoffMinSeconds
-      else:
-        min(pacer.backoffSeconds * 2.0, LlmBackoffMaxSeconds)
+  let
+    minSeconds =
+      if dailyQuota: LlmDailyBackoffMinSeconds else: LlmBackoffMinSeconds
+    maxSeconds =
+      if dailyQuota: LlmDailyBackoffMaxSeconds else: LlmBackoffMaxSeconds
+  pacer.backoffSeconds =
+    if pacer.backoffSeconds < minSeconds:
+      minSeconds
+    else:
+      min(pacer.backoffSeconds * 2.0, maxSeconds)
   let jitter = pacer.backoffSeconds * LlmBackoffJitter * pacer.rng.rand(1.0)
   result = max(pacer.backoffSeconds + jitter, retryAfter)
   pacer.blockedUntil = max(pacer.blockedUntil, now + result)
