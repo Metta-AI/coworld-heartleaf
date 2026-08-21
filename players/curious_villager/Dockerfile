@@ -35,22 +35,21 @@ RUN nimby sync nimby.lock -g
 ARG NimFlags="-d:release -d:useMalloc --opt:speed --stackTrace:on"
 RUN nim c \
   $NimFlags \
-  --nimcache:/tmp/heartleaf-curious_villager-nimcache \
-  --out:curious_villager \
-  players/curious_villager/curious_villager.nim
+  --nimcache:/tmp/heartleaf-soul_player-nimcache \
+  --out:soul_player \
+  players/soul_player/soul_player.nim
 
-# Run Docker.
+# Run Docker. The player only uploads its soul file and keeps the socket
+# alive; the game plays the gnome.
 FROM debian:bookworm-slim
 
 RUN apt-get update && \
-  apt-get install -y --no-install-recommends \
-    ca-certificates \
-    libcurl4 \
-    libssl3 && \
+  apt-get install -y --no-install-recommends ca-certificates && \
   rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/heartleaf
-COPY --from=build /workspace/heartleaf/curious_villager /bin/curious_villager
-COPY --from=build /workspace/heartleaf/data ./data
+COPY --from=build /workspace/heartleaf/soul_player /bin/soul_player
+COPY --from=build /workspace/heartleaf/players/curious_villager/soul.md /soul.md
+ENV HEARTLEAF_SOUL_PATH=/soul.md
 
-CMD ["/bin/curious_villager"]
+CMD ["/bin/soul_player"]

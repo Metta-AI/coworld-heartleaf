@@ -1,6 +1,9 @@
-import players/talking_villager/talking_villager
+## The fatherly villager: the soul_player uploader with this persona's
+## soul.md baked in.
+
+import players/soul_player/soul_player
 
 const SoulMarkdown = staticRead("soul.md")
 
 when isMainModule:
-  talkingVillagerMain("fatherly_villager", SoulMarkdown)
+  soulPlayerMain(SoulMarkdown)

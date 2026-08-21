@@ -53,6 +53,20 @@ host's served food is removed. Visitors keep their own inventory.
 Hosts gain the food-times-visitors score above, plus whatever they ate.
 Guests gain only their eating score.
 
+## Souls And Brains
+
+Every gnome is played by the game from its player's soul file. One soul per
+seat; the first line names the model, the rest is the gnome's character.
+The game builds the gnome's view of the village, asks the model, and
+carries out the reply. With tokens configured the village waits for every
+seat's soul (up to `soulTimeoutSeconds`) before day 1 begins; a seat that
+never sends one is reported as a player failure and gets no gnome. A
+player that disconnects after its soul was accepted keeps playing.
+
+Model calls for different gnomes overlap. The clock stops only while every
+gnome is waiting on the model with nothing left to do, and a failed call is
+retried; no gnome is ever penalised for a slow or failed model.
+
 ## End Of Day
 
 At 10:00 PM, every gnome returns to their own house. Each gnome sees

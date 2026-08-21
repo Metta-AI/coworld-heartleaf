@@ -10,7 +10,7 @@
     "replay_viewer": {
       "bundle": "build/static-replay-viewer"
     },
-    "description": "A cozy BitWorld garden dinner game where players grow food, collect vegetables, and gather in the evening.",
+    "description": "A cozy BitWorld garden dinner game where players grow food, collect vegetables, and gather in the evening. Every gnome is played by the game itself from the soul file its player uploads.",
     "owner": "treeform@softmax.com",
     "runnable": {
       "type": "game",
@@ -18,7 +18,10 @@
       "run": [
         "/bin/heartleaf"
       ],
-      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master"
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master",
+      "env": {
+        "HEARTLEAF_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
+      }
     },
     "config_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -81,6 +84,18 @@
           "minimum": 30,
           "maximum": 600,
           "default": 180
+        },
+        "soulTimeoutSeconds": {
+          "description": "Seconds the village waits after start-up for every seat's soul file before day 1 begins. A seat still missing its soul at the deadline is reported as a player failure.",
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 600,
+          "default": 150
+        },
+        "soulConnectionRequired": {
+          "description": "When true a seat whose socket drops after its soul was accepted is reported as a player failure. Off by default: the game keeps playing the gnome.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -147,7 +162,7 @@
       },
       "player": {
         "type": "uri",
-        "value": "https://github.com/Metta-AI/bitworld/blob/master/docs/sprite_v1.md"
+        "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/docs/soul_files.md"
       }
     },
     "docs": {
@@ -156,6 +171,22 @@
         "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/README.md"
       },
       "pages": [
+        {
+          "id": "soul_files.md",
+          "title": "soul_files.md",
+          "content": {
+            "type": "uri",
+            "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/docs/soul_files.md"
+          }
+        },
+        {
+          "id": "models.md",
+          "title": "models.md",
+          "content": {
+            "type": "uri",
+            "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/docs/models.md"
+          }
+        },
         {
           "id": "rules.md",
           "title": "rules.md",
@@ -180,56 +211,44 @@
       "id": "shy_villager",
       "name": "Shy Villager",
       "type": "player",
-      "description": "Shy LLM-guided Heartleaf gnome that gathers quietly, speaks softly, and honors party invitations.",
+      "description": "Shy Heartleaf gnome soul that gathers quietly, speaks softly, and honors party invitations.",
       "image": "{{SHY_VILLAGER_IMAGE}}",
       "run": [
-        "/bin/shy_villager"
+        "/bin/soul_player"
       ],
-      "env": {
-        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
-      },
       "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/players/shy_villager"
     },
     {
       "id": "chatty_villager",
       "name": "Chatty Villager",
       "type": "player",
-      "description": "Chatty LLM-guided Heartleaf gnome that greets everyone, talks constantly, and spreads party invitations.",
+      "description": "Chatty Heartleaf gnome soul that greets everyone, talks constantly, and spreads party invitations.",
       "image": "{{CHATTY_VILLAGER_IMAGE}}",
       "run": [
-        "/bin/chatty_villager"
+        "/bin/soul_player"
       ],
-      "env": {
-        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
-      },
       "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/players/chatty_villager"
     },
     {
       "id": "friendly_villager",
       "name": "Friendly Villager",
       "type": "player",
-      "description": "Friendly LLM-guided Heartleaf gnome that welcomes everyone, shares food, and hosts warm dinners.",
+      "description": "Friendly Heartleaf gnome soul that welcomes everyone, shares food, and hosts warm dinners.",
       "image": "{{FRIENDLY_VILLAGER_IMAGE}}",
       "run": [
-        "/bin/friendly_villager"
+        "/bin/soul_player"
       ],
-      "env": {
-        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
-      },
       "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/players/friendly_villager"
     },
     {
       "id": "fatherly_villager",
       "name": "Fatherly Villager",
       "type": "player",
-      "description": "Fatherly LLM-guided Heartleaf gnome that checks on others, shares food, and makes sure nobody dines alone.",
+      "description": "Fatherly Heartleaf gnome soul that checks on others, shares food, and makes sure nobody dines alone.",
       "image": "{{FATHERLY_VILLAGER_IMAGE}}",
       "run": [
-        "/bin/fatherly_villager"
+        "/bin/soul_player"
       ],
-      "env": {
-        "TALKING_VILLAGER_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
-      },
       "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/players/fatherly_villager"
     }
   ],
@@ -260,9 +279,9 @@
       "name": "League",
       "game_config": {
         "seed": 4731713,
-        "maxTicks": 23760,
+        "maxTicks": 31920,
         "maxGames": 1,
-        "daySeconds": 100,
+        "daySeconds": 180,
         "players": [
           {
             "name": "Villager 1"
@@ -293,7 +312,7 @@
           }
         ]
       },
-      "description": "Nine compressed Heartleaf days (100s each) so every gnome gets a hosting turn, used for hosted league rounds. Seed 4731713 is unpinned: each episode draws a fresh village RNG."
+      "description": "Seven Heartleaf days of three minutes each (21 minutes of play) for hosted league rounds. Seed 4731713 is unpinned: each episode draws a fresh village RNG."
     },
     {
       "id": "freeplay",
@@ -352,5 +371,6 @@
       }
     ]
   },
-  "players_per_user": 9
+  "players_per_user": 9,
+  "episode_timeout_minutes": 60
 }

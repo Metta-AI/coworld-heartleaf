@@ -1,6 +1,9 @@
-import players/talking_villager/talking_villager
+## The shy villager: the soul_player uploader with this persona's
+## soul.md baked in.
+
+import players/soul_player/soul_player
 
 const SoulMarkdown = staticRead("soul.md")
 
 when isMainModule:
-  talkingVillagerMain("shy_villager", SoulMarkdown)
+  soulPlayerMain(SoulMarkdown)

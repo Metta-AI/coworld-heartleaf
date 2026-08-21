@@ -2,7 +2,9 @@
   "author": "treeform@softmax.com",
   "name": "shy_villager",
   "image_uri": "public.ecr.aws/s3j4p9s7/treeform/players/shy-villager:latest",
-  "binary": "/bin/shy_villager",
-  "description": "Shy LLM-guided Heartleaf gnome that gathers quietly, speaks softly, and honors party invitations.",
-  "games": ["heartleaf"]
+  "binary": "/bin/soul_player",
+  "description": "Shy Heartleaf gnome soul that gathers quietly, speaks softly, and honors party invitations.",
+  "games": [
+    "heartleaf"
+  ]
 }

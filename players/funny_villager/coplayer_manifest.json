@@ -2,7 +2,9 @@
   "author": "treeform@softmax.com",
   "name": "funny_villager",
   "image_uri": "public.ecr.aws/s3j4p9s7/treeform/players/funny-villager:latest",
-  "binary": "/bin/funny_villager",
-  "description": "Funny LLM-guided Heartleaf gnome that tells vegetable puns, one-liners, and dinner jokes.",
-  "games": ["heartleaf"]
+  "binary": "/bin/soul_player",
+  "description": "Funny Heartleaf gnome soul that tells vegetable puns, one-liners, and dinner jokes.",
+  "games": [
+    "heartleaf"
+  ]
 }

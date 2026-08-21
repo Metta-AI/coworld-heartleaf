@@ -2,7 +2,9 @@
   "author": "treeform@softmax.com",
   "name": "friendly_villager",
   "image_uri": "public.ecr.aws/s3j4p9s7/treeform/players/friendly-villager:latest",
-  "binary": "/bin/friendly_villager",
-  "description": "Friendly LLM-guided Heartleaf gnome that welcomes everyone, shares food, and hosts warm dinners.",
-  "games": ["heartleaf"]
+  "binary": "/bin/soul_player",
+  "description": "Friendly Heartleaf gnome soul that welcomes everyone, shares food, and hosts warm dinners.",
+  "games": [
+    "heartleaf"
+  ]
 }
