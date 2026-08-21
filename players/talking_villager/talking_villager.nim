@@ -53,6 +53,9 @@ const
   ## records that it missed dinner.
   DinnerMissedGraceMinutes = 5
   FallbackHostFailureNightsBeforeGuest = 3
+  FallbackInvitationCap = 5
+  FallbackInvitationIntervalMinutes = 180
+  FallbackInvitationStartMinutes = 8 * 60
   ## Walk-time estimates for the state report: top speed in pixels per
   ## tick from the sim (MaxSpeed 704 / MotionScale 256), a fudge for
   ## acceleration, corners, and doors, and ticks per game minute from
@@ -231,6 +234,12 @@ type
     fallbackGuestAvoidTarget: int
     fallbackHostEvidence: bool
     fallbackDinnerRecordedDay: int
+    fallbackInvitationCount: int
+    fallbackInvitationAttempts: int
+    fallbackInvitationNamed: HashSet[string]
+    fallbackInvitationLastMinutes: int
+    fallbackInvitationTemplate: string
+    fallbackInvitationPending: bool
     ## Measured game-clock rate so walk times can be given in game
     ## minutes: anchor tick and minute of the day, and the estimate.
     clockAnchorTick: int
@@ -769,9 +778,15 @@ whether the decision's message was sent or suppressed. Attempt records
 contain status, error class, latency, chosen wait, and usability fields.
 Fallback dinner records contain the selected mode, rule, target house,
 reason code, pantry item count, observed visitor count, 6pm presence,
-guest count, and realized outcome. `observedVisitors` is the number
-observed at the bot's own house before dinner, including when the bot
-went elsewhere; `guestCount` is the dinner label's guest count.
+guest count, invitation counts, named-villager count, and realized
+outcome. `observedVisitors` is the number of visitors observed at the
+bot's own house before dinner, including when the bot went elsewhere;
+`guestCount` is the dinner label's guest count. Fallback invitation
+decisions include the template identity and rendered message text so
+identical-message ratios can be computed from the artifact. Invitations
+use live pantry food names, visible villager names, the bot's own house,
+and the current game time; they are limited to five attempts per day,
+one every three game hours, before dinner.
 """
   createZipArchive(entries)
 
@@ -1482,6 +1497,12 @@ proc resetGardenPlan(bot: Bot) =
   bot.fallbackDinnerObservedVisitors = 0
   bot.fallbackDinnerGuestCount = 0
   bot.fallbackDinnerRecordedDay = 0
+  bot.fallbackInvitationCount = 0
+  bot.fallbackInvitationAttempts = 0
+  bot.fallbackInvitationNamed.clear()
+  bot.fallbackInvitationLastMinutes = -1
+  bot.fallbackInvitationTemplate = ""
+  bot.fallbackInvitationPending = false
   bot.leaveTimeNoted = false
   bot.saidToday.setLen(0)
   bot.lastClockHour = -1
@@ -2088,6 +2109,8 @@ proc initBot(name: string, slot: int, soul: string): Bot =
   result.fallbackGuestWorkedTarget = UnknownHouse
   result.fallbackGuestAvoidTarget = UnknownHouse
   result.fallbackHostEvidence = false
+  result.fallbackInvitationNamed = initHashSet[string]()
+  result.fallbackInvitationLastMinutes = -1
   result.clockAnchorMinutes = -1
   result.ticksPerMinute = DefaultTicksPerMinute
 
@@ -2848,10 +2871,103 @@ proc fallbackGuestHouse(bot: Bot): int =
   chosen.house
 
 proc fallbackGuestEligible(bot: Bot): bool =
-  ## Returns whether the fallback should use a guest house.
-  not (bot.fallbackPreferredMode == "host-at-home" and
-    bot.fallbackHostEvidence and
-    bot.fallbackHostEmptyNights < FallbackHostFailureNightsBeforeGuest)
+  ## Returns whether direct evidence justifies giving a rival the table.
+  ## A single empty host night is never enough, and the guest branch only
+  ## opens after a house has already served this bot successfully.
+  bot.fallbackPreferredMode == "guest-at-house" and
+    bot.fallbackHostEmptyNights >= FallbackHostFailureNightsBeforeGuest and
+    bot.fallbackGuestWorkedTarget >= 0
+
+proc fallbackInvitationTarget(bot: Bot): string =
+  ## Chooses a currently visible villager, preferring one not named today.
+  var candidates: seq[string]
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+      continue
+    let playerIndex = objectId - PlayerObjectBase
+    if playerIndex == bot.selfIndex:
+      continue
+    let name = bot.visiblePlayerName(playerIndex)
+    if name.len > 0 and name != bot.playerName and name notin candidates:
+      candidates.add(name)
+  candidates.sort(proc(a, b: string): int = cmp(a, b))
+  if candidates.len == 0:
+    return
+  for name in candidates:
+    if name notin bot.fallbackInvitationNamed:
+      return name
+  candidates[bot.fallbackInvitationAttempts mod candidates.len]
+
+proc fallbackInvitationTemplateName(index: int): string =
+  "pantry_invitation_" & $(index + 1)
+
+proc fallbackInvitationMessage(
+  bot: Bot,
+  targetName: string,
+  templateIndex: int
+): string =
+  let
+    houseOwner =
+      if bot.playerName.len > 0:
+        bot.playerName
+      else:
+        bot.homeIndex.playerNameForHouse()
+    house = houseOwner & "'s house"
+    time = bot.minutes.clockName()
+    food = bot.collectedFoodsText()
+  case templateIndex mod FallbackInvitationCap:
+  of 0:
+    targetName & ", I'm hosting dinner at " & house & " at " & time &
+      " with " & food & "."
+  of 1:
+    "I'm setting the table at " & house & " for " & time & ", " &
+      targetName & "; I have " & food & " ready."
+  of 2:
+    targetName & ", come to " & house & " for dinner at " & time &
+      "; tonight I can share " & food & "."
+  of 3:
+    "Dinner is at " & time & " in " & house & ", " & targetName &
+      "; my pantry has " & food & "."
+  else:
+    targetName & ", I found " & food & " and will host at " & house &
+      " at " & time & "."
+
+proc fallbackInvitationAvailable(bot: Bot): bool =
+  ## Returns whether a grounded fallback invitation may be started now.
+  if bot.minutes < FallbackInvitationStartMinutes or
+      bot.minutes >= DinnerMinutes or
+      bot.fallbackInvitationAttempts >= FallbackInvitationCap or
+      bot.inventoryTotal() <= 0:
+    return false
+  if bot.fallbackInvitationLastMinutes >= 0 and
+      bot.minutes - bot.fallbackInvitationLastMinutes <
+        FallbackInvitationIntervalMinutes:
+    return false
+  bot.fallbackInvitationTarget().len > 0
+
+proc fallbackInvitationDecision(bot: Bot): LlmDecision =
+  ## Creates one state-grounded, rate-limited fallback invitation.
+  let target = bot.fallbackInvitationTarget()
+  if target.len == 0:
+    return LlmDecision(valid: false)
+  bot.fallbackInvitationTemplate =
+    fallbackInvitationTemplateName(bot.fallbackInvitationAttempts)
+  bot.fallbackInvitationLastMinutes = bot.minutes
+  inc bot.fallbackInvitationAttempts
+  bot.fallbackInvitationNamed.incl(target)
+  bot.fallbackInvitationPending = true
+  LlmDecision(
+    valid: true,
+    action: LlmSayToPerson,
+    targetName: target,
+    message: bot.fallbackInvitationMessage(
+      target,
+      bot.fallbackInvitationAttempts - 1
+    ),
+    reason: "fallback invitation"
+  )
 
 proc dueCommitment(bot: Bot): LlmDecision =
   ## Returns the decision that carries out what the model itself already
@@ -2915,6 +3031,8 @@ proc fallbackDecision(bot: Bot): LlmDecision =
         untilMinutes: DayEndMinutes,
         reason: "fallback: staying inside own house after dinner"
       )
+  if bot.minutes < DinnerMinutes and bot.fallbackInvitationAvailable():
+    return bot.fallbackInvitationDecision()
   if bot.minutes < DinnerMinutes:
     if bot.fallbackDinnerMode.len == 0:
       let guestMode = bot.fallbackGuestEligible()
@@ -2949,15 +3067,20 @@ proc fallbackDecision(bot: Bot): LlmDecision =
         bot.fallbackDinnerMode = "host-at-home"
         bot.fallbackDinnerTarget = bot.homeIndex
         bot.fallbackDinnerReasonCode =
-          if bot.fallbackHostEvidence:
+          if bot.fallbackPreferredMode.len == 0:
+            "host_default"
+          elif bot.fallbackHostEvidence:
             "host_observed_visitor"
           else:
-            "host_served_before"
+            "host_waiting_for_guests"
         bot.fallbackDinnerReason =
-          if bot.fallbackDinnerReasonCode == "host_observed_visitor":
+          case bot.fallbackDinnerReasonCode
+          of "host_default":
+            "adaptive fallback: first dinner hosts at home"
+          of "host_observed_visitor":
             "adaptive fallback: observed a visitor at home"
           else:
-            "adaptive fallback: a hosted dinner previously served"
+            "adaptive fallback: retaining host mode until guest evidence"
         bot.fallbackDinnerSignal = "own home"
         bot.fallbackDinnerRunnerUp = "none"
     let targetHouse =
@@ -3070,6 +3193,18 @@ proc recordArtifactDecision(
     "fallbackDinnerRunnerUp": bot.fallbackDinnerRunnerUp,
     "fallbackDinnerPantryItems": bot.fallbackDinnerPantryItems,
     "fallbackDinnerObservedVisitors": bot.fallbackDinnerObservedVisitors,
+    "fallbackInvitationTemplate":
+      if not fromLlm and decision.action == LlmSayToPerson and
+          decision.reason == "fallback invitation":
+        bot.fallbackInvitationTemplate
+      else:
+        "",
+    "fallbackInvitationMessage":
+      if not fromLlm and decision.action == LlmSayToPerson and
+          decision.reason == "fallback invitation":
+        decision.message
+      else:
+        "",
     "chatSent": false,
     "chatSuppressed": false,
     "chatSuppressionReason": "",
@@ -3136,6 +3271,8 @@ proc recordArtifactFallbackDinner(
     "pantryItems": bot.fallbackDinnerPantryItems,
     "observedVisitors": bot.fallbackDinnerObservedVisitors,
     "guestCount": bot.fallbackDinnerGuestCount,
+    "invitationsSent": bot.fallbackInvitationCount,
+    "distinctVillagersNamed": bot.fallbackInvitationNamed.len,
     "insideAt6pm": insideAt6,
     "served": served,
     "outcome": outcome
@@ -3154,6 +3291,14 @@ proc updateArtifactChat(
   record["chatSent"] = %sent
   record["chatSuppressed"] = %suppressed
   record["chatSuppressionReason"] = %suppressionReason
+
+proc updateArtifactInvitationMessage(bot: Bot, message: string) =
+  ## Stores the rendered fallback invitation for ratio analysis.
+  if bot.artifactDecisionIndex < 0:
+    return
+  let record = bot.artifactDecisions[bot.artifactDecisionIndex]
+  if record.hasKey("fallbackInvitationMessage"):
+    record["fallbackInvitationMessage"] = %message
 
 proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
   ## Stores one decision and updates the party commitment bookkeeping.
@@ -3194,6 +3339,9 @@ proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
   bot.decisionChatSignature = bot.visibleChatsSignature()
   bot.decisionCrowdSignature = bot.houseCrowdsSignature()
   bot.decisionVisibleNames = bot.visibleGnomeNames()
+  bot.fallbackInvitationPending =
+    not fromLlm and nextDecision.action == LlmSayToPerson and
+      nextDecision.reason == "fallback invitation"
   bot.interruptRequested = false
   if not keepPath:
     bot.path.setLen(0)
@@ -3649,6 +3797,8 @@ proc decisionInterrupted(bot: Bot): bool =
     return true
   if bot.interruptRequested:
     return true
+  if bot.llmUnavailable and bot.fallbackInvitationAvailable():
+    return true
   ## Waiting at a door is for meeting people: a gnome who walks into
   ## view is a reason to ask the model again right now.
   if bot.decision.action in {LlmStandAtHouseGarden, LlmFindHouse}:
@@ -3745,6 +3895,24 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
     return
   if bot.decision.action != LlmSayToPerson:
     return
+  if bot.fallbackInvitationPending:
+    if bot.minutes >= DinnerMinutes or
+        bot.minutes < FallbackInvitationStartMinutes or
+        bot.inventoryTotal() <= 0 or
+        bot.visiblePlayerIndexByName(bot.decision.targetName) < 0:
+      bot.decisionChatSent = true
+      bot.fallbackInvitationPending = false
+      bot.updateArtifactChat(
+        false,
+        true,
+        "fallback invitation state changed before send"
+      )
+      return
+    bot.decision.message = bot.fallbackInvitationMessage(
+      bot.decision.targetName,
+      bot.fallbackInvitationAttempts - 1
+    )
+    bot.updateArtifactInvitationMessage(bot.decision.message)
   if bot.decision.message.len == 0:
     bot.decisionChatSent = true
     return
@@ -3758,6 +3926,7 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
   )
   if duplicateReason.len > 0:
     bot.decisionChatSent = true
+    bot.fallbackInvitationPending = false
     inc bot.chatSuppressedCount
     bot.updateArtifactChat(false, true, duplicateReason)
     bot.log("chat suppressed, " & duplicateReason & ": " &
@@ -3771,6 +3940,9 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
     targetName: bot.decision.targetName
   ))
   inc bot.chatSentCount
+  if bot.fallbackInvitationPending:
+    inc bot.fallbackInvitationCount
+    bot.fallbackInvitationPending = false
   bot.decisionChatSent = true
   bot.updateArtifactChat(true, false)
   if bot.decision.targetName.len > 0:
