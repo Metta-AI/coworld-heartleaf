@@ -12,20 +12,13 @@ const
   ## game ticks would under-wait whenever a sim runs faster than 24 Hz):
   ## a floor between two requests, a rolling per-minute budget, and an
   ## exponential backoff after a throttled or otherwise transient failure
-  ## (jittered so nine bots do not retry in lockstep). A Retry-After
-  ## header from the endpoint always wins over the computed wait. Backoff
-  ## hurts play (the fallback never chats), which is why the cap is one
-  ## game day, but re-poking a spent quota every few seconds helps no one
-  ## and is exactly what got the account throttled. "Too many tokens per
-  ## day" keeps its own tier so it can be tuned apart, but it uses the
-  ## same numbers: measured on 2026-08-18 those replies cleared within a
-  ## minute or two, and a 120 s minimum cost each bot more than a game
-  ## day of scripted play per hit while the load it saved was nil next to
-  ## the healthy 10 requests a minute.
+  ## (jittered so nine bots do not retry in lockstep). Cheap rejections use
+  ## a short tier; a spent daily quota keeps the longer tier. A Retry-After
+  ## header from the endpoint always wins over the computed wait.
   LlmMinRequestSeconds* = 4.0
   LlmRequestsPerMinute* = 10
-  LlmBackoffMinSeconds* = 8.0
-  LlmBackoffMaxSeconds* = 100.0
+  LlmBackoffMinSeconds* = 4.0
+  LlmBackoffMaxSeconds* = 16.0
   LlmDailyBackoffMinSeconds* = 8.0
   LlmDailyBackoffMaxSeconds* = 100.0
   LlmBackoffJitter = 0.5
@@ -78,7 +71,7 @@ proc canRequest*(pacer: LlmPacer, now: float): bool =
   ## budget, and no backoff is in force.
   now - pacer.lastRequestTime() >= LlmMinRequestSeconds and
     pacer.requestsInLastMinute(now) < LlmRequestsPerMinute and
-    now >= pacer.blockedUntil
+    now + 1.0e-6 >= pacer.blockedUntil
 
 proc noteRequest*(pacer: var LlmPacer, now: float) =
   ## Records that a request started now.
@@ -99,8 +92,8 @@ proc noteTransientError*(
 ): float =
   ## Doubles the backoff after a throttled or transient failure and
   ## returns how many seconds the pacer will now wait. A spent daily
-  ## quota uses its own (currently identical) tier, and a Retry-After
-  ## from the endpoint (seconds) is honored when longer.
+  ## quota uses the longer tier, and a Retry-After from the endpoint
+  ## (seconds) is honored when longer.
   inc pacer.consecutiveFailures
   let
     minSeconds =

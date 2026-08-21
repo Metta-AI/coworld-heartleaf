@@ -214,6 +214,11 @@ type
     dinnerLookingBefore: string
     dinnerHouse: int
     dinnerRecorded: bool
+    fallbackDinnerMode: string
+    fallbackDinnerReason: string
+    fallbackDinnerTarget: int
+    fallbackHostNoGuests: bool
+    fallbackDinnerRecordedDay: int
     ## Measured game-clock rate so walk times can be given in game
     ## minutes: anchor tick and minute of the day, and the estimate.
     clockAnchorTick: int
@@ -261,6 +266,8 @@ type
     llmRequestStartedAt: float
     llmLastRequestId: string
     llmLastLatencyMs: int
+    llmAttemptCount: int
+    llmAttemptStartedAt: float
     llmUnavailable: bool
     lastLlmError: string
     llmPacer: LlmPacer
@@ -382,8 +389,22 @@ proc permanentBedrockError(answer: BedrockResult): bool =
       message.contains("accessdenied") or
       message.contains("unauthorized") or
       message.contains("forbidden") or
-      message.contains("not authorized"):
+    message.contains("not authorized"):
     return true
+
+proc llmErrorClass(answer: BedrockResult): string =
+  ## Classifies one failed LLM attempt for artifact telemetry.
+  if answer.dailyQuotaError():
+    return "daily quota"
+  let message = answer.error.toLowerAscii()
+  if answer.statusCode == 429 or message.contains("throttl") or
+      message.contains("rate limit") or message.contains("rate exceeded"):
+    return "throttle"
+  if answer.statusCode >= 500 or message.contains("unavailable") or
+      message.contains("timeout") or message.contains("couldn't connect") or
+      message.contains("could not connect"):
+    return "unavailable"
+  "unavailable"
 
 proc bedrockHost(): string =
   ## Returns the Bedrock Runtime host for the selected Region.
@@ -727,11 +748,15 @@ proc artifactArchive(bot: Bot): string =
   entries["README.md"] = """
 # Talking Villager player artifact
 
-`decisions.jsonl` contains one record per decision. `timestamp`,
-`day`, `gameClockMinutes`, `botName`, `slot`, and `decisionSequence`
-join decisions to a game trace when an episode identifier is available
-outside the player runtime. `source` is `llm` or `fallback`; chat fields
-describe whether the decision's message was sent or suppressed.
+`decisions.jsonl` contains decision records plus `llm_attempt` and
+`fallback_dinner` mechanism records. `timestamp`, `day`,
+`gameClockMinutes`, `botName`, `slot`, and `decisionSequence` join
+decisions to a game trace when an episode identifier is available outside
+the player runtime. `source` is `llm` or `fallback`; chat fields describe
+whether the decision's message was sent or suppressed. Attempt records
+contain status, error class, latency, chosen wait, and usability fields.
+Fallback dinner records contain the selected mode, rule, target house,
+6pm presence, and outcome.
 """
   createZipArchive(entries)
 
@@ -1431,6 +1456,10 @@ proc resetGardenPlan(bot: Bot) =
   bot.dinnerLookingBefore = ""
   bot.dinnerHouse = UnknownHouse
   bot.dinnerRecorded = false
+  bot.fallbackDinnerMode = ""
+  bot.fallbackDinnerReason = ""
+  bot.fallbackDinnerTarget = UnknownHouse
+  bot.fallbackDinnerRecordedDay = 0
   bot.leaveTimeNoted = false
   bot.saidToday.setLen(0)
   bot.lastClockHour = -1
@@ -1829,6 +1858,12 @@ proc dinnerSummary(bot: Bot, label: string): string =
   if stillLooking.len > 0 and stillLooking != "none":
     result.add(" Still looking for: " & stillLooking & ".")
 
+proc recordArtifactFallbackDinner(
+  bot: Bot,
+  outcome: string,
+  insideAt6: bool
+)
+
 proc maybeRecordDinner(bot: Bot) =
   ## Remembers, until dinner, where the bot is and what it still wants,
   ## then records the dinner result once the dinner overlay shows, or that
@@ -1850,6 +1885,16 @@ proc maybeRecordDinner(bot: Bot) =
   if label.len > 0:
     bot.dinnerRecorded = true
     let summary = bot.dinnerSummary(label)
+    if bot.fallbackDinnerMode.len > 0:
+      let wasHost = label.dinnerLabelField("wasHost") == "true"
+      let guests = label.dinnerLabelField("guests").strip()
+      if bot.fallbackDinnerMode == "host-at-home":
+        bot.fallbackHostNoGuests =
+          summary.contains("nobody came") or (wasHost and guests.len == 0)
+      bot.recordArtifactFallbackDinner(
+        summary,
+        bot.dinnerHouse == bot.fallbackDinnerTarget
+      )
     bot.recordEvent(summary)
     bot.log("dinner " & label)
     return
@@ -1864,7 +1909,14 @@ proc maybeRecordDinner(bot: Bot) =
     else:
       "Dinner: you were at " & bot.dinnerHouse.playerNameForHouse() &
         "'s house at 6pm but no dinner was served there (the host was " &
-        "not inside)."
+      "not inside)."
+  if bot.fallbackDinnerMode.len > 0:
+    if bot.fallbackDinnerMode == "host-at-home":
+      bot.fallbackHostNoGuests = bot.dinnerHouse == bot.homeIndex
+    bot.recordArtifactFallbackDinner(
+      missed,
+      bot.dinnerHouse == bot.fallbackDinnerTarget
+    )
   bot.recordEvent(missed)
   bot.log("dinner missed: " & missed)
 
@@ -2625,6 +2677,36 @@ proc dinnerLeaveAt(bot: Bot, houseIndex: int): int =
     return -1
   DinnerMinutes - bot.walkMinutes(pixels) - LeaveMarginMinutes
 
+proc fallbackGuestHouse(bot: Bot): int =
+  ## Chooses a live, reachable other house for adaptive fallback dinner.
+  var preferred: seq[int]
+  var reachable: seq[tuple[house: int, pixels: int]]
+  for house in 0 ..< HouseCount:
+    if house == bot.homeIndex:
+      continue
+    let pixels = bot.walkPixelsToHouse(house)
+    if pixels < 0:
+      continue
+    reachable.add((house: house, pixels: pixels))
+    if bot.houseOwnerPresent(house):
+      preferred.add(house)
+  if preferred.len == 0:
+    reachable.sort(proc(a, b: tuple[house: int, pixels: int]): int =
+      if a.pixels == b.pixels:
+        cmp(a.house, b.house)
+      else:
+        cmp(a.pixels, b.pixels))
+    for item in reachable:
+      preferred.add(item.house)
+  if preferred.len == 0:
+    return UnknownHouse
+  let offset = (bot.slot + bot.dayIndex) mod preferred.len
+  for step in 0 ..< preferred.len:
+    let candidate = preferred[(offset + step) mod preferred.len]
+    if candidate != bot.fallbackDinnerTarget:
+      return candidate
+  preferred[offset]
+
 proc dueCommitment(bot: Bot): LlmDecision =
   ## Returns the decision that carries out what the model itself already
   ## committed to (commitParty in an earlier reply), once its time has
@@ -2674,6 +2756,11 @@ proc fallbackDecision(bot: Bot): LlmDecision =
       return bot.decision
     if bot.decision.action == LlmStayInside:
       return bot.decision
+    if bot.decision.action == LlmGoToParty:
+      let target = bot.decisionHouse(bot.decision)
+      if bot.minutes < DinnerMinutes or
+          (bot.screenKind == HomeMap and bot.currentHouse == target):
+        return bot.decision
     if bot.decision.action == LlmGoHome:
       return LlmDecision(
         valid: true,
@@ -2683,8 +2770,32 @@ proc fallbackDecision(bot: Bot): LlmDecision =
         reason: "fallback: staying inside own house after dinner"
       )
   if bot.minutes < DinnerMinutes:
-    let leaveAt = bot.dinnerLeaveAt(bot.homeIndex)
+    if bot.fallbackDinnerMode.len == 0 and bot.fallbackHostNoGuests:
+      bot.fallbackDinnerTarget = bot.fallbackGuestHouse()
+      if bot.fallbackDinnerTarget >= 0:
+        bot.fallbackDinnerMode = "guest-at-house"
+        bot.fallbackDinnerReason =
+          "adaptive fallback: prior home dinner had nobody come"
+    if bot.fallbackDinnerMode.len == 0:
+      bot.fallbackDinnerMode = "host-at-home"
+      bot.fallbackDinnerReason =
+        "adaptive fallback: first dinner hosts at home"
+      bot.fallbackDinnerTarget = bot.homeIndex
+    let targetHouse =
+      if bot.fallbackDinnerMode == "guest-at-house":
+        bot.fallbackDinnerTarget
+      else:
+        bot.homeIndex
+    let leaveAt = bot.dinnerLeaveAt(targetHouse)
     if leaveAt >= 0 and bot.minutes >= leaveAt:
+      if bot.fallbackDinnerMode == "guest-at-house":
+        return LlmDecision(
+          valid: true,
+          action: LlmGoToParty,
+          houseIndex: targetHouse,
+          commitParty: true,
+          reason: bot.fallbackDinnerReason
+        )
       return LlmDecision(
         valid: true,
         action: LlmGoHome,
@@ -2696,6 +2807,16 @@ proc fallbackDecision(bot: Bot): LlmDecision =
       action: LlmKeepGatheringPlants,
       houseIndex: UnknownHouse,
       reason: "fallback: gathering until dinner departure"
+    )
+  if bot.fallbackDinnerMode == "guest-at-house" and
+      bot.screenKind == HomeMap and
+      bot.currentHouse == bot.fallbackDinnerTarget:
+    return LlmDecision(
+      valid: true,
+      action: LlmStayInside,
+      houseIndex: bot.fallbackDinnerTarget,
+      untilMinutes: DayEndMinutes,
+      reason: bot.fallbackDinnerReason
     )
   if bot.screenKind == HomeMap and bot.currentHouse == bot.homeIndex:
     return LlmDecision(
@@ -2754,6 +2875,16 @@ proc recordArtifactDecision(
     "llmRequestId": bot.llmLastRequestId,
     "llmLatencyMs": bot.llmLastLatencyMs,
     "llmError": bot.lastLlmError,
+    "mechanism":
+      if fromLlm:
+        "llm_decision"
+      elif bot.fallbackDinnerMode.len > 0:
+        "adaptive_fallback_dinner"
+      else:
+        "fallback_dinner_safety",
+    "fallbackDinnerMode": bot.fallbackDinnerMode,
+    "fallbackDinnerReason": bot.fallbackDinnerReason,
+    "fallbackDinnerTargetHouse": bot.fallbackDinnerTarget,
     "chatSent": false,
     "chatSuppressed": false,
     "chatSuppressionReason": "",
@@ -2764,6 +2895,57 @@ proc recordArtifactDecision(
   }
   bot.artifactDecisions.add(record)
   bot.artifactDecisionIndex = bot.artifactDecisions.high
+
+proc recordArtifactAttempt(
+  bot: Bot,
+  statusCode: int,
+  errorClass: string,
+  latencyMs: int,
+  waitSeconds: float,
+  usableDecision: bool
+) =
+  ## Records one LLM attempt for availability analysis.
+  bot.artifactDecisions.add(%*{
+    "recordType": "llm_attempt",
+    "mechanism": "llm_backoff_telemetry",
+    "timestamp": now().utc().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+    "gameClockMinutes": bot.minutes,
+    "day": bot.dayNumber,
+    "botName": bot.playerName,
+    "slot": bot.slot,
+    "attemptNumber": bot.llmAttemptCount,
+    "httpStatus": statusCode,
+    "errorClass": errorClass,
+    "latencyMs": latencyMs,
+    "chosenWaitSeconds": waitSeconds,
+    "usableDecision": usableDecision,
+    "llmRequestId": bot.llmLastRequestId
+  })
+
+proc recordArtifactFallbackDinner(
+  bot: Bot,
+  outcome: string,
+  insideAt6: bool
+) =
+  ## Records one adaptive fallback dinner outcome.
+  if bot.fallbackDinnerMode.len == 0 or
+      bot.fallbackDinnerRecordedDay == bot.dayNumber:
+    return
+  bot.fallbackDinnerRecordedDay = bot.dayNumber
+  bot.artifactDecisions.add(%*{
+    "recordType": "fallback_dinner",
+    "mechanism": "adaptive_fallback_dinner",
+    "timestamp": now().utc().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+    "gameClockMinutes": bot.minutes,
+    "day": bot.dayNumber,
+    "botName": bot.playerName,
+    "slot": bot.slot,
+    "fallbackDinnerMode": bot.fallbackDinnerMode,
+    "fallbackDinnerReason": bot.fallbackDinnerReason,
+    "targetHouse": bot.fallbackDinnerTarget,
+    "insideAt6pm": insideAt6,
+    "outcome": outcome
+  })
 
 proc updateArtifactChat(
   bot: Bot,
@@ -2835,7 +3017,7 @@ proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
     " reason=" & nextDecision.reason
   )
 
-proc applyLlmReply(bot: Bot, reply: string) =
+proc applyLlmReply(bot: Bot, reply: string): bool =
   ## Parses and applies one LLM reply.
   let decision = reply.parseLlmDecision(bot.selfNames())
   if not decision.valid:
@@ -2846,14 +3028,16 @@ proc applyLlmReply(bot: Bot, reply: string) =
     bot.lastLlmError = ""
     bot.llmUnavailable = false
   bot.applyDecision(decision, fromLlm = decision.valid)
+  decision.valid
 
 proc startLlmDecision(bot: Bot): bool =
   ## Starts a Bedrock decision request or applies an immediate fallback.
   let mockReply = mockBedrockReply()
   if mockReply.len > 0:
-    bot.applyLlmReply(mockReply)
+    discard bot.applyLlmReply(mockReply)
     return false
   inc bot.llmSerial
+  inc bot.llmAttemptCount
   bot.llmTag = "decision-" & $bot.llmSerial
   bot.trimChatHistory()
   var messages = @[
@@ -2873,6 +3057,13 @@ proc startLlmDecision(bot: Bot): bool =
       bot.lastLlmError = e.msg
       bot.llmUnavailable = true
       let wait = bot.llmPacer.noteTransientError(epochTime())
+      bot.llmLastRequestId = bot.llmTag
+      bot.llmLastLatencyMs = 0
+      bot.recordArtifactAttempt(0, answer.llmErrorClass(), 0, wait, false)
+      bot.log("llm attempt=" & $bot.llmAttemptCount &
+        " status=0 class=" & answer.llmErrorClass() &
+        " latencyMs=0 wait=" & formatFloat(wait, ffDecimal, 3) &
+        " usable=false")
       bot.log("llm transient start error " & e.msg & ", backing off " &
         formatFloat(wait, ffDecimal, 1) & "s, using fallback")
       bot.applyDecision(bot.fallbackDecision())
@@ -2887,6 +3078,7 @@ proc startLlmDecision(bot: Bot): bool =
   let now = epochTime()
   bot.llmPacer.noteRequest(now)
   bot.llmRequestStartedAt = now
+  bot.llmAttemptStartedAt = now
   bot.llmLastRequestId = bot.llmTag
   bot.llmLastLatencyMs = 0
   bot.decisionStartedTick = bot.frameTick
@@ -2922,8 +3114,20 @@ proc pollLlmDecision(bot: Bot): bool =
     int((epochTime() - bot.llmRequestStartedAt) * 1000.0)
   if answer.ok:
     bot.llmPacer.noteSuccess()
+    let usable = bot.applyLlmReply(answer.reply)
+    bot.recordArtifactAttempt(
+      answer.statusCode,
+      (if usable: "none" else: "parse"),
+      bot.llmLastLatencyMs,
+      0.0,
+      usable
+    )
+    bot.log("llm attempt=" & $bot.llmAttemptCount &
+      " status=" & $answer.statusCode &
+      " class=" & (if usable: "none" else: "parse") &
+      " latencyMs=" & $bot.llmLastLatencyMs &
+      " wait=0 usable=" & $usable)
     bot.log("llm reply " & answer.tag & " " & answer.usage)
-    bot.applyLlmReply(answer.reply)
   else:
     bot.lastLlmError = answer.error
     bot.log("llm error status=" & $answer.statusCode & " " & answer.error)
@@ -2933,6 +3137,17 @@ proc pollLlmDecision(bot: Bot): bool =
       ## now on instead of treating this as a fatal request error.
       promptCacheEnabled = false
       bot.llmUnavailable = true
+      bot.recordArtifactAttempt(
+        answer.statusCode,
+        "unavailable",
+        bot.llmLastLatencyMs,
+        0.0,
+        false
+      )
+      bot.log("llm attempt=" & $bot.llmAttemptCount &
+        " status=" & $answer.statusCode &
+        " class=unavailable latencyMs=" & $bot.llmLastLatencyMs &
+        " wait=0 usable=false")
       bot.log("llm prompt caching rejected, disabled for this game")
       bot.applyDecision(bot.fallbackDecision())
       return true
@@ -2949,6 +3164,19 @@ proc pollLlmDecision(bot: Bot): bool =
       let wait = bot.llmPacer.noteTransientError(
         epochTime(), answer.retryAfter, daily
       )
+      bot.recordArtifactAttempt(
+        answer.statusCode,
+        answer.llmErrorClass(),
+        bot.llmLastLatencyMs,
+        wait,
+        false
+      )
+      bot.log("llm attempt=" & $bot.llmAttemptCount &
+        " status=" & $answer.statusCode &
+        " class=" & answer.llmErrorClass() &
+        " latencyMs=" & $bot.llmLastLatencyMs &
+        " wait=" & formatFloat(wait, ffDecimal, 3) &
+        " usable=false")
       bot.log(
         (if daily: "llm daily quota spent" else: "llm transient error") &
         ", failure " & $bot.llmPacer.consecutiveFailures() &
@@ -2962,6 +3190,18 @@ proc pollLlmDecision(bot: Bot): bool =
       )
     else:
       bot.llmUnavailable = true
+      bot.recordArtifactAttempt(
+        answer.statusCode,
+        answer.llmErrorClass(),
+        bot.llmLastLatencyMs,
+        0.0,
+        false
+      )
+      bot.log("llm attempt=" & $bot.llmAttemptCount &
+        " status=" & $answer.statusCode &
+        " class=" & answer.llmErrorClass() &
+        " latencyMs=" & $bot.llmLastLatencyMs &
+        " wait=0 usable=false")
       bot.log("llm error is not permanent, using fallback")
     bot.applyDecision(bot.fallbackDecision())
   return true
