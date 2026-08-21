@@ -227,7 +227,6 @@ type
     fallbackDinnerObservedVisitors: int
     fallbackDinnerGuestCount: int
     fallbackHostEmptyNights: int
-    fallbackGuestCooldownDays: int
     fallbackGuestWorkedTarget: int
     fallbackGuestAvoidTarget: int
     fallbackHostEvidence: bool
@@ -1458,8 +1457,6 @@ proc resetGardenPlan(bot: Bot) =
   ## next clock line open with a "Day N begins." marker.
   bot.recordDayEnd()
   inc bot.dayIndex
-  if bot.fallbackGuestCooldownDays > 0:
-    dec bot.fallbackGuestCooldownDays
   bot.gardenChecked = newSeq[bool](bot.resources.gardens.len)
   bot.currentGarden = -1
   bot.hasDecision = false
@@ -1926,7 +1923,6 @@ proc adaptFallbackDinner(
         bot.fallbackDinnerTransition =
           "host dinner empty; retaining host-at-home"
   elif served:
-    bot.fallbackGuestCooldownDays = 0
     bot.fallbackGuestAvoidTarget = UnknownHouse
     if bot.fallbackDinnerObservedVisitors > 0:
       bot.fallbackHostEvidence = true
@@ -1941,7 +1937,6 @@ proc adaptFallbackDinner(
   else:
     bot.fallbackPreferredMode = "guest-at-house"
     bot.fallbackHostEmptyNights = 0
-    bot.fallbackGuestCooldownDays = 0
     bot.fallbackGuestAvoidTarget = targetHouse
     bot.fallbackDinnerTransition =
       "guest dinner failed; trying the next guest house"
@@ -2092,7 +2087,6 @@ proc initBot(name: string, slot: int, soul: string): Bot =
   result.fallbackDinnerTarget = UnknownHouse
   result.fallbackGuestWorkedTarget = UnknownHouse
   result.fallbackGuestAvoidTarget = UnknownHouse
-  result.fallbackGuestCooldownDays = 0
   result.fallbackHostEvidence = false
   result.clockAnchorMinutes = -1
   result.ticksPerMinute = DefaultTicksPerMinute
