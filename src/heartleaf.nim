@@ -8,13 +8,13 @@ import
 
 when not defined(emscripten):
   import
-    std/[locks, monotimes],
+    std/[locks, monotimes, sysrand],
     curly, mummy,
     bitworld/client as bitworldClient,
     bitworld/runtime
 
 const
-  DefaultSeed = 0x484541
+  DefaultSeed* = 0x484541
   DefaultMaxTicks = 0
   DefaultMaxGames = 0
   MainMapIndex = 0
@@ -4567,6 +4567,40 @@ proc readConfigPlayerNames(node: JsonNode, value: var seq[string]) =
       )
     value.add(child["name"].getStr())
 
+proc seedPinned*(configJson: string): bool =
+  ## True when the runtime config pins a seed other than DefaultSeed.
+  if configJson.len == 0:
+    return false
+  try:
+    let node = parseJson(configJson)
+    node.kind == JObject and node.hasKey("seed") and
+      node["seed"].getInt != DefaultSeed
+  except CatchableError:
+    false
+
+proc randomSeed*(): int =
+  ## A crypto-random 31-bit seed from the OS.
+  when defined(emscripten):
+    raise newException(HeartleafError, "OS entropy source unavailable.")
+  else:
+    var buf: array[4, byte]
+    if not urandom(buf):
+      raise newException(HeartleafError, "OS entropy source unavailable.")
+    (int(buf[0]) shl 24 or int(buf[1]) shl 16 or
+      int(buf[2]) shl 8 or int(buf[3])) and 0x7FFF_FFFF
+
+proc stripUnpinnedSeed*(configJson: string): string =
+  ## Drops the DefaultSeed sentinel so it cannot clobber a randomized seed.
+  if configJson.len == 0:
+    return configJson
+  try:
+    let node = parseJson(configJson)
+    if node.kind == JObject and node.hasKey("seed"):
+      node.delete("seed")
+    $node
+  except CatchableError:
+    configJson
+
 proc update(config: var RunConfig, jsonText: string) =
   ## Updates the run config from a JSON object.
   if jsonText.len == 0:
@@ -4906,7 +4940,12 @@ when isMainModule and not defined(emscripten):
       daySeconds: DefaultDaySeconds,
       tokens: @[]
     )
-  config.update(runtimeConfig.config)
+  if seedPinned(runtimeConfig.config):
+    config.update(runtimeConfig.config)
+  else:
+    config.seed = randomSeed()
+    config.update(stripUnpinnedSeed(runtimeConfig.config))
+    echo "seed not pinned; randomized"
   config.echoStartupConfig()
   if runtimeConfig.resultsUri.len > 0:
     echo "Using results target: " & runtimeConfig.resultsUri

@@ -58,7 +58,7 @@
           }
         },
         "seed": {
-          "description": "Random seed.",
+          "description": "Random seed. The hosted default 4731713 is an unpinned sentinel: the game draws a fresh seed. Pin any other integer to freeze the village RNG.",
           "type": "integer",
           "minimum": 0,
           "default": 4731713
@@ -238,8 +238,8 @@
       "id": "default-commissioner",
       "name": "Default Commissioner",
       "type": "commissioner",
-      "description": "Game-agnostic round-robin commissioner with mean-score rankings.",
-      "source_url": "https://github.com/Metta-AI/commissioners/tree/fa8ac7cb2bc6fd54c5675c7993919afabebcf4ba/commissioners/ruleset_strategy_commissioner",
+      "description": "Config-driven ruleset_strategy commissioner with shuffled_window seating and per-episode random seeds.",
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master/commissioner",
       "image": "{{COMMISSIONER_IMAGE}}"
     }
   ],
@@ -293,7 +293,7 @@
           }
         ]
       },
-      "description": "Nine compressed Heartleaf days (100s each) so every gnome gets a hosting turn, used for hosted league rounds."
+      "description": "Nine compressed Heartleaf days (100s each) so every gnome gets a hosting turn, used for hosted league rounds. Seed 4731713 is unpinned: each episode draws a fresh village RNG."
     },
     {
       "id": "freeplay",
@@ -309,7 +309,7 @@
       "id": "smoke",
       "name": "Smoke",
       "game_config": {
-        "seed": 4731713,
+        "seed": 1,
         "maxTicks": 300,
         "maxGames": 1
       },
@@ -318,7 +318,7 @@
   ],
   "certification": {
     "game_config": {
-      "seed": 4731713,
+      "seed": 1,
       "maxTicks": 300,
       "maxGames": 1
     },

@@ -409,3 +409,24 @@ block:
     doAssert seekSim.gameHash() == refHashes[target],
       "seek to tick " & $target & " should match the linear hash"
   removeFile(replayPath)
+
+echo "Testing unpinned seed sentinel"
+doAssert not seedPinned(""), "empty config should be unpinned"
+doAssert not seedPinned("{}"), "missing seed should be unpinned"
+doAssert not seedPinned($(%*{"seed": DefaultSeed})),
+  "DefaultSeed should be the unpinned sentinel"
+doAssert seedPinned($(%*{"seed": 1})),
+  "any other integer should pin the village RNG"
+doAssert seedPinned($(%*{"seed": 4242})),
+  "fixture seeds should stay pinned"
+let stripped = stripUnpinnedSeed(
+  $(%*{"seed": DefaultSeed, "maxTicks": 8})
+)
+let strippedNode = parseJson(stripped)
+doAssert not strippedNode.hasKey("seed"),
+  "stripUnpinnedSeed should drop the sentinel"
+doAssert strippedNode["maxTicks"].getInt == 8,
+  "stripUnpinnedSeed should keep the rest of the config"
+let drawnSeed = randomSeed()
+doAssert drawnSeed >= 0 and drawnSeed <= 0x7FFF_FFFF,
+  "randomSeed should be 31-bit"
