@@ -1,8 +1,10 @@
 import
-  std/[algorithm, json, math, options, os, parseopt, sets, strutils, times],
+  std/[algorithm, json, math, options, os, parseopt, sets, strutils, tables,
+    times],
   bitworld/[spriteprotocol, resources],
   curly, pathy, supersnappy, whisky,
   bedrock_auth, decisions, heartleaf/[common, protocol]
+import zippy/ziparchives
 
 const
 
@@ -61,6 +63,8 @@ const
   ClockRateMinMinutes = 15
   LeaveMarginMinutes = 30
   LeaveNudgeMinutes = 30
+  ArtifactUploadTimeoutSeconds = 5
+  ArtifactUploadFinishSeconds = 2
   HouseGatherMaxRadius = 96
   MorningIdentityUntilMinutes = 9 * 60
   MorningIdentityRadius = 140
@@ -228,6 +232,7 @@ type
     decisionChatSent: bool
     decisionStartedTick: int
     decisionState: string
+    decisionFromLlm: bool
     decisionFoodBand: int
     decisionTimePhase: int
     decisionChatSignature: string
@@ -244,15 +249,26 @@ type
     saidGame: seq[ChatLine]
     chatSentCount: int
     chatSuppressedCount: int
+    artifactDecisions: seq[JsonNode]
+    artifactDecisionIndex: int
+    artifactUploadInFlight: bool
+    artifactUploadStartedAt: float
+    artifactUploadBytes: int
+    artifactLastUploadedDay: int
     llmWaiting: bool
     llmTag: string
     llmSerial: int
+    llmRequestStartedAt: float
+    llmLastRequestId: string
+    llmLastLatencyMs: int
+    llmUnavailable: bool
     lastLlmError: string
     llmPacer: LlmPacer
     committedPartyHouse: int
 
 
 var bedrockCurl = newCurly(1)
+var artifactCurl = newCurly(1)
 
 proc bedrockRegion(): string =
   ## Returns the configured AWS Region for Bedrock.
@@ -524,8 +540,14 @@ proc pollTalkToBedrock(): BedrockResult =
   result.statusCode = response.code
   if response.code != 200:
     result.error = response.body
-    ## Retry-After in seconds; HTTP-date forms are ignored.
-    if response.headers.contains("Retry-After"):
+    ## Retry-After-Ms is preferred; HTTP-date forms are ignored.
+    if response.headers.contains("Retry-After-Ms"):
+      try:
+        result.retryAfter =
+          parseFloat(response.headers["Retry-After-Ms"].strip()) / 1000.0
+      except ValueError:
+        discard
+    elif response.headers.contains("Retry-After"):
       try:
         result.retryAfter = parseFloat(response.headers["Retry-After"].strip())
       except ValueError:
@@ -682,9 +704,125 @@ proc clockText(bot: Bot): string =
 proc log(bot: Bot, text: string) =
   ## Writes one bot activity log line.
   echo bot.logName(), ": ", text, " (", bot.clockText(), ")"
+  flushFile(stdout)
+
+proc writeLine(text: string) =
+  ## Writes one flushed line for connection and fatal messages.
+  echo text
+  flushFile(stdout)
+
+proc artifactUploadUrl(): string =
+  ## Returns the optional player artifact destination.
+  getEnv("COWORLD_PLAYER_ARTIFACT_UPLOAD_URL")
+
+proc artifactJsonl(bot: Bot): string =
+  ## Serializes the per-decision trace as JSONL.
+  for decision in bot.artifactDecisions:
+    result.add($decision & "\n")
+
+proc artifactArchive(bot: Bot): string =
+  ## Builds the player artifact zip in memory.
+  var entries: Table[string, string]
+  entries["decisions.jsonl"] = bot.artifactJsonl()
+  entries["README.md"] = """
+# Talking Villager player artifact
+
+`decisions.jsonl` contains one record per decision. `timestamp`,
+`day`, `gameClockMinutes`, `botName`, `slot`, and `decisionSequence`
+join decisions to a game trace when an episode identifier is available
+outside the player runtime. `source` is `llm` or `fallback`; chat fields
+describe whether the decision's message was sent or suppressed.
+"""
+  createZipArchive(entries)
+
+proc pollArtifactUpload(bot: Bot) =
+  ## Collects one completed asynchronous artifact upload.
+  if not bot.artifactUploadInFlight:
+    return
+  let answer = artifactCurl.pollForResponse()
+  if answer.isNone:
+    return
+  bot.artifactUploadInFlight = false
+  if answer.get.error.len > 0:
+    bot.log("artifact upload error " & answer.get.error)
+  elif answer.get.response.code < 200 or answer.get.response.code >= 300:
+    bot.log("artifact upload error status=" & $answer.get.response.code)
+  else:
+    bot.log("artifact uploaded bytes=" & $bot.artifactUploadBytes)
+
+proc uploadArtifact(bot: Bot) =
+  ## Uploads the current player trace without blocking gameplay.
+  let url = artifactUploadUrl()
+  if url.len == 0:
+    return
+  bot.pollArtifactUpload()
+  if bot.artifactUploadInFlight:
+    return
+  var archive: string
+  try:
+    archive = bot.artifactArchive()
+  except CatchableError as e:
+    bot.log("artifact upload error " & e.msg)
+    return
+  if archive.len > 200 * 1024 * 1024:
+    bot.log("artifact upload error archive exceeds 200MB")
+    return
+  if url.startsWith("file://"):
+    let path = url[7 .. ^1]
+    try:
+      writeFile(path, archive)
+    except CatchableError as e:
+      bot.log("artifact upload error " & e.msg)
+      return
+    bot.log("artifact uploaded bytes=" & $archive.len)
+    return
+  if not url.startsWith("https://"):
+    bot.log("artifact upload error unsupported URL")
+    return
+  var headers: HttpHeaders
+  headers["Content-Type"] = "application/zip"
+  try:
+    artifactCurl.startRequest(
+      "PUT", url, headers, archive, ArtifactUploadTimeoutSeconds, "artifact"
+    )
+  except CatchableError as e:
+    bot.log("artifact upload error " & e.msg)
+    return
+  bot.artifactUploadInFlight = true
+  bot.artifactUploadStartedAt = epochTime()
+  bot.artifactUploadBytes = archive.len
+
+proc maybeUploadArtifact(bot: Bot) =
+  ## Uploads once per game day when an artifact destination is configured.
+  bot.pollArtifactUpload()
+  if bot.dayIndex > bot.artifactLastUploadedDay:
+    bot.uploadArtifact()
+    bot.artifactLastUploadedDay = bot.dayIndex
+
+proc finishArtifactUpload(bot: Bot) =
+  ## Starts the final upload and waits only for its bounded timeout.
+  if artifactUploadUrl().len == 0:
+    return
+  let priorDeadline = epochTime() + ArtifactUploadFinishSeconds.float
+  while bot.artifactUploadInFlight and epochTime() < priorDeadline:
+    bot.pollArtifactUpload()
+    if bot.artifactUploadInFlight:
+      sleep(10)
+  if bot.artifactUploadInFlight:
+    bot.log("artifact upload unfinished after bounded wait")
+    return
+  bot.uploadArtifact()
+  let deadline = epochTime() + ArtifactUploadFinishSeconds.float
+  while bot.artifactUploadInFlight and epochTime() < deadline:
+    bot.pollArtifactUpload()
+    if bot.artifactUploadInFlight:
+      sleep(10)
+  if bot.artifactUploadInFlight:
+    bot.log("artifact upload unfinished after bounded wait")
 
 proc logChatSummary(bot: Bot) =
   ## Logs chat sends and duplicate suppressions for the whole game.
+  bot.finishArtifactUpload()
   bot.log("chat summary: said=" & $bot.chatSentCount & " suppressed=" &
     $bot.chatSuppressedCount)
 
@@ -1792,7 +1930,11 @@ proc initBot(name: string, slot: int, soul: string): Bot =
   result.currentGarden = -1
   result.hasDecision = false
   result.decisionChatSent = false
+  result.decisionFromLlm = false
+  result.artifactDecisionIndex = -1
+  result.artifactLastUploadedDay = -1
   result.llmWaiting = false
+  result.llmUnavailable = false
   result.committedPartyHouse = UnknownHouse
   result.dayIndex = 0
   result.gardenChecked = newSeq[bool](result.resources.gardens.len)
@@ -2476,6 +2618,13 @@ proc llmUserPrompt(bot: Bot): string =
     "gardenMarkers=" & bot.gardenMarkersText() & "\n" &
     "Return JSON now."
 
+proc dinnerLeaveAt(bot: Bot, houseIndex: int): int =
+  ## Returns the latest safe departure time for dinner at one house.
+  let pixels = bot.walkPixelsToHouse(houseIndex)
+  if pixels < 0:
+    return -1
+  DinnerMinutes - bot.walkMinutes(pixels) - LeaveMarginMinutes
+
 proc dueCommitment(bot: Bot): LlmDecision =
   ## Returns the decision that carries out what the model itself already
   ## committed to (commitParty in an earlier reply), once its time has
@@ -2489,10 +2638,9 @@ proc dueCommitment(bot: Bot): LlmDecision =
     houseIndex: UnknownHouse, untilMinutes: -1)
   if bot.committedPartyHouse < 0 or bot.minutes >= DinnerMinutes + 60:
     return
-  let pixels = bot.walkPixelsToHouse(bot.committedPartyHouse)
-  if pixels < 0:
+  let leaveAt = bot.dinnerLeaveAt(bot.committedPartyHouse)
+  if leaveAt < 0:
     return
-  let leaveAt = DinnerMinutes - bot.walkMinutes(pixels) - LeaveMarginMinutes
   if bot.minutes < leaveAt:
     return
   if bot.committedPartyHouse == bot.homeIndex:
@@ -2508,26 +2656,60 @@ proc dueCommitment(bot: Bot): LlmDecision =
         bot.committedPartyHouse.playerNameForHouse() & "'s house")
 
 proc fallbackDecision(bot: Bot): LlmDecision =
-  ## Returns the decision to play while the LLM is unavailable: a due
-  ## commitment the model made earlier, else keep doing what the model
-  ## last asked for, minus any chat (a fallback never speaks, so a
-  ## pending say_to_person becomes standing next to that person), or
-  ## gather plants when nothing was decided yet today.
+  ## Returns a commitment, dinner-safe home route, or daytime gathering.
   let due = bot.dueCommitment()
   if due.valid:
     return due
-  if bot.hasDecision and bot.decision.valid:
+  if bot.hasDecision and bot.decisionFromLlm and not bot.llmUnavailable:
     result = bot.decision
     result.message = ""
     result.reason = "fallback: repeating last decision"
     if result.action == LlmSayToPerson:
       result.action = LlmStandNextToPerson
     return
+  if bot.llmUnavailable and bot.hasDecision and not bot.decisionFromLlm:
+    if bot.decision.action == LlmGoHome and
+        not (bot.screenKind == HomeMap and
+          bot.currentHouse == bot.homeIndex):
+      return bot.decision
+    if bot.decision.action == LlmStayInside:
+      return bot.decision
+    if bot.decision.action == LlmGoHome:
+      return LlmDecision(
+        valid: true,
+        action: LlmStayInside,
+        houseIndex: UnknownHouse,
+        untilMinutes: DayEndMinutes,
+        reason: "fallback: staying inside own house after dinner"
+      )
+  if bot.minutes < DinnerMinutes:
+    let leaveAt = bot.dinnerLeaveAt(bot.homeIndex)
+    if leaveAt >= 0 and bot.minutes >= leaveAt:
+      return LlmDecision(
+        valid: true,
+        action: LlmGoHome,
+        houseIndex: UnknownHouse,
+        reason: "fallback: leaving for own house before dinner"
+      )
+    return LlmDecision(
+      valid: true,
+      action: LlmKeepGatheringPlants,
+      houseIndex: UnknownHouse,
+      reason: "fallback: gathering until dinner departure"
+    )
+  if bot.screenKind == HomeMap and bot.currentHouse == bot.homeIndex:
+    return LlmDecision(
+      valid: true,
+      action: LlmStayInside,
+      houseIndex: UnknownHouse,
+      untilMinutes: DayEndMinutes,
+      reason: "fallback: staying inside own house after dinner"
+    )
   LlmDecision(
     valid: true,
-    action: LlmKeepGatheringPlants,
+    action: LlmGoHome,
     houseIndex: UnknownHouse,
-    reason: "fallback"
+    reason: "fallback: returning to own house after dinner"
   )
 
 proc sameDecisionTarget(a, b: LlmDecision): bool =
@@ -2549,6 +2731,53 @@ proc decisionText(decision: LlmDecision): string =
     result.add(" until " & decision.untilMinutes.clockName())
   if decision.reason.len > 0:
     result.add(" - " & decision.reason)
+
+proc recordArtifactDecision(
+  bot: Bot,
+  decision: LlmDecision,
+  fromLlm: bool
+) =
+  ## Records one decision for the player artifact trace.
+  var record = %*{
+    "timestamp": now().utc().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+    "gameClockMinutes": bot.minutes,
+    "day": bot.dayNumber,
+    "botName": bot.playerName,
+    "slot": bot.slot,
+    "homeHouseIndex": bot.homeIndex,
+    "action": decision.action.actionName(),
+    "houseIndex": decision.houseIndex,
+    "targetName": decision.targetName,
+    "messageLength": decision.message.len,
+    "reason": decision.reason,
+    "source": (if fromLlm: "llm" else: "fallback"),
+    "llmRequestId": bot.llmLastRequestId,
+    "llmLatencyMs": bot.llmLastLatencyMs,
+    "llmError": bot.lastLlmError,
+    "chatSent": false,
+    "chatSuppressed": false,
+    "chatSuppressionReason": "",
+    "foodCount": bot.inventoryTotal(),
+    "insideHouse": bot.screenKind == HomeMap,
+    "currentHouseIndex": bot.currentHouse,
+    "decisionSequence": bot.artifactDecisions.len
+  }
+  bot.artifactDecisions.add(record)
+  bot.artifactDecisionIndex = bot.artifactDecisions.high
+
+proc updateArtifactChat(
+  bot: Bot,
+  sent,
+  suppressed: bool,
+  suppressionReason = ""
+) =
+  ## Updates chat results on the current artifact decision.
+  if bot.artifactDecisionIndex < 0:
+    return
+  let record = bot.artifactDecisions[bot.artifactDecisionIndex]
+  record["chatSent"] = %sent
+  record["chatSuppressed"] = %suppressed
+  record["chatSuppressionReason"] = %suppressionReason
 
 proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
   ## Stores one decision and updates the party commitment bookkeeping.
@@ -2579,6 +2808,8 @@ proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
     bot.decision.sameDecisionTarget(nextDecision)
   bot.decision = nextDecision
   bot.hasDecision = true
+  if fromLlm or bot.llmUnavailable:
+    bot.decisionFromLlm = fromLlm
   bot.decisionChatSent = false
   bot.decisionStartedTick = bot.frameTick
   bot.decisionState = bot.decisionStateSignature()
@@ -2595,6 +2826,7 @@ proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
   ## gathering") is not worth a transcript line.
   if fromLlm and decision.valid and not keepPath:
     bot.recordOwnDecision(nextDecision.decisionText())
+  bot.recordArtifactDecision(nextDecision, fromLlm)
   bot.log(
     "llm action " & nextDecision.action.actionName() &
     " house=" & $(nextDecision.houseIndex + 1) &
@@ -2608,8 +2840,12 @@ proc applyLlmReply(bot: Bot, reply: string) =
   let decision = reply.parseLlmDecision(bot.selfNames())
   if not decision.valid:
     bot.lastLlmError = decision.error
+    bot.llmUnavailable = true
     bot.log("llm parse error " & decision.error)
-  bot.applyDecision(decision, fromLlm = true)
+  else:
+    bot.lastLlmError = ""
+    bot.llmUnavailable = false
+  bot.applyDecision(decision, fromLlm = decision.valid)
 
 proc startLlmDecision(bot: Bot): bool =
   ## Starts a Bedrock decision request or applies an immediate fallback.
@@ -2635,6 +2871,7 @@ proc startLlmDecision(bot: Bot): bool =
     let answer = BedrockResult(done: true, error: e.msg)
     if answer.transientBedrockError():
       bot.lastLlmError = e.msg
+      bot.llmUnavailable = true
       let wait = bot.llmPacer.noteTransientError(epochTime())
       bot.log("llm transient start error " & e.msg & ", backing off " &
         formatFloat(wait, ffDecimal, 1) & "s, using fallback")
@@ -2649,6 +2886,9 @@ proc startLlmDecision(bot: Bot): bool =
   bot.llmWaiting = true
   let now = epochTime()
   bot.llmPacer.noteRequest(now)
+  bot.llmRequestStartedAt = now
+  bot.llmLastRequestId = bot.llmTag
+  bot.llmLastLatencyMs = 0
   bot.decisionStartedTick = bot.frameTick
   let latency = bedrockPerformanceLatency()
   let latencyName =
@@ -2677,6 +2917,9 @@ proc pollLlmDecision(bot: Bot): bool =
   if answer.tag != bot.llmTag:
     return false
   bot.llmWaiting = false
+  bot.llmLastRequestId = answer.tag
+  bot.llmLastLatencyMs =
+    int((epochTime() - bot.llmRequestStartedAt) * 1000.0)
   if answer.ok:
     bot.llmPacer.noteSuccess()
     bot.log("llm reply " & answer.tag & " " & answer.usage)
@@ -2689,6 +2932,7 @@ proc pollLlmDecision(bot: Bot): bool =
       ## The endpoint rejected cache_control; send plain requests from
       ## now on instead of treating this as a fatal request error.
       promptCacheEnabled = false
+      bot.llmUnavailable = true
       bot.log("llm prompt caching rejected, disabled for this game")
       bot.applyDecision(bot.fallbackDecision())
       return true
@@ -2700,6 +2944,7 @@ proc pollLlmDecision(bot: Bot): bool =
     ## Transient errors and unusable 200 bodies (empty text, parse
     ## failures) both keep the bot in the game on the scripted fallback.
     if answer.transientBedrockError():
+      bot.llmUnavailable = true
       let daily = answer.dailyQuotaError()
       let wait = bot.llmPacer.noteTransientError(
         epochTime(), answer.retryAfter, daily
@@ -2710,12 +2955,13 @@ proc pollLlmDecision(bot: Bot): bool =
         " in a row, backing off " & formatFloat(wait, ffDecimal, 1) &
         "s" &
         (if answer.retryAfter > 0.0:
-          " (retry-after " & formatFloat(answer.retryAfter, ffDecimal, 0) & "s)"
+          " (retry-after " & formatFloat(answer.retryAfter, ffDecimal, 3) & "s)"
         else:
           "") &
         ", using fallback"
       )
     else:
+      bot.llmUnavailable = true
       bot.log("llm error is not permanent, using fallback")
     bot.applyDecision(bot.fallbackDecision())
   return true
@@ -3079,6 +3325,7 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
   if duplicateReason.len > 0:
     bot.decisionChatSent = true
     inc bot.chatSuppressedCount
+    bot.updateArtifactChat(false, true, duplicateReason)
     bot.log("chat suppressed, " & duplicateReason & ": " &
       bot.decision.message)
     return
@@ -3091,6 +3338,7 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
   ))
   inc bot.chatSentCount
   bot.decisionChatSent = true
+  bot.updateArtifactChat(true, false)
   if bot.decision.targetName.len > 0:
     bot.greetedToday.incl(bot.decision.targetName)
   bot.log("chat " & bot.decision.message)
@@ -3260,6 +3508,7 @@ proc decideNextMask(bot: Bot, ws: WebSocket): uint8 =
   bot.maybeRecordClock()
   bot.maybeRecordCarry()
   bot.maybeRecordDinner()
+  bot.maybeUploadArtifact()
   bot.maybeNoteLeaveTime()
   if not bot.localized:
     bot.desiredMask = 0
@@ -3413,7 +3662,7 @@ proc runBot(
   try:
     requireBedrockConfig()
   except TalkingVillagerError as e:
-    echo bot.name, " fatal: ", e.msg
+    writeLine(bot.name & " fatal: " & e.msg)
     bot.logChatSummary()
     quit(1)
   ## Hosted runs (exitOnDisconnect) keep reconnecting through mid-game
@@ -3424,7 +3673,7 @@ proc runBot(
   while true:
     try:
       let ws = newWebSocket(connectUrl)
-      echo bot.name, " connected to ", connectUrl
+      writeLine(bot.name & " connected to " & connectUrl)
       hadConnection = true
       disconnectedAt = 0.0
       bot.lastMask = 0xff'u8
@@ -3437,17 +3686,19 @@ proc runBot(
           ws.send(blobFromMask(nextMask), BinaryMessage)
           bot.lastMask = nextMask
     except TalkingVillagerError as e:
-      echo bot.name, " fatal: ", e.msg
+      writeLine(bot.name & " fatal: " & e.msg)
       bot.logChatSummary()
       quit(1)
     except CatchableError as e:
-      echo bot.name, " reconnecting: ", e.msg
+      writeLine(bot.name & " reconnecting: " & e.msg)
       if exitOnDisconnect and hadConnection:
         if disconnectedAt == 0.0:
           disconnectedAt = epochTime()
         elif epochTime() - disconnectedAt > ReconnectGiveUpSeconds:
-          echo bot.name, " server gone for ", ReconnectGiveUpSeconds,
+          writeLine(
+            bot.name & " server gone for " & $ReconnectGiveUpSeconds &
             "s, exiting"
+          )
           break
       sleep(ReconnectDelayMs)
   bot.logChatSummary()
