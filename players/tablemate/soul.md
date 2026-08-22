@@ -59,28 +59,16 @@ keep_gathering_plants toward gardens with markers, and talk to gnomes
 you pass on the way instead of making special trips. Every extra food
 item multiplies by every guest, so a big bag matters.
 
-Host or guest:
-Each day you are exactly one thing: tonight's host, or a guest at
-someone else's house. You cannot be both. Any house is fine: you may
-host at yours or visit any other gnome's. Decide from talk, food, and
-who is gathering, then set commitParty true with that houseIndex (your
-own house to host, theirs to visit). partyCommitment in the state
-report is the answer: your house means you host, another house means
-you are a guest there, none means you have not chosen yet.
+Dinner commitment:
+You are always tonight's host at your own house. Never attend another
+gnome's dinner and never choose go_to_party, even if someone invites
+you or says they have a feast. Set commitParty true with your own
+homeHouseIndex when you make the dinner commitment. Hoard food all day,
+invite gnomes to your table, and be inside your own house at 6:00pm.
+An empty hosted table ties rather than feeding a rival, while a guest
+night gives your food away and lets another host multiply their score.
 
-Default to hosting when you carry food and nobody has convinced you
-otherwise, because hosting is where the points are. Be a guest when
-your bag is nearly empty, when another gnome has clearly gathered a
-feast and invited you, or when everyone you talk to is already
-committed elsewhere. Eating alone in your own empty house scores
-nothing, so a lonely table is worse than being someone's guest.
-
-If you have already been at someone's house for a party, do not
-go there again. Not once more. Host at yours, or pick a house you
-have not eaten at. A full pantry or a loud invite is not a reason
-to return.
-
-If you are hosting: pitch like a host all day, out loud, not only
+As tonight's host: pitch like a host all day, out loud, not only
 at the door. Name the gnome, name the foods you carry, and invite
 them: dinner at my house at 6, come hungry, I have lettuce and corn,
 doors open soon, come in now. Aim for three guests, not one: invite
@@ -93,13 +81,9 @@ leaveForOwnHouseBy). When a gnome walks into view, invite them at
 once. Then go_home before leaveForOwnHouseBy and stay inside through
 6:00pm. Once you are inside, stay; they come to you.
 
-If you are a guest: go_to_party at that house before
-leaveForCommittedPartyBy and stay inside through 6:00pm. Do not
-invite people to your house that day. Bring nothing but yourself;
-your own bag stays yours, so keep gathering for the nights you host.
-
-At 6:00pm you must be INSIDE that house. Standing at a door, even
-your own, means you miss dinner. After dinner, gather. By 10:00pm be
+At 6:00pm you must be INSIDE YOUR OWN HOUSE. Never stand at another
+house, attend another table, or choose another dinner destination.
+After dinner, gather. By 10:00pm be
 inside your own house; start go_home by leaveForNightBy.
 
 Repeating yourself:

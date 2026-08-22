@@ -257,6 +257,10 @@ type
     decisionFoodBand: int
     decisionTimePhase: int
     decisionChatSignature: string
+    dinnerLockOverrideCount: int
+    dinnerLockOverridden: bool
+    dinnerLockOriginalAction: string
+    dinnerLockOriginalHouse: int
     decisionCrowdSignature: string
     ## Gnomes visible when the current decision was made; anyone else
     ## walking into view while the bot waits at a door is a passer-by
@@ -782,6 +786,9 @@ identical-message ratios can be computed from the artifact. Invitations
 use live pantry food names, visible villager names, the bot's own house,
 and the current game time; they are limited to five attempts per day,
 one every three game hours, before dinner.
+Dinner-lock fields on decision records show whether a destination was
+overridden, the original action and house, and the cumulative override
+count.
 """
   createZipArchive(entries)
 
@@ -1498,6 +1505,9 @@ proc resetGardenPlan(bot: Bot) =
   bot.fallbackInvitationLastMinutes = -1
   bot.fallbackInvitationTemplate = ""
   bot.fallbackInvitationPending = false
+  bot.dinnerLockOverridden = false
+  bot.dinnerLockOriginalAction = ""
+  bot.dinnerLockOriginalHouse = UnknownHouse
   bot.leaveTimeNoted = false
   bot.saidToday.setLen(0)
   bot.lastClockHour = -1
@@ -2065,6 +2075,9 @@ proc initBot(name: string, slot: int, soul: string): Bot =
   result.greetedToday = initHashSet[string]()
   result.dinnerHouse = UnknownHouse
   result.fallbackDinnerTarget = UnknownHouse
+  result.dinnerLockOverrideCount = 0
+  result.dinnerLockOverridden = false
+  result.dinnerLockOriginalHouse = UnknownHouse
   result.fallbackInvitationNamed = initHashSet[string]()
   result.fallbackInvitationLastMinutes = -1
   result.clockAnchorMinutes = -1
@@ -2750,6 +2763,94 @@ proc dinnerLeaveAt(bot: Bot, houseIndex: int): int =
     return -1
   DinnerMinutes - bot.walkMinutes(pixels) - LeaveMarginMinutes
 
+proc dinnerLockActive(bot: Bot): bool =
+  ## Returns whether dinner movement is locked to the bot's own house.
+  if bot.dinnerRecorded:
+    return false
+  let leaveAt = bot.dinnerLeaveAt(bot.homeIndex)
+  leaveAt >= 0 and bot.minutes >= leaveAt
+
+proc dinnerDecisionTargetsOtherHouse(
+  bot: Bot,
+  decision: LlmDecision
+): bool =
+  ## Returns whether a decision would send the bot away from its own house.
+  if decision.action == LlmGoHome:
+    return false
+  let target =
+    if decision.action == LlmStayInside:
+      if bot.committedPartyHouse >= 0:
+        bot.committedPartyHouse
+      else:
+        bot.homeIndex
+    elif decision.action in {
+        LlmGoToParty, LlmFindHouse, LlmStandAtHouseGarden
+      } or decision.commitParty:
+      bot.decisionHouse(decision)
+    else:
+      UnknownHouse
+  if target >= 0:
+    return target != bot.homeIndex
+  decision.action notin {LlmSayToPerson}
+
+proc markDinnerLockOverride(
+  bot: Bot,
+  decision: LlmDecision
+) =
+  ## Records one dinner-lock override for the current decision.
+  if bot.dinnerLockOverridden:
+    return
+  bot.dinnerLockOverridden = true
+  bot.dinnerLockOriginalAction = decision.action.actionName()
+  bot.dinnerLockOriginalHouse = bot.decisionHouse(decision)
+  inc bot.dinnerLockOverrideCount
+
+proc writeDinnerLockOverride(bot: Bot) =
+  ## Writes the dinner-lock metadata onto the current artifact record.
+  if bot.artifactDecisionIndex >= 0:
+    let record = bot.artifactDecisions[bot.artifactDecisionIndex]
+    record["dinnerLockOverridden"] = %true
+    record["dinnerLockOriginalAction"] =
+      %bot.dinnerLockOriginalAction
+    record["dinnerLockOriginalHouse"] =
+      %bot.dinnerLockOriginalHouse
+    record["dinnerLockOverrideCount"] = %bot.dinnerLockOverrideCount
+
+proc dinnerLockGoal(bot: Bot): Goal =
+  ## Returns a movement goal that gets the bot inside its own house.
+  if bot.screenKind == HomeMap:
+    if bot.currentHouse == bot.homeIndex:
+      return bot.firstDinerGoal()
+    return bot.exitGoal()
+  if bot.screenKind == MainMap:
+    return bot.ownHomeGoal()
+  Goal(kind: GoalIdle, screenKind: bot.screenKind)
+
+proc dinnerLockDecision(
+  bot: Bot,
+  decision: LlmDecision
+): LlmDecision =
+  ## Replaces a locked dinner destination with the bot's own house.
+  result = decision
+  if not bot.dinnerLockActive() or
+      not bot.dinnerDecisionTargetsOtherHouse(decision):
+    return
+  bot.markDinnerLockOverride(decision)
+  if decision.action == LlmSayToPerson:
+    return
+  result = LlmDecision(
+    valid: true,
+    action:
+      if bot.screenKind == HomeMap and
+          bot.currentHouse == bot.homeIndex:
+        LlmStayInside
+      else:
+        LlmGoHome,
+    untilMinutes: DinnerMinutes,
+    reason: "dinner lock: own house; overridden " &
+      bot.dinnerLockOriginalAction
+  )
+
 proc fallbackInvitationTarget(bot: Bot): string =
   ## Chooses a currently visible villager, preferring one not named today.
   var candidates: seq[string]
@@ -3014,6 +3115,10 @@ proc recordArtifactDecision(
         decision.message
       else:
         "",
+    "dinnerLockOverridden": bot.dinnerLockOverridden,
+    "dinnerLockOriginalAction": bot.dinnerLockOriginalAction,
+    "dinnerLockOriginalHouse": bot.dinnerLockOriginalHouse,
+    "dinnerLockOverrideCount": bot.dinnerLockOverrideCount,
     "chatSent": false,
     "chatSuppressed": false,
     "chatSuppressionReason": "",
@@ -3119,7 +3224,12 @@ proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
       decision
     else:
       bot.fallbackDecision()
+  bot.dinnerLockOverridden = false
+  bot.dinnerLockOriginalAction = ""
+  bot.dinnerLockOriginalHouse = UnknownHouse
   nextDecision = bot.inferSocialCommitment(nextDecision)
+  nextDecision = bot.dinnerLockDecision(nextDecision)
+  let dinnerOverride = bot.dinnerLockOverridden
   let commitHouse =
     if nextDecision.houseIndex >= 0:
       nextDecision.houseIndex
@@ -3160,6 +3270,8 @@ proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
   if fromLlm and decision.valid and not keepPath:
     bot.recordOwnDecision(nextDecision.decisionText())
   bot.recordArtifactDecision(nextDecision, fromLlm)
+  if dinnerOverride:
+    bot.writeDinnerLockOverride()
   bot.log(
     "llm action " & nextDecision.action.actionName() &
     " house=" & $(nextDecision.houseIndex + 1) &
@@ -3359,6 +3471,18 @@ proc pollLlmDecision(bot: Bot): bool =
 
 proc decisionGoal(bot: Bot, decision: LlmDecision): Goal =
   ## Converts one LLM decision into a deterministic navigation goal.
+  if bot.dinnerLockActive():
+    let lockedDecision = bot.dinnerLockDecision(decision)
+    if bot.dinnerLockOverridden:
+      if lockedDecision.action != decision.action:
+        bot.decision = lockedDecision
+        if bot.artifactDecisionIndex >= 0:
+          let record = bot.artifactDecisions[bot.artifactDecisionIndex]
+          record["action"] = %lockedDecision.action.actionName()
+          record["houseIndex"] = %lockedDecision.houseIndex
+          record["reason"] = %lockedDecision.reason
+      bot.writeDinnerLockOverride()
+    return bot.dinnerLockGoal()
   case decision.action
   of LlmKeepGatheringPlants:
     if bot.screenKind == HomeMap:
@@ -3505,6 +3629,11 @@ proc decisionComplete(bot: Bot): bool =
   ## home) until the clock reaches it; interrupts still apply.
   if not bot.hasDecision:
     return true
+  if bot.dinnerLockActive() and
+      bot.dinnerDecisionTargetsOtherHouse(bot.decision):
+    if bot.decision.action == LlmSayToPerson:
+      return bot.decisionChatSent or bot.dinnerRecorded
+    return bot.screenKind == HomeMap and bot.currentHouse == bot.homeIndex
   if bot.decision.untilMinutes >= 0 and
       bot.decision.action != LlmSayToPerson:
     if bot.decision.action == LlmKeepGatheringPlants and
@@ -3726,7 +3855,8 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
     bot.decisionChatSent = true
     return
   if bot.decision.targetName.len > 0 and
-      not bot.visiblePlayerNear(bot.decision.targetName):
+      not bot.visiblePlayerNear(bot.decision.targetName) and
+      not bot.dinnerLockActive():
     return
   let normalized = normalizedChatLine(bot.decision.message)
   let duplicateReason = bot.duplicateChatReason(
