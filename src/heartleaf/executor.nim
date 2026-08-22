@@ -519,8 +519,15 @@ proc standNextToPersonGoal(
   idleGoal(observation.scene)
 
 proc decisionHouse*(villager: Villager, decision: Decision): int =
-  ## The best house target for one decision.
+  ## The best house target for one decision. A named host is unambiguous
+  ## where a number may be misremembered, so for going to or waiting at
+  ## someone's house the name wins over houseIndex.
   result = decision.houseIndex
+  if decision.targetName.len > 0 and
+      decision.action in {GoToParty, FindHouse, StandAtHouseGarden}:
+    let named = decision.targetName.houseIndexForPlayerName()
+    if named >= 0:
+      result = named
   if result < 0 and decision.targetName.len > 0:
     result = decision.targetName.houseIndexForPlayerName()
   if result < 0 and villager.committedPartyHouse >= 0:

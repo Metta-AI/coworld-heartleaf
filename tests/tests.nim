@@ -515,7 +515,9 @@ block:
     let at = text.find(section)
     doAssert at > last, section & " should follow the previous section"
     last = at
-  doAssert text.endsWith(MechanicsBlock), "the mechanics come last"
+  doAssert MechanicsBlock in text, "the mechanics follow the soul"
+  doAssert text.endsWith(housesText()), "the house table comes last"
+  doAssert "1 Ivan," in text and "9 Egor." in text, "houses are numbered by owner"
   let bare = systemPrompt(parseSoul("#!m\nJust a soul.\n"), "Ivan")
   doAssert bare.startsWith("Your name is Ivan. You are a Heartleaf gnome player."),
     "a soul without {name} gets a name line"
@@ -663,6 +665,12 @@ block:
   doAssert due.valid and due.action == GoToParty and due.houseIndex == 1,
     "a gnome at a door when it is time to go in goes in there"
   doAssert villager.committedPartyHouse == 1, "and that becomes the promise"
+  doAssert villager.decisionHouse(Decision(valid: true, action: GoToParty,
+    houseIndex: 0, targetName: "Maxim")) == 4,
+    "a named host beats a misremembered house number"
+  doAssert villager.decisionHouse(Decision(valid: true, action: SayToPerson,
+    houseIndex: 0, targetName: "Maxim")) == 0,
+    "an invitation keeps the house it names"
   # Curfew promise: after dinner, away from home, late enough -> go home.
   villager.applyDecision(observation, layout,
     Decision(valid: true, action: StayInside, houseIndex: UnknownHouse,
