@@ -34,6 +34,8 @@ const
   DayTicks* = DefaultDaySeconds * TicksPerSecond
   ScoreScreenSeconds* = 10
   ScoreScreenTicks* = ScoreScreenSeconds * TicksPerSecond
+  ## Points lost for not being inside your own house when the day ends.
+  CurfewPenalty* = 3
   ## Hosted episodes must finish inside the deadline the manifest sets
   ## (episode_timeout_minutes); the rest is for soul upload and pauses.
   HostedDeadlineSeconds* = 30 * 60

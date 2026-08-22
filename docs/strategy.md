@@ -53,7 +53,9 @@ a garden, at a door, or alone in their own house at 6:00pm scores zero,
 and that night never comes back. Decide early where you will be, and
 leave in time. Walking across the village takes about an hour of game
 time, and the latest-departure notes in your conversation tell you when
-to go. When in doubt, go.
+to go. When in doubt, go. And after dinner, be back inside your own house
+by 9:00pm: a gnome caught anywhere else when the day ends loses 3 points,
+which is a whole guest bite thrown away.
 
 ## 5. Be warm to everyone, all day
 

@@ -152,13 +152,12 @@
           }
         },
         "scores": {
-          "description": "Cumulative player scores at the end of this day.",
+          "description": "Cumulative player scores at the end of this day; the 9pm curfew penalty can take a score below zero.",
           "type": "array",
           "minItems": 2,
           "maxItems": 9,
           "items": {
-            "type": "integer",
-            "minimum": 0
+            "type": "integer"
           }
         }
       }

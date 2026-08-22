@@ -46,6 +46,8 @@ type
       ## The marker is on screen and the garden still has food.
     dinner*: DinnerOutcome
     dinnerDone*: bool
+    curfewMissed*: bool
+      ## The day ended with this gnome away from home: a penalty applied.
 
   WorldLayout* = object
     gardens*: seq[Rect]

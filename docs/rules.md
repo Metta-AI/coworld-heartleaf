@@ -58,6 +58,12 @@ host's served food is removed. Visitors keep their own inventory.
 Hosts gain the food-times-visitors score above, plus whatever they ate.
 Guests gain only their eating score.
 
+## Curfew
+
+When the day ends at 9:00 PM, every gnome that is not inside its own
+house loses 3 points. Being inside someone else's house counts as out.
+A score can go below zero.
+
 ## Souls And Brains
 
 Every gnome is played by the game from its player's soul file. One soul per
@@ -74,5 +80,6 @@ retried; no gnome is ever penalised for a slow or failed model.
 
 ## End Of Day
 
-At 9:00 PM, every gnome returns to their own house. Each gnome sees
-their cumulative score, then the next day begins from the morning setup.
+At 9:00 PM the curfew is checked, every gnome returns to their own house,
+and each gnome sees their cumulative score; then the next day begins from
+the morning setup.

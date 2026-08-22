@@ -62,6 +62,7 @@ type
     dinnerLookingBefore*: string
     dinnerHouse*: int
     dinnerRecorded*: bool
+    curfewRecorded*: bool
     leaveTimeNoted*: bool
     leaveTimeNotedMinutes*: int
     interruptRequested*: bool
@@ -276,6 +277,7 @@ proc startNewDay*(villager: Villager, dayNumber: int) =
   villager.dinnerLookingBefore = ""
   villager.dinnerHouse = UnknownHouse
   villager.dinnerRecorded = false
+  villager.curfewRecorded = false
   villager.leaveTimeNoted = false
   villager.saidToday.setLen(0)
   villager.lastClockHour = -1
@@ -402,6 +404,17 @@ proc maybeRecordDinner*(villager: Villager, observation: Observation) =
         "not inside)."
   villager.recordEvent(missed)
   villager.log("dinner missed: " & missed)
+
+proc maybeRecordCurfew*(villager: Villager, observation: Observation) =
+  ## Records the curfew penalty once, the moment the day ends with the
+  ## gnome away from home.
+  if villager.curfewRecorded or not observation.curfewMissed:
+    return
+  villager.curfewRecorded = true
+  let text = "Curfew: you were not inside your own house at " &
+    DayEndMinutes.clockName() & ", so you lost " & $CurfewPenalty & " points."
+  villager.recordEvent(text)
+  villager.log("curfew missed: -" & $CurfewPenalty)
 
 ## Interrupt signatures
 

@@ -1064,6 +1064,7 @@ proc observeWorld*(
   villager.maybeRecordClock(observation)
   villager.maybeRecordCarry(observation)
   villager.maybeRecordDinner(observation)
+  villager.maybeRecordCurfew(observation)
   villager.maybeNoteLeaveTime(observation, navigation, layout)
 
 proc keepPromise*(

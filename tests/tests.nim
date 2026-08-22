@@ -580,6 +580,26 @@ block:
   doAssert sim.playerMapIndex(0) == 2,
     "alice should walk out of her house and into Anton's"
   doAssert sim.playerMapIndex(1) == 2, "bob stays home"
+  block:
+    # Curfew: run the clock to 9pm with alice still at Anton's. She loses
+    # 3 points, bob at home loses nothing, and alice's transcript says so.
+    var ended = 0
+    while not sim.scoreScreenActive() and ended < 5000:
+      sim.step(newSeq[InputState](2))
+      inc ended
+    doAssert sim.scoreScreenActive(), "the day should end"
+    doAssert sim.playerScore(0) == -CurfewPenalty, "away from home at 9pm costs 3"
+    doAssert sim.playerScore(1) == 0, "bob was home"
+    now += 0.05
+    frame = brains.advance(observations(), now)
+    doAssert frame.paused == false, "the score screen keeps stepping"
+    var curfewLines = 0
+    for line in brains.villagers[0].history:
+      if line.content.startsWith("(Curfew:"):
+        inc curfewLines
+    doAssert curfewLines == 1, "alice hears about the penalty once"
+    for line in brains.villagers[1].history:
+      doAssert not line.content.startsWith("(Curfew:"), "bob hears nothing"
   runTicks(proc(): bool = chatsSeen.len > 0, 600)
   doAssert chatsSeen == @["hello there"], "alice greets Anton once next to him"
   doAssert "hello there" in brains.villagers[0].saidToday

@@ -305,6 +305,8 @@ type
     message: string
     messageTicks: int
     attackDown: bool
+    curfewMissed: bool
+      ## Caught outside home at the end of the day; cleared each morning.
 
   SpriteCacheEntry = ref object
     spriteId: int
@@ -3290,18 +3292,32 @@ proc startDay(sim: SimServer) =
   for player in sim.players.mitems:
     player.dinnerTicks = 0
     player.dinnerRecord = nil
+    player.curfewMissed = false
   for i in 0 ..< sim.players.len:
     sim.teleportPlayerToOwnHome(i)
 
 proc startScoreScreen(sim: SimServer) =
-  ## Starts the end-of-day scoring screen.
+  ## Starts the end-of-day scoring screen. Curfew: a gnome that is not
+  ## inside its own house when the day ends loses CurfewPenalty points
+  ## before everyone is sent home.
   sim.dayTick = sim.dayTicks
   sim.scoreTicks = ScoreScreenTicks
   for player in sim.players.mitems:
     player.dinnerTicks = 0
     player.dinnerRecord = nil
+    player.curfewMissed = player.mapIndex != player.homeFlag
+    if player.curfewMissed:
+      player.score -= CurfewPenalty
   for i in 0 ..< sim.players.len:
     sim.teleportPlayerToOwnHome(i)
+
+proc scoreScreenActive*(sim: SimServer): bool =
+  ## True while the end-of-day score screen is up.
+  sim.scoreTicks > 0
+
+proc playerScore*(sim: SimServer, playerIndex: int): int =
+  ## One player's cumulative score.
+  sim.players[playerIndex].score
 
 proc replayChatVisibleTo(sim: SimServer, speaker, viewer: Player): bool =
   ## Whether `viewer` would see `speaker`'s current speech bubble — the
@@ -3400,6 +3416,7 @@ proc observe*(sim: SimServer, playerIndex: int): Observation =
   result.foodCollectedText = player.inventory.foodListText()
   result.foodLookingForText = player.eaten.foodsNotEatenText()
   result.dinnerDone = sim.dinnerDone
+  result.curfewMissed = player.curfewMissed
   if player.dinnerTicks > 0 and player.dinnerRecord != nil:
     let record = player.dinnerRecord
     result.dinner = DinnerOutcome(
