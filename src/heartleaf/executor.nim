@@ -4,7 +4,7 @@
 ## villager state; the simulation applies the masks.
 
 import
-  std/[math, sets],
+  std/[math, sets, strutils],
   bitworld/spriteprotocol,
   heartleaf/[common, protocol, decisions, observation, navigation, villager]
 
@@ -36,6 +36,9 @@ const
   WalkTimeFudge = 1.5
   LeaveMarginMinutes* = 30
   LeaveNudgeMinutes = 30
+  ## From this long before dinner a gnome no longer sets off across the
+  ## village after someone it cannot see.
+  LateWanderMinutes = 90
   HouseDistanceCachePixels = 16
   UnstuckMasks = [
     ButtonUp,
@@ -499,6 +502,16 @@ proc standNextToPersonGoal(
   let index = observation.visiblePlayer(name)
   if index >= 0:
     let player = observation.visiblePlayers[index]
+    # Keep the spot already chosen while the gnome stays put: the spot
+    # depends on where the follower approaches from, so recomputing it
+    # every tick would move it as the follower moves.
+    let current = villager.goal
+    if current.kind == StandByPerson and current.targetName == name and
+        current.scene == observation.scene and
+        distanceSquared(player.foot.x, player.foot.y,
+          current.anchor.x, current.anchor.y) <=
+          GoalDriftPixels * GoalDriftPixels:
+      return current
     let spot = observation.standingSpotBeside(navigation, player.foot)
     return Goal(
       kind: StandByPerson,
@@ -507,10 +520,14 @@ proc standNextToPersonGoal(
       y: spot.y,
       houseIndex: player.houseIndex,
       gardenIndex: -1,
-      targetName: name
+      targetName: name,
+      anchor: player.foot
     )
-  # Inside a house you cannot search the world; wait here for them.
-  if observation.scene == Outdoors:
+  # Inside a house you cannot search the world; wait here for them. Late
+  # in the afternoon, do not set off across the village either: dinner
+  # is close and the walk would cost it.
+  if observation.scene == Outdoors and
+      observation.minutes < DinnerMinutes - LateWanderMinutes:
     let houseIndex = name.houseIndexForPlayerName()
     if houseIndex >= 0:
       return villager.gatherAtHouseGoal(
@@ -630,16 +647,12 @@ proc goalLabel(goal: Goal): string =
   of HoldPosition: "wait"
 
 proc sameGoal(a, b: Goal): bool =
-  ## True when two goals are the same navigation target. Standing beside
-  ## a gnome tracks a moving spot, so small drifts of the spot count as
-  ## the same goal; otherwise the path would be rebuilt every tick and
-  ## the follower would dither in place.
+  ## True when two goals are the same navigation target. A StandByPerson
+  ## goal is reused while its gnome stays near its anchor (see
+  ## standNextToPersonGoal), so equality is exact here.
   if a.kind != b.kind or a.scene != b.scene or a.houseIndex != b.houseIndex or
       a.gardenIndex != b.gardenIndex or a.targetName != b.targetName:
     return false
-  if a.kind == StandByPerson:
-    return distanceSquared(a.x, a.y, b.x, b.y) <=
-      GoalDriftPixels * GoalDriftPixels
   a.x == b.x and a.y == b.y
 
 proc interactionMask(
@@ -753,16 +766,31 @@ proc decisionText(decision: Decision): string =
   if decision.reason.len > 0:
     result.add(" - " & decision.reason)
 
+proc invitesToOwnHouse(message: string): bool =
+  ## True when a chat line invites someone to the speaker's own table.
+  let text = message.toLowerAscii()
+  for phrase in ["my house", "my place", "my table", "at mine", "my door"]:
+    if phrase in text:
+      return true
+
 proc inferSocialCommitment(villager: Villager, decision: Decision): Decision =
-  ## Fills in the house a commitment refers to. Only what the JSON says
-  ## counts: commitParty true (with houseIndex, else targetName's house,
+  ## Fills in the house a commitment refers to. What the JSON says counts
+  ## first: commitParty true (with houseIndex, else targetName's house,
   ## else the villager's own house when it is inviting) or go_to_party.
+  ## A host that invites people to its own house out loud has promised
+  ## to be there too, so that line commits it to its own house when it
+  ## has not promised anywhere else.
   result = decision
   if result.houseIndex < 0 and result.targetName.len > 0 and
       (result.action == GoToParty or result.commitParty):
     result.houseIndex = result.targetName.houseIndexForPlayerName()
   if result.commitParty and result.houseIndex < 0 and
       result.action == SayToPerson:
+    result.houseIndex = villager.houseIndex
+  if result.action == SayToPerson and not result.commitParty and
+      villager.committedPartyHouse < 0 and
+      result.message.invitesToOwnHouse():
+    result.commitParty = true
     result.houseIndex = villager.houseIndex
 
 proc applyDecision*(

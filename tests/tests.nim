@@ -671,6 +671,19 @@ block:
   doAssert villager.decisionHouse(Decision(valid: true, action: SayToPerson,
     houseIndex: 0, targetName: "Maxim")) == 0,
     "an invitation keeps the house it names"
+  # A host that says "my house" has promised to be home for dinner.
+  let host = newVillager(4, soul, layout.gardens.len)
+  host.applyDecision(observation, layout,
+    Decision(valid: true, action: SayToPerson, targetName: "Anton",
+      houseIndex: UnknownHouse, untilMinutes: -1,
+      message: "Dinner at my house at 6, I have lettuce!"), fromModel = true)
+  doAssert host.committedPartyHouse == 4, "inviting to my house commits me to it"
+  let guest = newVillager(5, soul, layout.gardens.len)
+  guest.applyDecision(observation, layout,
+    Decision(valid: true, action: SayToPerson, targetName: "Anton",
+      houseIndex: UnknownHouse, untilMinutes: -1,
+      message: "See you at your table at 6!"), fromModel = true)
+  doAssert guest.committedPartyHouse < 0, "talk about their table promises nothing"
   # Curfew promise: after dinner, away from home, late enough -> go home.
   villager.applyDecision(observation, layout,
     Decision(valid: true, action: StayInside, houseIndex: UnknownHouse,

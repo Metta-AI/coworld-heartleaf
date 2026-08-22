@@ -31,6 +31,9 @@ type
     houseIndex*: int
     gardenIndex*: int
     targetName*: string
+    anchor*: Point
+      ## Where the followed gnome stood when a StandByPerson spot was
+      ## chosen; the spot is kept until they move away from it.
 
   Villager* = ref object
     houseIndex*: int
