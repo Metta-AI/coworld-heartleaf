@@ -120,18 +120,24 @@ While a player's socket stays open the game streams that gnome's model
 log to it, one JSON text frame per entry:
 
 ```json
-{"seat": 3, "gnome": "Sasha", "index": 17, "role": "user", "text": "Clock: Day 1. It is 9:00am. 9 hours till dinner."}
+{"game": 1, "sequence": 21, "seat": 3, "gnome": "Sasha", "index": 17, "role": "user", "text": "Clock: Day 1. It is 9:00am. 9 hours till dinner."}
 ```
 
-`role` is `system` (the prompt, sent once, `index` -1), `user` or
+`game` counts games in this process (a server with `maxGames` above 1
+starts a new log at sequence 0 for each) and `sequence` numbers the
+records of one game densely, so a collector can spot gaps and
+duplicates. `role` is `system` (the prompt, sent once, `index` -1), `user` or
 `assistant` (a turn of the conversation, `index` is its position in the
 history), or `note` (errors and retries the model never sees, `index`
 -1). The history is append-only: every request sends the system prompt
 plus the whole history, with that request's state report appended as the
 last user turn, and the model's raw reply is appended as an assistant
 turn. So a player that records every frame ends the game holding
-exactly what its model was sent and what it answered. A socket that
-reconnects receives the backlog from the start.
+exactly what its model was sent and what it answered. The acceptance
+reply always precedes the first log frame. A socket that reconnects
+receives the backlog from the start unless it first sends
+`log-cursor game=N sequence=M`, after which streaming resumes at M+1;
+`soul_player` does this and also drops any record it already wrote.
 
 `soul_player` prints each frame to stdout and, with `--log-dir:DIR` (env
 `HEARTLEAF_LOG_DIR`), also writes a readable `DIR/<name>-<Gnome>.log`.

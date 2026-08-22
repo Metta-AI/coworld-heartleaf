@@ -116,8 +116,9 @@ proc parseOptions(): PlayerOptions =
     else:
       discard
 
-proc awaitReply(ws: WebSocket): string =
+proc awaitReply(ws: WebSocket, early: var seq[string]): string =
   ## Waits for the game's accepted or rejected reply, answering pings.
+  ## Any log frame that arrives first is kept in `early` for the sink.
   let deadline = epochTime() + ReplyTimeoutMs / 1000
   while epochTime() < deadline:
     let message = ws.receiveMessage(ReplyPollMs)
@@ -130,6 +131,7 @@ proc awaitReply(ws: WebSocket): string =
       let text = message.get().data
       if text.isSoulAccepted() or text.isSoulRejected():
         return text
+      early.add(text)
     of BinaryMessage, Pong:
       discard
   raise newException(CatchableError, "no reply to the soul within " &
@@ -138,42 +140,94 @@ proc awaitReply(ws: WebSocket): string =
 type
   LogSink = ref object
     ## Where received log frames go: stdout always, plus a readable file.
+    ## Tracks the last (game, sequence) written so a replayed backlog
+    ## after a reconnect is never written twice.
     name: string
     dir: string
     file: File
     path: string
+    game: int
+    sequence: int
 
 proc readableEntry(line: string): string =
-  ## One log frame as a readable block for the audit file.
+  ## One log frame as a readable block for the audit file. The header
+  ## carries the record's game and sequence so a restarted collector can
+  ## pick up where the file ends.
   try:
     let node = parseJson(line)
     let role = node{"role"}.getStr()
     let index = node{"index"}.getInt(-1)
+    let cursor = " (game " & $node{"game"}.getInt(0) & ", seq " &
+      $node{"sequence"}.getInt(-1) & ")"
     let header =
       if index >= 0:
-        "=== " & role & " #" & $index & " ==="
+        "=== " & role & " #" & $index & " ===" & cursor
       else:
-        "=== " & role & " ==="
+        "=== " & role & " ===" & cursor
     header & "\n" & node{"text"}.getStr() & "\n\n"
   except CatchableError:
     line & "\n"
 
-proc record(sink: LogSink, line: string) =
-  ## Prints one log frame and appends it to the audit file.
-  echo line
-  if sink.dir.len == 0:
+proc loadCursor(sink: LogSink, path: string) =
+  ## Reads the last (game, seq) header of an existing audit file so the
+  ## next session resumes after it instead of duplicating the backlog.
+  if not fileExists(path):
     return
-  if sink.file == nil:
-    var gnome = ""
+  for line in lines(path):
+    if not line.startsWith("=== "):
+      continue
+    let at = line.rfind(" (game ")
+    if at < 0:
+      continue
+    let parts = line[at + 7 .. ^1].replace(")", "").split(", seq ")
+    if parts.len != 2:
+      continue
     try:
-      gnome = parseJson(line){"gnome"}.getStr()
-    except CatchableError:
+      sink.game = parseInt(parts[0].strip())
+      sink.sequence = parseInt(parts[1].strip())
+    except ValueError:
       discard
-    createDir(sink.dir)
-    let stem = if sink.name.len > 0: sink.name else: "player"
-    sink.path = sink.dir / (stem & (if gnome.len > 0: "-" & gnome else: "") & ".log")
-    sink.file = open(sink.path, fmAppend)
-    echo "soul_player writing model log to ", sink.path
+
+proc cursorText(sink: LogSink): string =
+  ## The resume message for a reconnect.
+  "log-cursor game=" & $sink.game & " sequence=" & $sink.sequence
+
+proc openFile(sink: LogSink, gnome: string) =
+  ## Opens (or resumes) the audit file for this gnome.
+  createDir(sink.dir)
+  let stem = if sink.name.len > 0: sink.name else: "player"
+  sink.path = sink.dir / (stem & (if gnome.len > 0: "-" & gnome else: "") & ".log")
+  sink.loadCursor(sink.path)
+  sink.file = open(sink.path, fmAppend)
+  echo "soul_player writing model log to ", sink.path,
+    (if sink.sequence >= 0: " (resuming after game " & $sink.game &
+      " seq " & $sink.sequence & ")" else: "")
+
+proc record(sink: LogSink, line: string) =
+  ## Prints one log frame and appends it to the audit file, skipping
+  ## records already seen and marking a new game.
+  var game = 0
+  var sequence = -1
+  var gnome = ""
+  try:
+    let node = parseJson(line)
+    game = node{"game"}.getInt(0)
+    sequence = node{"sequence"}.getInt(-1)
+    gnome = node{"gnome"}.getStr()
+  except CatchableError:
+    discard
+  if sink.dir.len > 0 and sink.file == nil:
+    sink.openFile(gnome)
+  if sequence >= 0:
+    if game == sink.game and sequence <= sink.sequence:
+      return
+    if game != sink.game and sink.file != nil and sink.game > 0:
+      sink.file.write("=== game " & $game & " ===\n\n")
+    sink.game = game
+    sink.sequence = sequence
+  echo line
+  if sink.file == nil:
+    return
   sink.file.write(line.readableEntry())
   sink.file.flushFile()
 
@@ -204,18 +258,26 @@ proc run(options: PlayerOptions, soul: Soul) =
   var
     accepted = false
     disconnectedAt = 0.0
+  sink.sequence = -1
   while true:
     try:
       let ws = newWebSocket(connectUrl)
       echo "soul_player connected ", connectUrl
       disconnectedAt = 0.0
       ws.send(soul.raw, TextMessage)
-      let reply = ws.awaitReply()
+      var early: seq[string]
+      let reply = ws.awaitReply(early)
       echo "soul_player ", reply
       if reply.isSoulRejected():
         ws.close()
         quit(ExitRejected)
+      if sink.sequence >= 0:
+        # Resume the log after what this process, or the file it
+        # appends to, already holds.
+        ws.send(sink.cursorText(), TextMessage)
       accepted = true
+      for line in early:
+        sink.record(line)
       if options.once:
         ws.close()
         quit(0)

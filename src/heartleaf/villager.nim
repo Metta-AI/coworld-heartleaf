@@ -44,6 +44,9 @@ type
     logEntries*: seq[string]
       ## Everything appended to the history plus notes, one JSON line
       ## each, in order; streamed to the seat's player as it grows.
+    gameNumber*: int
+      ## Which game of this process the villager belongs to; every log
+      ## record carries it with its sequence so a collector can resume.
     dayNumber*: int
     minutes*: int
     lastClockHour*: int
@@ -139,8 +142,11 @@ proc selfNames*(villager: Villager): seq[string] =
 ## History and log
 
 proc logEntry(villager: Villager, role: string, index: int, text: string): string =
-  ## One JSON log line for the seat's player.
+  ## One JSON log line for the seat's player. game and sequence identify
+  ## the record; index is its place in the history (-1 for notes).
   $(%*{
+    "game": villager.gameNumber,
+    "sequence": villager.logEntries.len,
     "seat": villager.houseIndex,
     "gnome": villager.name,
     "index": index,

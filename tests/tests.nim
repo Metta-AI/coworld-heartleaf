@@ -588,6 +588,10 @@ block:
   doAssert logged.len >= history.len + 1, "every turn is logged, plus the prompt"
   doAssert parseJson(logged[0])["role"].getStr() == "system"
   doAssert parseJson(logged[0])["gnome"].getStr() == "Ivan"
+  for i, entry in logged:
+    let node = parseJson(entry)
+    doAssert node["game"].getInt() == 1 and node["sequence"].getInt() == i,
+      "log records carry the game and a dense sequence"
   var turns = 0
   for entry in logged:
     let node = parseJson(entry)

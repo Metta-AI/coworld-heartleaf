@@ -34,6 +34,8 @@ type
     layout*: WorldLayout
     onSeatFailure*: SeatFailureHandler
     pausedSince*: float
+    gameNumber*: int
+      ## One-based game of this process; stamped on every log record.
 
 proc newBrains*(
   navigation: Navigation,
@@ -47,12 +49,14 @@ proc newBrains*(
     client: client,
     budget: newRequestBudget(seed),
     navigation: navigation,
-    layout: layout
+    layout: layout,
+    gameNumber: 1
   )
 
 proc attachSoul*(brains: Brains, houseIndex: int, soul: Soul) =
   ## Brings one seat to life with its soul.
   var villager = newVillager(houseIndex, soul, brains.layout.gardens.len)
+  villager.gameNumber = brains.gameNumber
   villager.systemPrompt = systemPrompt(soul, villager.name)
   villager.logSystemPrompt()
   brains.villagers[houseIndex] = villager
@@ -60,7 +64,9 @@ proc attachSoul*(brains: Brains, houseIndex: int, soul: Soul) =
     " prompt=" & $villager.systemPrompt.len & " chars")
 
 proc resetForNewGame*(brains: Brains) =
-  ## Fresh minds for a fresh village, same souls.
+  ## Fresh minds for a fresh village, same souls; log records start a
+  ## new game number at sequence 0.
+  inc brains.gameNumber
   var souls: seq[(int, Soul)]
   for houseIndex, villager in brains.villagers.pairs:
     souls.add((houseIndex, villager.soul))

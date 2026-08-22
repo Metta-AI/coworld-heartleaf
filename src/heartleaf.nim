@@ -23,6 +23,7 @@ const
   HomeMapIndexBase = 1
   DefaultSoulTimeoutSeconds* = 150
   CogamePlayerFailureUriEnv = "COGAME_PLAYER_FAILURE_URI"
+  LogCursorPrefix = "log-cursor "
   FoodGridCols = 8
   FoodGridRows = 8
   DirectionCount = 4
@@ -419,6 +420,8 @@ when not defined(emscripten):
         ## Seat whose soul each socket delivered.
       logSent: Table[WebSocket, int]
         ## How many of the seat's log entries each soul socket has received.
+      gameNumber: int
+        ## One-based game of this process, matching the log records.
       closedSockets: seq[WebSocket]
       tokens: seq[string]
       playerNames: seq[string]
@@ -3869,6 +3872,7 @@ when not defined(emscripten):
     appState.souls = initTable[int, Soul]()
     appState.soulSockets = initTable[WebSocket, int]()
     appState.logSent = initTable[WebSocket, int]()
+    appState.gameNumber = 1
     appState.closedSockets = @[]
     appState.tokens = @[]
     appState.replayServerMode = false
@@ -4105,9 +4109,12 @@ when not defined(emscripten):
       appState.logSent.del(websocket)
 
   proc resetConnectedPlayers() =
-    ## Resets spectator views for a fresh simulation.
+    ## Resets spectator views and log cursors for a fresh simulation: the
+    ## next game's log starts again at sequence 0.
     for websocket in appState.playerViewers.keys:
       appState.playerViewers[websocket] = PlayerViewerState()
+    for websocket in appState.logSent.keys:
+      appState.logSent[websocket] = 0
 
   proc freeSeatForSoul(): int =
     ## The lowest seat without a soul, or -1 when the village is full.
@@ -4160,6 +4167,21 @@ when not defined(emscripten):
     if not soul.modelId.knownModelFamily():
       echo "soul seat=", seat, " names an unfamiliar model: ", soul.modelId
     soul.soulReply()
+
+  proc parseLogCursor(text: string): tuple[game, sequence: int] =
+    ## Reads "log-cursor game=N sequence=M"; missing parts read as 0 / -1.
+    result = (game: 0, sequence: -1)
+    for part in text[LogCursorPrefix.len .. ^1].splitWhitespace():
+      let pair = part.split('=')
+      if pair.len != 2:
+        continue
+      try:
+        if pair[0] == "game":
+          result.game = parseInt(pair[1])
+        elif pair[0] == "sequence":
+          result.sequence = parseInt(pair[1])
+      except ValueError:
+        discard
 
   proc declarePlayerFailure(seat: int, message: string) =
     ## Reports one seat as the reason the episode cannot go on. Hosted runs
@@ -4387,13 +4409,24 @@ when not defined(emscripten):
       if message.kind == Pong:
         return
       if message.kind == TextMessage:
-        var reply = ""
         {.gcsafe.}:
           withLock appState.lock:
-            if websocket in appState.playerSlots:
-              reply = acceptSoul(websocket, message.data)
-        if reply.len > 0:
-          websocket.send(reply, TextMessage)
+            if websocket in appState.soulSockets and
+                message.data.startsWith(LogCursorPrefix):
+              # A reconnecting collector tells us what it already has, so
+              # the backlog resumes instead of replaying from the start.
+              let cursor = parseLogCursor(message.data)
+              if cursor.game == appState.gameNumber:
+                appState.logSent[websocket] = max(0, cursor.sequence + 1)
+              else:
+                appState.logSent[websocket] = 0
+            elif websocket in appState.playerSlots:
+              # Reply while still holding the lock: the loop streams log
+              # records under the same lock, so nothing can overtake the
+              # acceptance on this socket.
+              let reply = acceptSoul(websocket, message.data)
+              if reply.len > 0:
+                websocket.send(reply, TextMessage)
         return
       let clickedPlayer =
         if message.kind == BinaryMessage:
@@ -4746,6 +4779,7 @@ when not defined(emscripten):
         brains.resetForNewGame()
         {.gcsafe.}:
           withLock appState.lock:
+            appState.gameNumber = brains.gameNumber
             resetConnectedPlayers()
 
       runFrameLimiter(lastTick)
