@@ -41,7 +41,6 @@ const
   MinSpawnSpacing = 20
   SpawnScanStep = 4
   HouseSpawnMaxDistance = 96
-  ScoreScreenTicks = 10 * TicksPerSecond
   DinnerScreenTicks = 10 * TicksPerSecond
   DinnerTallyMinutes = DinnerMinutes
   DinnerEatRounds = 3
@@ -383,6 +382,8 @@ type
     port: int
     seed: int
     maxTicks: int
+    maxDays: int
+      ## Game length in days, score screens included; overrides maxTicks.
     maxGames: int
     daySeconds: int
     tokens: seq[string]
@@ -4423,6 +4424,7 @@ when not defined(emscripten):
     port = DefaultPort,
     seed = DefaultSeed,
     maxTicks = DefaultMaxTicks,
+    maxDays = 0,
     maxGames = DefaultMaxGames,
     daySeconds = DefaultDaySeconds,
     tokens: seq[string] = @[],
@@ -4439,17 +4441,26 @@ when not defined(emscripten):
     initAppState()
     appState.tokens = tokens
     appState.playerNames = playerNames
+    let dayTicks = max(1, daySeconds) * TicksPerSecond
+    let totalTicks =
+      if maxDays > 0:
+        gameTicksForDays(maxDays, dayTicks)
+      else:
+        maxTicks
+    let deadlineProblem = hostedDeadlineProblem(totalTicks)
+    if deadlineProblem.len > 0:
+      echo "fatal: ", deadlineProblem
+      quit(1)
     var replayWriter = openReplayWriter(
       saveReplayPath,
       $(%*{
         "seed": seed,
-        "maxTicks": maxTicks,
+        "maxTicks": totalTicks,
         "maxGames": maxGames,
         "daySeconds": daySeconds,
         "tokenCount": tokens.len
       })
     )
-    let dayTicks = max(1, daySeconds) * TicksPerSecond
     var
       sim = initSimServer(seed, dayTicks)
       lastTick: MonoTime
@@ -4635,7 +4646,7 @@ when not defined(emscripten):
             withLock appState.lock:
               sim.removePlayer(globalSockets[i])
 
-      if maxTicks > 0 and runTicks >= maxTicks:
+      if totalTicks > 0 and runTicks >= totalTicks:
         if lastWrittenDay == 0:
           sim.writeArtifacts(runtimeConfig)
         if replayWriter.enabled:
@@ -4788,6 +4799,7 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("seed", config.seed)
   node.readConfigInt("maxTicks", config.maxTicks)
   node.readConfigInt("max-ticks", config.maxTicks)
+  node.readConfigInt("maxDays", config.maxDays)
   node.readConfigInt("maxGames", config.maxGames)
   node.readConfigInt("max-games", config.maxGames)
   node.readConfigInt("daySeconds", config.daySeconds)
@@ -4822,6 +4834,7 @@ proc echoStartupConfig(config: RunConfig) =
     " tokens=", config.tokens.len,
     " playerNames=", config.playerNames.len,
     " maxTicks=", config.maxTicks.limitText(),
+    " maxDays=", config.maxDays.limitText(),
     " maxGames=", config.maxGames.limitText(),
     " daySeconds=", config.daySeconds,
     " soulTimeoutSeconds=", config.soulTimeoutSeconds,
@@ -5141,6 +5154,7 @@ when isMainModule and not defined(emscripten):
     config.port,
     seed = config.seed,
     maxTicks = config.maxTicks,
+    maxDays = config.maxDays,
     maxGames = config.maxGames,
     daySeconds = config.daySeconds,
     tokens = config.tokens,

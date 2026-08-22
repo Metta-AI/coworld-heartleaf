@@ -150,7 +150,7 @@ proc maybeNoteLeaveTime*(
   ## the model gets to react; repeats every LeaveNudgeMinutes while the
   ## villager is still outside. Before dinner the reference point is the
   ## committed house, or, with no commitment, the farthest table. In the
-  ## evening it is home, for 10:00pm.
+  ## evening it is home, for the end of the day.
   if observation.scene != Outdoors:
     return
   if villager.leaveTimeNoted and
@@ -193,7 +193,8 @@ proc maybeNoteLeaveTime*(
     if minutes < DayEndMinutes - walk - LeaveMarginMinutes:
       return
     text = "Latest departure time for the night: walking home takes " &
-      "about " & $walk & " minutes and the day ends at 10:00pm."
+      "about " & $walk & " minutes and the day ends at " &
+      DayEndMinutes.clockName() & "."
   else:
     return
   villager.leaveTimeNoted = true

@@ -6,10 +6,13 @@ and cumulative score.
 
 ## Day Cycle
 
-A game is seven in-game days. Each day starts at 8:00 AM and ends at
-10:00 PM and lasts 3 minutes of real time, followed by a 10-second score
-screen, so a whole game takes about 22 minutes. Dinner is served at
-6:00 PM and the dinner result stays on screen for 10 seconds.
+A game is a week of seven in-game days. Each day runs from 9:00 AM to
+9:00 PM and lasts three real minutes, so four game hours pass every real
+minute (15 seconds a game hour at 24 frames a second), followed by a
+10-second score screen. A whole game is about 22 minutes of play, inside
+the hosted 30-minute deadline (the game refuses a configuration that is
+not). Dinner is served at 6:00 PM and the dinner result stays on screen
+for 10 seconds.
 
 Gnomes spend the day collecting vegetables from garden plots. Gardens
 with food show an exclamation marker. A gnome collects food by standing
@@ -71,5 +74,5 @@ retried; no gnome is ever penalised for a slow or failed model.
 
 ## End Of Day
 
-At 10:00 PM, every gnome returns to their own house. Each gnome sees
+At 9:00 PM, every gnome returns to their own house. Each gnome sees
 their cumulative score, then the next day begins from the morning setup.

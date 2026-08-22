@@ -76,7 +76,7 @@
           "default": 0
         },
         "daySeconds": {
-          "description": "Real seconds per in-game day, before the 10-second score screen. The league plays seven days of 180 seconds.",
+          "description": "Real seconds per in-game day (9am to 9pm), before the 10-second score screen. 180 is the league clock: four game hours per real minute.",
           "type": "integer",
           "minimum": 30,
           "maximum": 600,
@@ -98,6 +98,12 @@
           "description": "Offline stand-in for the model: when set, every decision is this literal reply and no model is called. Used by the certification fixture and local smoke runs only; hosted variants leave it unset so each soul's model is really called.",
           "type": "string",
           "default": ""
+        },
+        "maxDays": {
+          "description": "Game length in days, score screens included; overrides maxTicks. The league plays 7. The game refuses a length past the 30-minute hosted deadline.",
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
         }
       }
     },
@@ -289,9 +295,7 @@
       "name": "League",
       "game_config": {
         "seed": 4731713,
-        "maxTicks": 31920,
         "maxGames": 1,
-        "daySeconds": 180,
         "players": [
           {
             "name": "Villager 1"
@@ -320,9 +324,10 @@
           {
             "name": "Villager 9"
           }
-        ]
+        ],
+        "maxDays": 7
       },
-      "description": "Seven Heartleaf days of three minutes each (21 minutes of play) for hosted league rounds. Seed 4731713 is unpinned: each episode draws a fresh village RNG."
+      "description": "A week of seven Heartleaf days (9am to 9pm, three real minutes each, about 22 minutes) for hosted league rounds. Seed 4731713 is unpinned: each episode draws a fresh village RNG."
     },
     {
       "id": "freeplay",
@@ -383,5 +388,5 @@
     ]
   },
   "players_per_user": 9,
-  "episode_timeout_minutes": 60
+  "episode_timeout_minutes": 30
 }

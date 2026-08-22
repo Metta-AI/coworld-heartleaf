@@ -10,7 +10,7 @@ const
   DefaultMaxInFlight = 9
   DefaultMinRequestSeconds = 0.0
     ## No pod-wide floor by default: the sidecar's limiter is a bucket that
-    ## admits bursts, and nine gnomes all wake up at 8:00am.
+    ## admits bursts, and nine gnomes all wake up at the same hour.
   DefaultVillagerMinSeconds = 2.0
   BudgetWindowSeconds = 60.0
   RetryMinSeconds = 2.0

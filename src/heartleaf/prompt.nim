@@ -65,7 +65,7 @@ departure time note arrives, and stay inside through 6:00pm. Do not
 invite people to your house that day.
 
 At 6:00pm you must be INSIDE that house. Standing at a door, even
-your own, means you miss dinner. After dinner, gather. By 10:00pm be
+your own, means you miss dinner. After dinner, gather. By 9:00pm be
 inside your own house; start go_home when the departure note says so.
 
 Repeating yourself:

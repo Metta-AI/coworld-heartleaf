@@ -386,6 +386,18 @@ block:
       "seek to tick " & $target & " should match the linear hash"
   removeFile(replayPath)
 
+echo "Testing the game clock fits the hosted deadline"
+doAssert DayTotalMinutes == 12 * 60, "a day is twelve hours"
+doAssert DayTicks == 180 * TicksPerSecond, "three-minute days"
+doAssert SecondsPerGameHour * 4 == 60, "four game hours per real minute"
+doAssert DayTicks mod (DayTotalMinutes div 5) == 0, "one clock step is a whole number of ticks"
+let week = gameTicksForDays(DefaultDayCount, DayTicks)
+doAssert week == 7 * (4320 + 240), "a week is 31920 ticks"
+doAssert hostedDeadlineProblem(week) == "", "the week fits in 30 minutes"
+doAssert hostedDeadlineProblem(0) == "", "unlimited games are local only"
+doAssert hostedDeadlineProblem(HostedDeadlineSeconds * TicksPerSecond + 24) != "",
+  "a game past the deadline is refused"
+
 echo "Testing unpinned seed sentinel"
 doAssert not seedPinned(""), "empty config should be unpinned"
 doAssert not seedPinned("{}"), "missing seed should be unpinned"
