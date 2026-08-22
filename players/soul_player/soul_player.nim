@@ -2,7 +2,10 @@
 ## keeps the socket alive. The simulation plays the gnome; this process
 ## never sends anything else.
 
-import std/[algorithm, json, os, parseopt, strutils, times], whisky, heartleaf/souls
+import
+  std/[algorithm, json, os, parseopt, strutils, times],
+  whisky,
+  heartleaf/[protocol, souls]
 
 const
   DefaultHost = "localhost"
@@ -116,9 +119,9 @@ proc parseOptions(): PlayerOptions =
     else:
       discard
 
-proc awaitReply(ws: WebSocket, early: var seq[string]): string =
+proc awaitReply(ws: WebSocket): string =
   ## Waits for the game's accepted or rejected reply, answering pings.
-  ## Any log frame that arrives first is kept in `early` for the sink.
+  ## Nothing else is streamed before the collector says it is ready.
   let deadline = epochTime() + ReplyTimeoutMs / 1000
   while epochTime() < deadline:
     let message = ws.receiveMessage(ReplyPollMs)
@@ -131,11 +134,20 @@ proc awaitReply(ws: WebSocket, early: var seq[string]): string =
       let text = message.get().data
       if text.isSoulAccepted() or text.isSoulRejected():
         return text
-      early.add(text)
     of BinaryMessage, Pong:
       discard
   raise newException(CatchableError, "no reply to the soul within " &
     $(ReplyTimeoutMs div 1000) & "s")
+
+proc acceptedSeat(reply: string): int =
+  ## The seat named in a "soul accepted seat=N ..." reply, or -1.
+  result = -1
+  for part in reply.splitWhitespace():
+    if part.startsWith("seat="):
+      try:
+        return parseInt(part[5 .. ^1])
+      except ValueError:
+        return -1
 
 type
   LogSink* = ref object
@@ -188,9 +200,13 @@ proc loadCursor*(sink: LogSink, path: string) =
     except ValueError:
       discard
 
-proc cursorText*(sink: LogSink): string =
-  ## The resume message for a reconnect.
-  "log-cursor game=" & $sink.game & " sequence=" & $sink.sequence
+proc readyText*(sink: LogSink): string =
+  ## The handshake that starts the log stream: resume after what the
+  ## audit file already holds, else from the beginning.
+  if sink.sequence >= 0:
+    "log-cursor game=" & $sink.game & " sequence=" & $sink.sequence
+  else:
+    "log-ready"
 
 proc openFile(sink: LogSink, gnome: string) =
   ## Opens (or resumes) the audit file for this gnome.
@@ -265,22 +281,20 @@ proc run(options: PlayerOptions, soul: Soul) =
       echo "soul_player connected ", connectUrl
       disconnectedAt = 0.0
       ws.send(soul.raw, TextMessage)
-      var early: seq[string]
-      let reply = ws.awaitReply(early)
+      let reply = ws.awaitReply()
       echo "soul_player ", reply
       if reply.isSoulRejected():
         ws.close()
         quit(ExitRejected)
-      if sink.sequence >= 0:
-        # Resume the log after what this process, or the file it
-        # appends to, already holds.
-        ws.send(sink.cursorText(), TextMessage)
       accepted = true
-      for line in early:
-        sink.record(line)
       if options.once:
         ws.close()
         quit(0)
+      # Open (or resume) the audit file for this seat's gnome before asking
+      # for the log, so the cursor is known and nothing is replayed.
+      if sink.dir.len > 0 and sink.file == nil:
+        sink.openFile(reply.acceptedSeat().playerNameForHouse())
+      ws.send(sink.readyText(), TextMessage)
       ws.idle(sink)
     except CatchableError as e:
       echo "soul_player reconnecting: ", e.msg

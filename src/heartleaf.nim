@@ -24,6 +24,7 @@ const
   DefaultSoulTimeoutSeconds* = 150
   CogamePlayerFailureUriEnv = "COGAME_PLAYER_FAILURE_URI"
   LogCursorPrefix = "log-cursor "
+  LogReadyMessage = "log-ready"
   FoodGridCols = 8
   FoodGridRows = 8
   DirectionCount = 4
@@ -415,6 +416,8 @@ when not defined(emscripten):
         ## Seat whose soul each socket delivered.
       logSent: Table[WebSocket, int]
         ## How many of the seat's log entries each soul socket has received.
+        ## A socket is only streamed to once it sent log-ready or a
+        ## log-cursor, so the first records never race the handshake.
       gameNumber: int
         ## One-based game of this process, matching the log records.
       closedSockets: seq[WebSocket]
@@ -984,8 +987,8 @@ proc dinnerOverlaySprite(sim: SimServer, record: DinnerRecord): RgbaSprite =
     sim.blitChatText(result, "Host: " & record.hostName, 8, 32)
     sim.drawFoodCounts(result, record.foods, 8, 44)
 
-proc scoreDisplayName(player: Player): string =
-  ## Returns the score-screen name with username and player name.
+proc attributedDisplayName(player: Player): string =
+  ## Returns the review name with username and fixed gnome name.
   if player.username.len == 0:
     return player.playerName
   return player.username & " (" & player.playerName & ")"
@@ -1009,7 +1012,7 @@ proc scoreOverlaySprite(sim: SimServer): RgbaSprite =
     )
     sim.blitChatText(
       result,
-      player.scoreDisplayName(),
+      player.playerName,
       x,
       y + GnomeSpriteSize + 2
     )
@@ -1080,8 +1083,8 @@ proc addGlobalScorePanel(
     packet.addRgbaSpriteCached(
       cache,
       nameSpriteId,
-      sim.globalPanelTextSprite(player.scoreDisplayName(), nameColor),
-      "global name " & player.scoreDisplayName()
+      sim.globalPanelTextSprite(player.attributedDisplayName(), nameColor),
+      "global name " & player.attributedDisplayName()
     )
     packet.addObject(
       GlobalPanelScoreObjectBase + i,
@@ -1251,7 +1254,7 @@ proc dailyResultsJson*(sim: SimServer): string =
         player = candidate
         break
     if player != nil:
-      names.add(%player.scoreDisplayName())
+      names.add(%player.attributedDisplayName())
       usernames.add(%player.username)
       playerNames.add(%player.playerName)
       scores.add(%player.score)
@@ -4342,9 +4345,13 @@ when not defined(emscripten):
         {.gcsafe.}:
           withLock appState.lock:
             if websocket in appState.soulSockets and
+                message.data.strip() == LogReadyMessage:
+              # The collector is ready for the log from the beginning.
+              appState.logSent[websocket] = 0
+            elif websocket in appState.soulSockets and
                 message.data.startsWith(LogCursorPrefix):
-              # A reconnecting collector tells us what it already has, so
-              # the backlog resumes instead of replaying from the start.
+              # A collector that already holds part of the log says where
+              # it stopped, so streaming resumes there instead of replaying.
               let cursor = parseLogCursor(message.data)
               if cursor.game == appState.gameNumber:
                 appState.logSent[websocket] = max(0, cursor.sequence + 1)
@@ -4629,25 +4636,33 @@ when not defined(emscripten):
           lastWrittenDay = sim.dayNumber
         inc runTicks
 
-      # Stream each seat's model log to the player that sent its soul:
-      # every turn appended to the history, plus notes, exactly once.
-      var logDrops: seq[WebSocket]
+      # Stream each seat's model log to the player that sent its soul and
+      # said it is ready: every turn appended to the history, plus notes,
+      # exactly once. Batches are gathered under the lock and sent after
+      # it is released so a slow socket never stalls the simulation.
+      var deliveries: seq[tuple[websocket: WebSocket, batch: seq[string]]]
       {.gcsafe.}:
         withLock appState.lock:
           for websocket, seat in appState.soulSockets.pairs:
-            if seat notin brains.villagers:
+            if websocket notin appState.logSent or seat notin brains.villagers:
               continue
             let entries = brains.villagers[seat].logEntries
-            var sent = appState.logSent.getOrDefault(websocket, 0)
-            try:
-              while sent < entries.len:
-                websocket.send(entries[sent], TextMessage)
-                inc sent
-            except CatchableError:
-              logDrops.add(websocket)
-            appState.logSent[websocket] = sent
-          for websocket in logDrops:
-            sim.removePlayer(websocket)
+            let sent = appState.logSent[websocket]
+            if sent < entries.len:
+              deliveries.add((websocket, entries[sent ..< entries.len]))
+              appState.logSent[websocket] = entries.len
+      var logDrops: seq[WebSocket]
+      for delivery in deliveries:
+        try:
+          for entry in delivery.batch:
+            delivery.websocket.send(entry, TextMessage)
+        except CatchableError:
+          logDrops.add(delivery.websocket)
+      if logDrops.len > 0:
+        {.gcsafe.}:
+          withLock appState.lock:
+            for websocket in logDrops:
+              sim.removePlayer(websocket)
 
       for i in 0 ..< globalSockets.len:
         var nextState: PlayerViewerState

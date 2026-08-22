@@ -98,13 +98,15 @@ kept for you if the model cannot be asked when it is time to leave.
 
 ## The player protocol
 
-`/player` is not a sprite-protocol endpoint. It speaks only text frames:
-the player sends its soul file (and, on reconnect, `log-cursor game=N
-sequence=M`); the game answers `soul accepted ...` or `soul rejected: ...`
-and then streams the gnome's model log, one JSON line per frame. Binary
-frames from a player are ignored and no sprite packets are ever sent to
-it. The BitWorld sprite protocol remains the protocol of the global
-viewer (`/global`) and the replay viewer (`/replay`).
+`/player` is not a sprite-protocol endpoint. It speaks only text frames,
+in two phases: the player sends its soul file and the game answers `soul
+accepted ...` or `soul rejected: ...`; then the player sends `log-ready`
+(or `log-cursor game=N sequence=M` to resume after what it already
+holds) and only then does the game stream the gnome's model log, one JSON
+line per frame. Binary frames from a player are ignored and no sprite
+packets are ever sent to it. The BitWorld sprite protocol remains the
+protocol of the global viewer (`/global`) and the replay viewer
+(`/replay`).
 
 ## Uploading
 
@@ -143,11 +145,11 @@ history), or `note` (errors and retries the model never sees, `index`
 plus the whole history, with that request's state report appended as the
 last user turn, and the model's raw reply is appended as an assistant
 turn. So a player that records every frame ends the game holding
-exactly what its model was sent and what it answered. The acceptance
-reply always precedes the first log frame. A socket that reconnects
-receives the backlog from the start unless it first sends
-`log-cursor game=N sequence=M`, after which streaming resumes at M+1;
-`soul_player` does this and also drops any record it already wrote.
+exactly what its model was sent and what it answered. Nothing is
+streamed until the player sends `log-ready` (stream from the start) or
+`log-cursor game=N sequence=M` (resume at M+1), so a reconnecting or
+restarted collector never downloads what it already has; `soul_player`
+reads its cursor from its audit file before answering.
 
 `soul_player` prints each frame to stdout and, with `--log-dir:DIR` (env
 `HEARTLEAF_LOG_DIR`), also writes a readable `DIR/<name>-<Gnome>.log`.

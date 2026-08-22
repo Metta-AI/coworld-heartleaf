@@ -82,13 +82,15 @@ proc main() =
     discard server.waitForExit(5000)
   waitForHealth()
 
-  echo "Testing acceptance before any log frame"
+  echo "Testing acceptance, then nothing until log-ready"
   var first = newWebSocket(Url)
   first.send(SoulText, TextMessage)
+  let beforeReady = first.collect(1.5)
+  doAssert beforeReady.len == 1 and beforeReady[0].isSoulAccepted(),
+    "only the acceptance arrives before the handshake, got: " & $beforeReady
+  first.send("log-ready", TextMessage)
   let firstFrames = first.collect(3.0)
-  doAssert firstFrames.len > 1, "the game should reply and start streaming"
-  doAssert firstFrames[0].isSoulAccepted(),
-    "the first text frame must be the acceptance, got: " & firstFrames[0]
+  doAssert firstFrames.len > 0, "the log streams after log-ready"
   let firstRecords = firstFrames.records()
   doAssert firstRecords.len > 0
   doAssert firstRecords[0]["role"].getStr() == "system"
@@ -102,17 +104,13 @@ proc main() =
   let reply = second.collect(1.0)
   doAssert reply.len >= 1 and reply[0].isSoulAccepted(), "resend of the same soul is accepted"
   second.send("log-cursor game=1 sequence=" & $lastSequence, TextMessage)
-  var resumed = second.collect(3.0).records()
-  # Frames that raced ahead of the cursor are at most a replay of what we
-  # already hold; everything after the cursor must be new and dense.
-  var fresh: seq[JsonNode]
+  let resumed = second.collect(3.0).records()
+  doAssert resumed.len > 0, "streaming resumes after the cursor"
   for node in resumed:
-    if node["game"].getInt() == 1 and node["sequence"].getInt() > lastSequence:
-      fresh.add(node)
-  doAssert fresh.len > 0, "streaming resumes after the cursor"
-  doAssert fresh.denseFrom(1, fresh[0]["sequence"].getInt())
-  doAssert fresh[0]["sequence"].getInt() <= lastSequence + 1 + 3,
-    "resume starts right after the cursor, not from the beginning"
+    doAssert node["sequence"].getInt() > lastSequence,
+      "nothing at or below the cursor is ever re-sent"
+  doAssert resumed.denseFrom(1, lastSequence + 1),
+    "resume starts exactly after the cursor"
 
   echo "Testing a new game restarts the log at sequence 0"
   var gameTwo: seq[JsonNode]
@@ -149,7 +147,8 @@ proc main() =
   restarted.loadCursor(dir / "tester-Ivan.log")
   doAssert restarted.game == 2 and restarted.sequence == 0,
     "a restarted sink resumes from the file's last record"
-  doAssert restarted.cursorText() == "log-cursor game=2 sequence=0"
+  doAssert restarted.readyText() == "log-cursor game=2 sequence=0"
+  doAssert LogSink(sequence: -1).readyText() == "log-ready"
   removeDir(dir)
   echo "Integration tests passed"
 
