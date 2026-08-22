@@ -3,7 +3,7 @@ import
     times],
   bitworld/[spriteprotocol, resources],
   curly, pathy, supersnappy, whisky,
-  bedrock_auth, decisions, heartleaf/[common, protocol]
+  bedrock_auth, decisions, heartleaf/[common, protocol], social_window
 import zippy/ziparchives
 
 const
@@ -229,6 +229,18 @@ type
     fallbackDinnerObservedVisitors: int
     fallbackDinnerGuestCount: int
     fallbackDinnerRecordedDay: int
+    fallbackSocialWindowActive: bool
+    fallbackSocialFollowTarget: bool
+    fallbackSocialFollowDistance: int
+    fallbackSocialFollowDirection: string
+    fallbackSocialVisibleAtDeparture: int
+    fallbackSocialNearAtDeparture: int
+    fallbackSocialInvitationsSent: int
+    fallbackSocialDepartureRecorded: bool
+    fallbackSocialWindowObserved: bool
+    fallbackSocialFollowTargetObserved: bool
+    fallbackSocialFollowDistanceObserved: int
+    fallbackSocialFollowDirectionObserved: string
     fallbackInvitationCount: int
     fallbackInvitationAttempts: int
     fallbackInvitationNamed: HashSet[string]
@@ -787,12 +799,21 @@ bot's own house before dinner, including when the bot went elsewhere;
 decisions include the template identity and rendered message text so
 identical-message ratios can be computed from the artifact. Invitations
 use live pantry food names, visible villager names, the bot's own house,
-and the current game time; they are limited to five attempts per day,
+and the 6:00pm dinner time; they are limited to five attempts per day,
 one every three game hours, before dinner.
 Dinner-lock fields on decision records show whether movement was
 redirected, the redirect reason, and (for guest attempts) the original
 action and house. `dinnerLockOverrideCount` counts guest attempts;
 `dinnerLockRedirectCount` counts ordinary end-of-day redirects.
+Social-window fields record whether the pantry-gated late-day window was
+active (`fallbackSocialWindowActive`), whether a live follow target
+existed (`fallbackSocialFollowTarget`), its distance and direction
+(`fallbackSocialFollowDistance`, `fallbackSocialFollowDirection`),
+visible and nearby villager counts at departure
+(`fallbackSocialVisibleAtDeparture`, `fallbackSocialNearAtDeparture`),
+and invitations sent while the window was active
+(`fallbackSocialInvitationsSent`). The same values appear without the
+`fallback` prefix on `fallback_dinner` records.
 """
   createZipArchive(entries)
 
@@ -1503,6 +1524,18 @@ proc resetGardenPlan(bot: Bot) =
   bot.fallbackDinnerObservedVisitors = 0
   bot.fallbackDinnerGuestCount = 0
   bot.fallbackDinnerRecordedDay = 0
+  bot.fallbackSocialWindowActive = false
+  bot.fallbackSocialFollowTarget = false
+  bot.fallbackSocialFollowDistance = -1
+  bot.fallbackSocialFollowDirection = "none"
+  bot.fallbackSocialVisibleAtDeparture = 0
+  bot.fallbackSocialNearAtDeparture = 0
+  bot.fallbackSocialInvitationsSent = 0
+  bot.fallbackSocialDepartureRecorded = false
+  bot.fallbackSocialWindowObserved = false
+  bot.fallbackSocialFollowTargetObserved = false
+  bot.fallbackSocialFollowDistanceObserved = -1
+  bot.fallbackSocialFollowDirectionObserved = "none"
   bot.fallbackInvitationCount = 0
   bot.fallbackInvitationAttempts = 0
   bot.fallbackInvitationNamed.clear()
@@ -2081,6 +2114,18 @@ proc initBot(name: string, slot: int, soul: string): Bot =
   result.greetedToday = initHashSet[string]()
   result.dinnerHouse = UnknownHouse
   result.fallbackDinnerTarget = UnknownHouse
+  result.fallbackSocialWindowActive = false
+  result.fallbackSocialFollowTarget = false
+  result.fallbackSocialFollowDistance = -1
+  result.fallbackSocialFollowDirection = "none"
+  result.fallbackSocialWindowObserved = false
+  result.fallbackSocialFollowTargetObserved = false
+  result.fallbackSocialFollowDistanceObserved = -1
+  result.fallbackSocialFollowDirectionObserved = "none"
+  result.fallbackSocialVisibleAtDeparture = 0
+  result.fallbackSocialNearAtDeparture = 0
+  result.fallbackSocialInvitationsSent = 0
+  result.fallbackSocialDepartureRecorded = false
   result.dinnerLockOverrideCount = 0
   result.dinnerLockRedirectCount = 0
   result.dinnerLockOverridden = false
@@ -2772,6 +2817,118 @@ proc dinnerLeaveAt(bot: Bot, houseIndex: int): int =
     return -1
   DinnerMinutes - bot.walkMinutes(pixels) - LeaveMarginMinutes
 
+type
+  VisibleVillagerTarget = tuple[
+    name: string,
+    distance: int,
+    direction: string,
+    point: Point
+  ]
+
+proc nearestVisibleVillager(bot: Bot): VisibleVillagerTarget =
+  ## Chooses the nearest villager from the currently visible object state.
+  result.distance = -1
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+      continue
+    let playerIndex = objectId - PlayerObjectBase
+    if playerIndex == bot.selfIndex:
+      continue
+    let name = bot.visiblePlayerName(playerIndex)
+    if name.len == 0 or name == bot.playerName:
+      continue
+    let point = Point(
+      x: bot.objectFootX(objectState),
+      y: bot.objectFootY(objectState)
+    )
+    let distance = distanceSquared(
+      bot.playerFootX(),
+      bot.playerFootY(),
+      point.x,
+      point.y
+    )
+    if result.name.len == 0 or distance < result.distance or
+        (distance == result.distance and name < result.name):
+      result = (
+        name: name,
+        distance: distance,
+        direction: socialDirection(
+          point.x - bot.playerFootX(),
+          point.y - bot.playerFootY()
+        ),
+        point: point
+      )
+
+proc visibleVillagerCounts(bot: Bot): tuple[visible, near: int] =
+  ## Counts current visible villagers and those inside the chat radius.
+  for objectId, objectState in bot.objects:
+    if not objectState.present:
+      continue
+    if objectId < PlayerObjectBase or objectId >= NameObjectBase:
+      continue
+    let playerIndex = objectId - PlayerObjectBase
+    if playerIndex == bot.selfIndex:
+      continue
+    let name = bot.visiblePlayerName(playerIndex)
+    if name.len == 0 or name == bot.playerName:
+      continue
+    inc result.visible
+    if distanceSquared(
+        bot.playerFootX(),
+        bot.playerFootY(),
+        bot.objectFootX(objectState),
+        bot.objectFootY(objectState)
+      ) <= PersonStandRadius * PersonStandRadius:
+      inc result.near
+
+proc visiblePlayerDistance(bot: Bot, name: string): int =
+  ## Returns the current direct distance to one visible villager.
+  let playerIndex = bot.visiblePlayerIndexByName(name)
+  if playerIndex < 0:
+    return -1
+  let objectState = bot.objects[PlayerObjectBase + playerIndex]
+  distanceSquared(
+    bot.playerFootX(),
+    bot.playerFootY(),
+    bot.objectFootX(objectState),
+    bot.objectFootY(objectState)
+  )
+
+proc updateFallbackSocialTelemetry(bot: Bot) =
+  ## Refreshes live social-window state for the next fallback decision.
+  bot.fallbackSocialWindowActive = false
+  bot.fallbackSocialFollowTarget = false
+  bot.fallbackSocialFollowDistance = -1
+  bot.fallbackSocialFollowDirection = "none"
+  let active = socialWindowActive(
+    bot.minutes,
+    bot.dinnerLeaveAt(bot.homeIndex),
+    bot.inventoryTotal()
+  )
+  if not active:
+    return
+  bot.fallbackSocialWindowActive = true
+  bot.fallbackSocialWindowObserved = true
+  let target = bot.nearestVisibleVillager()
+  if target.name.len > 0:
+    bot.fallbackSocialFollowTarget = true
+    bot.fallbackSocialFollowDistance = target.distance
+    bot.fallbackSocialFollowDirection = target.direction
+    bot.fallbackSocialFollowTargetObserved = true
+    bot.fallbackSocialFollowDistanceObserved = target.distance
+    bot.fallbackSocialFollowDirectionObserved = target.direction
+
+proc noteSocialDeparture(bot: Bot) =
+  ## Captures visible villagers when the bot starts its home departure.
+  if bot.fallbackSocialDepartureRecorded:
+    return
+  let counts = bot.visibleVillagerCounts()
+  bot.fallbackSocialVisibleAtDeparture = counts.visible
+  bot.fallbackSocialNearAtDeparture = counts.near
+  bot.fallbackSocialDepartureRecorded = true
+
 proc dinnerLockActive(bot: Bot): bool =
   ## Returns whether dinner movement is locked to the bot's own house.
   if bot.dinnerRecorded:
@@ -2789,7 +2946,9 @@ proc dinnerDecisionTargetsOtherHouse(
     of LlmGoToParty, LlmFindHouse, LlmStandAtHouseGarden:
       bot.decisionHouse(decision)
     of LlmStayInside:
-      if bot.committedPartyHouse >= 0:
+      if bot.screenKind == HomeMap and bot.currentHouse >= 0:
+        bot.currentHouse
+      elif bot.committedPartyHouse >= 0:
         bot.committedPartyHouse
       else:
         bot.homeIndex
@@ -2867,8 +3026,11 @@ proc dinnerLockDecision(
 ): LlmDecision =
   ## Replaces a locked dinner destination with the bot's own house.
   result = decision
-  if not bot.dinnerLockActive() or
-      not bot.dinnerDecisionNeedsRedirect(decision):
+  if not bot.dinnerLockActive():
+    return
+  if bot.screenKind == MainMap:
+    bot.noteSocialDeparture()
+  if not bot.dinnerDecisionNeedsRedirect(decision):
     return
   let guestAttempt = bot.dinnerDecisionTargetsOtherHouse(decision)
   bot.markDinnerLockOverride(decision, guestAttempt)
@@ -2929,7 +3091,7 @@ proc fallbackInvitationMessage(
       else:
         bot.homeIndex.playerNameForHouse()
     house = houseOwner & "'s house"
-    time = bot.minutes.clockName()
+    time = DinnerMinutes.clockName()
     food = bot.collectedFoodsText()
   case templateIndex mod FallbackInvitationTemplateCount:
   of 0:
@@ -3046,6 +3208,7 @@ proc fallbackDecision(bot: Bot): LlmDecision =
         reason: "fallback: staying inside own house after dinner"
       )
   if bot.minutes < DinnerMinutes and bot.fallbackInvitationAvailable():
+    bot.updateFallbackSocialTelemetry()
     return bot.fallbackInvitationDecision()
   if bot.minutes < DinnerMinutes:
     if bot.fallbackDinnerMode.len == 0:
@@ -3057,14 +3220,25 @@ proc fallbackDecision(bot: Bot): LlmDecision =
         "adaptive fallback: host at home"
       bot.fallbackDinnerSignal = "own home"
       bot.fallbackDinnerRunnerUp = "none"
+    bot.updateFallbackSocialTelemetry()
     let leaveAt = bot.dinnerLeaveAt(bot.homeIndex)
     if leaveAt >= 0 and bot.minutes >= leaveAt:
+      bot.noteSocialDeparture()
       return LlmDecision(
         valid: true,
         action: LlmGoHome,
         houseIndex: UnknownHouse,
         reason: "fallback: leaving for own house before dinner"
       )
+    if bot.fallbackSocialWindowActive:
+      let target = bot.nearestVisibleVillager()
+      if target.name.len > 0:
+        return LlmDecision(
+          valid: true,
+          action: LlmStandNextToPerson,
+          targetName: target.name,
+          reason: "fallback: social window"
+        )
     return LlmDecision(
       valid: true,
       action: LlmKeepGatheringPlants,
@@ -3144,6 +3318,14 @@ proc recordArtifactDecision(
     "fallbackDinnerRunnerUp": bot.fallbackDinnerRunnerUp,
     "fallbackDinnerPantryItems": bot.fallbackDinnerPantryItems,
     "fallbackDinnerObservedVisitors": bot.fallbackDinnerObservedVisitors,
+    "fallbackSocialWindowActive": bot.fallbackSocialWindowActive,
+    "fallbackSocialFollowTarget": bot.fallbackSocialFollowTarget,
+    "fallbackSocialFollowDistance": bot.fallbackSocialFollowDistance,
+    "fallbackSocialFollowDirection": bot.fallbackSocialFollowDirection,
+    "fallbackSocialVisibleAtDeparture":
+      bot.fallbackSocialVisibleAtDeparture,
+    "fallbackSocialNearAtDeparture": bot.fallbackSocialNearAtDeparture,
+    "fallbackSocialInvitationsSent": bot.fallbackSocialInvitationsSent,
     "fallbackInvitationTemplate":
       if not fromLlm and decision.action == LlmSayToPerson and
           decision.reason == "fallback invitation":
@@ -3230,6 +3412,13 @@ proc recordArtifactFallbackDinner(
     "observedVisitors": bot.fallbackDinnerObservedVisitors,
     "guestCount": bot.fallbackDinnerGuestCount,
     "invitationsSent": bot.fallbackInvitationCount,
+    "socialWindowActive": bot.fallbackSocialWindowObserved,
+    "socialFollowTarget": bot.fallbackSocialFollowTargetObserved,
+    "socialFollowDistance": bot.fallbackSocialFollowDistanceObserved,
+    "socialFollowDirection": bot.fallbackSocialFollowDirectionObserved,
+    "socialVisibleAtDeparture": bot.fallbackSocialVisibleAtDeparture,
+    "socialNearAtDeparture": bot.fallbackSocialNearAtDeparture,
+    "socialInvitationsSent": bot.fallbackSocialInvitationsSent,
     "distinctVillagersNamed": bot.fallbackInvitationNamed.len,
     "insideAt6pm": insideAt6,
     "served": served,
@@ -3273,6 +3462,11 @@ proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
   bot.dinnerLockRedirectReason = ""
   bot.dinnerLockOriginalAction = ""
   bot.dinnerLockOriginalHouse = UnknownHouse
+  if fromLlm:
+    bot.fallbackSocialWindowActive = false
+    bot.fallbackSocialFollowTarget = false
+    bot.fallbackSocialFollowDistance = -1
+    bot.fallbackSocialFollowDirection = "none"
   nextDecision = bot.inferSocialCommitment(nextDecision)
   nextDecision = bot.dinnerLockDecision(nextDecision)
   let dinnerOverride = bot.dinnerLockOverridden
@@ -3791,6 +3985,22 @@ proc decisionInterrupted(bot: Bot): bool =
     for name in bot.visibleGnomeNames():
       if name notin bot.decisionVisibleNames:
         return true
+  if not bot.decisionFromLlm and
+      socialWindowActive(
+        bot.minutes,
+        bot.dinnerLeaveAt(bot.homeIndex),
+        bot.inventoryTotal()
+      ) and
+      bot.decision.action in {LlmFindPerson, LlmStandNextToPerson}:
+    let nearest = bot.nearestVisibleVillager()
+    let currentDistance = bot.visiblePlayerDistance(bot.decision.targetName)
+    if socialTargetNeedsRefresh(
+        bot.decision.targetName,
+        nearest.name,
+        currentDistance,
+        nearest.distance
+      ):
+      return true
   let chatSignature = bot.visibleChatsSignature()
   if chatSignature.len > 0 and chatSignature != bot.decisionChatSignature:
     return true
@@ -3928,6 +4138,12 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
   inc bot.chatSentCount
   if bot.fallbackInvitationPending:
     inc bot.fallbackInvitationCount
+    if socialWindowActive(
+        bot.minutes,
+        bot.dinnerLeaveAt(bot.homeIndex),
+        bot.inventoryTotal()
+      ):
+      inc bot.fallbackSocialInvitationsSent
     bot.fallbackInvitationPending = false
   bot.decisionChatSent = true
   bot.updateArtifactChat(true, false)
