@@ -79,6 +79,21 @@ the league channel before using it.
 
 ## Running Locally
 
+The quickest way to watch a game is the launcher, which plays one game the
+way the league does: it builds the server and the soul player, seats the
+nine example souls with a week of seven days, opens the global viewer in
+your browser, and writes each gnome's model log to `logs/`:
+
+```sh
+BEDROCK_KEY=... nim r tools/play.nim
+```
+
+Add `--mock` to play without a model, `--days:2` for a shorter game,
+`--port:N`, `--seed:N`, `--no-browser`, or `--no-build` to reuse the
+binaries in `out/`.
+
+To run the pieces by hand:
+
 ```sh
 nim r src/heartleaf.nim
 ```
