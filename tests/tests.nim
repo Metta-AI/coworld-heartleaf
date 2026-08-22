@@ -740,6 +740,20 @@ block:
   homebody.modelUnavailable = true
   homebody.keepPromise(evening, navigation, layout)
   doAssert homebody.decision.action == StayInside, "staying home stands"
+  # stay_inside answered while outside after dinner heads home, not to
+  # the party house.
+  let wanderer = newVillager(5, soul, layout.gardens.len)
+  wanderer.committedPartyHouse = 8
+  var outsideLate = evening
+  outsideLate.scene = Outdoors
+  outsideLate.currentHouse = -1
+  outsideLate.dinnerDone = true
+  wanderer.applyDecision(outsideLate, layout,
+    Decision(valid: true, action: StayInside, houseIndex: UnknownHouse,
+      untilMinutes: -1), fromModel = true)
+  discard wanderer.villagerTick(outsideLate, navigation, layout)
+  doAssert wanderer.goal.kind == EnterHouse and wanderer.goal.houseIndex == 5,
+    "after dinner stay_inside from outside walks home"
   let guest = newVillager(5, soul, layout.gardens.len)
   guest.applyDecision(observation, layout,
     Decision(valid: true, action: SayToPerson, targetName: "Anton",

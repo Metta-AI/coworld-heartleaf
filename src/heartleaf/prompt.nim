@@ -49,6 +49,11 @@ go there again. Not once more. Host at yours, or pick a house you
 have not eaten at. A full pantry or a loud invite is not a reason
 to return.
 
+Hosting with nobody at your table scores nothing. Go home to host only
+when you carry at least eight foods and a gnome has told you they are
+coming; otherwise be a guest at the table of a gnome who invited you,
+or ask who is hosting and go there. Most days most gnomes are guests.
+
 If you are hosting: pitch like a host all day, out loud, not only
 at the door. Name the gnome, name the foods you carry, and invite
 them: dinner at my house at 6, come hungry, I have lettuce and corn,

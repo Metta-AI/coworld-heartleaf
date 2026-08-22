@@ -593,13 +593,16 @@ proc decisionGoal(
       idleGoal(observation.scene)
   of StayInside:
     # Stay where you are when inside; when outside, head for the house
-    # you promised, else home.
+    # you promised, else home. After dinner there is no party to reach
+    # any more, so outside always means home.
     case observation.scene
     of Indoors:
       observation.holdPositionGoal()
     of Outdoors:
+      let afterDinner = observation.dinnerDone or
+        observation.minutes >= DinnerMinutes + 60
       let houseIndex =
-        if villager.committedPartyHouse >= 0:
+        if villager.committedPartyHouse >= 0 and not afterDinner:
           villager.committedPartyHouse
         else:
           villager.houseIndex
