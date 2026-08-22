@@ -13,6 +13,9 @@ const
   LowFoodBand = 2
   HighFoodBand = 6
   HouseGatherMaxRadius* = 96
+  ## A pantry worth hosting with; below it a gnome with no better plan
+  ## goes visiting rather than home to an empty table.
+  HostPantryMinimum* = 8
 
 type
   GoalKind* = enum
@@ -61,6 +64,9 @@ type
     invitedToday*: bool
       ## Said "come to my house" today: the fallback table when no promise
       ## was made anywhere else.
+    lastInviterHouse*: int
+      ## House of the gnome most recently heard inviting people to its
+      ## own table today, -1 when nobody did.
     gardenChecked*: seq[bool]
     currentGarden*: int
     lastCarryText*: string
@@ -127,6 +133,7 @@ proc newVillager*(houseIndex: int, soul: Soul, gardenCount: int): Villager =
     minutes: DayStartMinutes,
     lastClockHour: -1,
     committedPartyHouse: UnknownHouse,
+    lastInviterHouse: UnknownHouse,
     gardenChecked: newSeq[bool](gardenCount),
     currentGarden: -1,
     dinnerHouse: UnknownHouse,
@@ -277,6 +284,7 @@ proc startNewDay*(villager: Villager, dayNumber: int) =
   villager.decisionChatSent = false
   villager.committedPartyHouse = UnknownHouse
   villager.invitedToday = false
+  villager.lastInviterHouse = UnknownHouse
   villager.seenToday.clear()
   villager.greetedToday.clear()
   villager.interruptRequested = false
@@ -309,9 +317,16 @@ proc maybeRecordClock*(villager: Villager, observation: Observation) =
 
 ## Seeing and hearing
 
+proc invitesToOwnHouse*(message: string): bool =
+  ## True when a chat line invites someone to the speaker's own table.
+  let text = message.toLowerAscii()
+  for phrase in ["my house", "my place", "my table", "at mine", "my door"]:
+    if phrase in text:
+      return true
+
 proc scanHeardChats*(villager: Villager, observation: Observation) =
   ## Records each chat bubble of another gnome once, when it appears or
-  ## changes.
+  ## changes, and remembers who last invited people to their table.
   var seen = initHashSet[string]()
   for player in observation.visiblePlayers:
     seen.incl(player.name)
@@ -321,6 +336,8 @@ proc scanHeardChats*(villager: Villager, observation: Observation) =
     villager.lastBubbles[player.name] = player.says
     if player.says.len > 0:
       villager.recordHeardLine(player.name, player.says)
+      if player.says.invitesToOwnHouse() and player.houseIndex >= 0:
+        villager.lastInviterHouse = player.houseIndex
   var gone: seq[string]
   for name in villager.lastBubbles.keys:
     if name notin seen:

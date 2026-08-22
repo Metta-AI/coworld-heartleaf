@@ -723,9 +723,16 @@ proc dueCommitment*(
     # Waiting at a door when it is time to go in is a promise in all but
     # name: that is the table the gnome chose to be at.
     house = villager.decisionHouse(villager.decision)
+  if house < 0 and villager.invitedToday and
+      observation.inventoryTotal >= HostPantryMinimum:
+    # A host that invited people, promised nowhere else, and has a
+    # pantry worth serving belongs at its own table.
+    house = villager.houseIndex
+  if house < 0 and villager.lastInviterHouse >= 0 and
+      villager.lastInviterHouse != villager.houseIndex:
+    # Otherwise an invitation heard today is the best table on offer.
+    house = villager.lastInviterHouse
   if house < 0 and villager.invitedToday:
-    # A host that invited people and promised nowhere else belongs at
-    # its own table.
     house = villager.houseIndex
   if house < 0:
     return
@@ -769,13 +776,6 @@ proc decisionText(decision: Decision): string =
     result.add(" until " & decision.untilMinutes.clockName())
   if decision.reason.len > 0:
     result.add(" - " & decision.reason)
-
-proc invitesToOwnHouse(message: string): bool =
-  ## True when a chat line invites someone to the speaker's own table.
-  let text = message.toLowerAscii()
-  for phrase in ["my house", "my place", "my table", "at mine", "my door"]:
-    if phrase in text:
-      return true
 
 proc inferSocialCommitment(villager: Villager, decision: Decision): Decision =
   ## Fills in the house a commitment refers to. What the JSON says counts

@@ -686,6 +686,27 @@ block:
   let hostDue = host.dueCommitment(late, navigation, layout)
   doAssert hostDue.valid and hostDue.action == GoHome,
     "at departure time a host that invited and promised nowhere else goes home"
+  # With a thin pantry and an invitation heard, visiting beats hosting
+  # alone; a full pantry hosts. Fresh villagers, since a due choice is
+  # kept as the promise from then on.
+  let thinHost = newVillager(4, soul, layout.gardens.len)
+  thinHost.invitedToday = true
+  thinHost.lastInviterHouse = 6
+  late.inventoryTotal = 3
+  let thin = thinHost.dueCommitment(late, navigation, layout)
+  doAssert thin.valid and thin.action == GoToParty and thin.houseIndex == 6,
+    "a thin pantry goes to the gnome that invited it"
+  let fullHost = newVillager(4, soul, layout.gardens.len)
+  fullHost.invitedToday = true
+  fullHost.lastInviterHouse = 6
+  late.inventoryTotal = HostPantryMinimum
+  doAssert fullHost.dueCommitment(late, navigation, layout).action == GoHome,
+    "a full pantry hosts"
+  let quiet = newVillager(4, soul, layout.gardens.len)
+  quiet.lastInviterHouse = 6
+  late.inventoryTotal = 9
+  doAssert quiet.dueCommitment(late, navigation, layout).houseIndex == 6,
+    "a gnome that never invited anyone visits the one who did"
   host.applyDecision(observation, layout,
     Decision(valid: true, action: GoToParty, houseIndex: 1, commitParty: true,
       untilMinutes: -1), fromModel = true)
