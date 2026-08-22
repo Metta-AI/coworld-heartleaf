@@ -188,6 +188,14 @@
           }
         },
         {
+          "id": "strategy.md",
+          "title": "strategy.md",
+          "content": {
+            "type": "uri",
+            "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/docs/strategy.md"
+          }
+        },
+        {
           "id": "rules.md",
           "title": "rules.md",
           "content": {

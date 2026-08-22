@@ -42,6 +42,9 @@ You are warm and friendly. You make everyone feel welcome...
   house). A soul without `{name}` gets a `Your name is X.` line prepended.
 - UTF-8, at most 32768 bytes, no NUL bytes. Line endings are normalised.
 
+For how to *play* well — when to gather, when to host, when to visit —
+see [strategy.md](strategy.md).
+
 ## What the game appends
 
 The soul is only the character. After it, the game appends the same fixed
