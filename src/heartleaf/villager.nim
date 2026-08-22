@@ -58,6 +58,9 @@ type
     greetedToday*: HashSet[string]
     saidToday*: seq[string]
     committedPartyHouse*: int
+    invitedToday*: bool
+      ## Said "come to my house" today: the fallback table when no promise
+      ## was made anywhere else.
     gardenChecked*: seq[bool]
     currentGarden*: int
     lastCarryText*: string
@@ -273,6 +276,7 @@ proc startNewDay*(villager: Villager, dayNumber: int) =
   villager.hasDecision = false
   villager.decisionChatSent = false
   villager.committedPartyHouse = UnknownHouse
+  villager.invitedToday = false
   villager.seenToday.clear()
   villager.greetedToday.clear()
   villager.interruptRequested = false
@@ -391,6 +395,9 @@ proc maybeRecordDinner*(villager: Villager, observation: Observation) =
     villager.dinnerHouse = observation.currentHouse
     return
   villager.dinnerRecorded = true
+  # Dinner is over: the promise to be at a table is fulfilled or missed,
+  # and the only place left to be tonight is home.
+  villager.committedPartyHouse = UnknownHouse
   if observation.dinner.present:
     let summary = villager.dinnerSummary(observation)
     villager.recordEvent(summary)

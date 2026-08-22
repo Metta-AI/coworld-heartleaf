@@ -677,7 +677,26 @@ block:
     Decision(valid: true, action: SayToPerson, targetName: "Anton",
       houseIndex: UnknownHouse, untilMinutes: -1,
       message: "Dinner at my house at 6, I have lettuce!"), fromModel = true)
-  doAssert host.committedPartyHouse == 4, "inviting to my house commits me to it"
+  doAssert host.committedPartyHouse < 0, "an invitation is not yet a promise"
+  doAssert host.invitedToday, "but it is remembered"
+  var late = observation
+  late.minutes = 17 * 60 + 30
+  late.scene = Outdoors
+  late.currentHouse = -1
+  let hostDue = host.dueCommitment(late, navigation, layout)
+  doAssert hostDue.valid and hostDue.action == GoHome,
+    "at departure time a host that invited and promised nowhere else goes home"
+  host.applyDecision(observation, layout,
+    Decision(valid: true, action: GoToParty, houseIndex: 1, commitParty: true,
+      untilMinutes: -1), fromModel = true)
+  doAssert host.dueCommitment(late, navigation, layout).houseIndex == 1,
+    "an explicit promise elsewhere still wins"
+  # Dinner over: the promise is spent and stay_inside outdoors means home.
+  var after = late
+  after.minutes = 19 * 60
+  after.dinnerDone = true
+  host.maybeRecordDinner(after)
+  doAssert host.committedPartyHouse < 0, "dinner clears the party promise"
   let guest = newVillager(5, soul, layout.gardens.len)
   guest.applyDecision(observation, layout,
     Decision(valid: true, action: SayToPerson, targetName: "Anton",

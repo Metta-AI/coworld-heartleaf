@@ -723,6 +723,10 @@ proc dueCommitment*(
     # Waiting at a door when it is time to go in is a promise in all but
     # name: that is the table the gnome chose to be at.
     house = villager.decisionHouse(villager.decision)
+  if house < 0 and villager.invitedToday:
+    # A host that invited people and promised nowhere else belongs at
+    # its own table.
+    house = villager.houseIndex
   if house < 0:
     return
   let pixels = villager.walkPixelsToHouse(
@@ -777,9 +781,9 @@ proc inferSocialCommitment(villager: Villager, decision: Decision): Decision =
   ## Fills in the house a commitment refers to. What the JSON says counts
   ## first: commitParty true (with houseIndex, else targetName's house,
   ## else the villager's own house when it is inviting) or go_to_party.
-  ## A host that invites people to its own house out loud has promised
-  ## to be there too, so that line commits it to its own house when it
-  ## has not promised anywhere else.
+  ## A host that invites people to its own house out loud is remembered
+  ## as having invited; that is the fallback table at departure time
+  ## when it has promised nothing else.
   result = decision
   if result.houseIndex < 0 and result.targetName.len > 0 and
       (result.action == GoToParty or result.commitParty):
@@ -787,11 +791,8 @@ proc inferSocialCommitment(villager: Villager, decision: Decision): Decision =
   if result.commitParty and result.houseIndex < 0 and
       result.action == SayToPerson:
     result.houseIndex = villager.houseIndex
-  if result.action == SayToPerson and not result.commitParty and
-      villager.committedPartyHouse < 0 and
-      result.message.invitesToOwnHouse():
-    result.commitParty = true
-    result.houseIndex = villager.houseIndex
+  if result.action == SayToPerson and result.message.invitesToOwnHouse():
+    villager.invitedToday = true
 
 proc applyDecision*(
   villager: Villager,
@@ -1154,6 +1155,13 @@ proc keepPromise*(
   ## over budget), a promise that comes due is carried out at once; the
   ## next reply still replaces it.
   if not villager.modelUnavailable or observation.scene == Overlay:
+    return
+  # An explicit positioning decision from the model is its own answer to
+  # where to be; a kept promise only replaces gathering, chatting, and
+  # waiting, never go_home, go_to_party, or stay_inside.
+  if villager.hasDecision and
+      villager.decision.action in {GoHome, GoToParty, StayInside} and
+      not villager.decisionComplete(observation):
     return
   let due = villager.dueCommitment(observation, navigation, layout)
   if due.valid and
