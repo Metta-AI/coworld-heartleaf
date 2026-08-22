@@ -1,5 +1,5 @@
 import
-  std/[json, math, os, random, strutils, tables, times],
+  std/[json, os, random, strutils, tables, times],
   flatty, jsony, pixie,
   bitworld/aseprite, bitworld/pixelfonts, bitworld/spriteprotocol,
   bitworld/resources, bitworld/sprites,
@@ -62,14 +62,12 @@ const
   ClockLayerId = 2
   GlobalPanelLayerId = 3
   ReplayCenterBottomLayerId = 4
-  ReplayBottomLeftLayerId = 5
   ReplayMismatchLayerId = 6
   MapLayerKind = 0
   GlobalPanelLayerKind = 1
   UiLayerKind = 3
   ClockLayerKind = 2
   ReplayCenterBottomLayerKind = 8
-  ReplayBottomLeftLayerKind = 4
   ReplayMismatchLayerKind = 5
   MapLayerFlags = 1
   UiLayerFlags = 2
@@ -162,7 +160,6 @@ const
   InsetBottomObjectId = 21_300
   InsetOverhangObjectId = 21_301
   InsetPlayerObjectBase = 21_400
-  InsetPlayerBorderObjectBase = 21_500
   HouseGnomeZ = 20_500
   HouseGnomeLift = 12
   InsetBottomZ = 31_000

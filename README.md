@@ -117,8 +117,16 @@ the JSON reply format), so a soul never has to explain those. See
 model is told each turn.
 
 The nine `players/*_villager/soul.md` files are examples. Each persona
-directory also holds a Dockerfile that bakes its soul into the tiny
-`players/soul_player` uploader and a Coworld player manifest.
+directory also holds a Dockerfile that packages its soul with the tiny
+`players/soul_player` uploader. Locally, `soul_player` finds a soul from
+its `--name`: `grumpy_villager1` plays `players/grumpy_villager/soul.md`,
+and `soul_player3` plays the third persona, so bitworld's quick_run can
+field the whole village with one group:
+
+```sh
+cd ../bitworld && nim r tools/quick_run.nim ../coworld-heartleaf \
+  --connect --port:8080 --bots:soul_player:9
+```
 
 ## Project Layout
 

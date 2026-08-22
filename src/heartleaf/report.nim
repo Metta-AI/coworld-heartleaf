@@ -2,9 +2,7 @@
 ## asked, and the full message list for one request.
 
 import
-  std/[sets, strutils],
-  heartleaf/[common, protocol, decisions, observation, navigation, villager,
-    executor]
+  heartleaf/[common, protocol, decisions, observation, navigation, villager]
 
 proc visiblePlayersText(observation: Observation): string =
   ## The gnomes on screen, with what they are saying right now.

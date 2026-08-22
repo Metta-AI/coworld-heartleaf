@@ -2,7 +2,7 @@
 ## keeps the socket alive. The simulation plays the gnome; this process
 ## never sends anything else.
 
-import std/[json, os, parseopt, strutils, times], whisky, heartleaf/souls
+import std/[algorithm, json, os, parseopt, strutils, times], whisky, heartleaf/souls
 
 const
   DefaultHost = "localhost"
@@ -138,18 +138,18 @@ proc awaitReply(ws: WebSocket, early: var seq[string]): string =
     $(ReplyTimeoutMs div 1000) & "s")
 
 type
-  LogSink = ref object
+  LogSink* = ref object
     ## Where received log frames go: stdout always, plus a readable file.
     ## Tracks the last (game, sequence) written so a replayed backlog
     ## after a reconnect is never written twice.
-    name: string
-    dir: string
+    name*: string
+    dir*: string
     file: File
-    path: string
-    game: int
-    sequence: int
+    path*: string
+    game*: int
+    sequence*: int
 
-proc readableEntry(line: string): string =
+proc readableEntry*(line: string): string =
   ## One log frame as a readable block for the audit file. The header
   ## carries the record's game and sequence so a restarted collector can
   ## pick up where the file ends.
@@ -168,7 +168,7 @@ proc readableEntry(line: string): string =
   except CatchableError:
     line & "\n"
 
-proc loadCursor(sink: LogSink, path: string) =
+proc loadCursor*(sink: LogSink, path: string) =
   ## Reads the last (game, seq) header of an existing audit file so the
   ## next session resumes after it instead of duplicating the backlog.
   if not fileExists(path):
@@ -188,7 +188,7 @@ proc loadCursor(sink: LogSink, path: string) =
     except ValueError:
       discard
 
-proc cursorText(sink: LogSink): string =
+proc cursorText*(sink: LogSink): string =
   ## The resume message for a reconnect.
   "log-cursor game=" & $sink.game & " sequence=" & $sink.sequence
 
@@ -203,7 +203,7 @@ proc openFile(sink: LogSink, gnome: string) =
     (if sink.sequence >= 0: " (resuming after game " & $sink.game &
       " seq " & $sink.sequence & ")" else: "")
 
-proc record(sink: LogSink, line: string) =
+proc record*(sink: LogSink, line: string) =
   ## Prints one log frame and appends it to the audit file, skipping
   ## records already seen and marking a new game.
   var game = 0
@@ -297,24 +297,66 @@ proc run(options: PlayerOptions, soul: Soul) =
           quit(0)
       sleep(ConnectRetryMs)
 
-proc soulPlayerMain*(embeddedSoul = "") =
+proc personaSouls(roots: seq[string]): seq[string] =
+  ## Every players/*/soul.md under the first root that has any, sorted.
+  for root in roots:
+    let dir = root / "players"
+    if not dirExists(dir):
+      continue
+    for kind, path in walkDir(dir):
+      if kind == pcDir and fileExists(path / "soul.md"):
+        result.add(path / "soul.md")
+    if result.len > 0:
+      result.sort()
+      return
+
+proc soulForName(name: string): string =
+  ## The soul a launcher meant by a bot name: "grumpy_villager1" is
+  ## players/grumpy_villager/soul.md, and "soul_player3" is the third
+  ## persona soul in the repository, so one launcher group can field
+  ## every persona. Empty when nothing matches.
+  var stem = name
+  while stem.len > 0 and stem[^1].isDigit():
+    stem.setLen(stem.len - 1)
+  let number =
+    if stem.len < name.len:
+      parseInt(name[stem.len .. ^1])
+    else:
+      0
+  let roots = @[
+    getCurrentDir(), getCurrentDir().parentDir(),
+    getAppDir(), getAppDir().parentDir()
+  ]
+  if stem.len > 0 and stem != "soul_player":
+    for root in roots:
+      for candidate in [root / "players" / stem / "soul.md", root / stem / "soul.md"]:
+        if fileExists(candidate):
+          return candidate
+  let souls = personaSouls(roots)
+  if souls.len > 0 and number > 0:
+    return souls[(number - 1) mod souls.len]
+
+proc soulPlayerMain*() =
   ## Runs the uploader. The soul comes from --soul, then the environment,
-  ## then the soul embedded at compile time (persona wrappers), then a
-  ## soul.md beside the binary.
+  ## then a soul.md beside the binary, then the persona the bot name
+  ## refers to.
   var options = parseOptions()
   var raw = ""
   var source = options.soulPath
   if options.soulPath.len > 0 and fileExists(options.soulPath):
     raw = readFile(options.soulPath)
-  elif embeddedSoul.len > 0:
-    raw = embeddedSoul
-    source = "embedded soul"
   elif fileExists("soul.md"):
     raw = readFile("soul.md")
     source = "soul.md"
   else:
-    echo "soul_player soul file not found: ", options.soulPath
-    quit(ExitUsage)
+    let named = soulForName(options.name)
+    if named.len > 0:
+      raw = readFile(named)
+      source = named
+    else:
+      echo "soul_player soul file not found: ", options.soulPath,
+        " (and no persona matches the name ", options.name, ")"
+      quit(ExitUsage)
   var soul: Soul
   try:
     soul = parseSoul(raw)

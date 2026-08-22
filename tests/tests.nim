@@ -76,7 +76,7 @@ doAssert stringHouse.valid, "string houseIndex should parse"
 doAssert stringHouse.houseIndex == 3, "house 4 should become index 3"
 
 echo "Testing self name prefix stripping"
-let vova = ["Vova", "talking_villager"]
+let vova = ["Vova", "grumpy_villager"]
 doAssert "Vova: hello Anton".stripSelfPrefix(vova) == "hello Anton",
   "plain self label should be stripped"
 doAssert "vova:hello".stripSelfPrefix(vova) == "hello",
@@ -87,7 +87,7 @@ doAssert "[Vova]: hello".stripSelfPrefix(vova) == "hello",
   "bracketed self label should be stripped"
 doAssert "Vova: Vova: hello".stripSelfPrefix(vova) == "hello",
   "repeated self labels should all be stripped"
-doAssert "talking_villager: hello".stripSelfPrefix(vova) == "hello",
+doAssert "grumpy_villager: hello".stripSelfPrefix(vova) == "hello",
   "any of the bot's names should be stripped"
 doAssert "Anton: come to dinner".stripSelfPrefix(vova) ==
   "Anton: come to dinner", "other names must not be stripped"

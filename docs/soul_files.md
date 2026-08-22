@@ -151,6 +151,8 @@ receives the backlog from the start unless it first sends
 
 `soul_player` prints each frame to stdout and, with `--log-dir:DIR` (env
 `HEARTLEAF_LOG_DIR`), also writes a readable `DIR/<name>-<Gnome>.log`.
+Without `--soul`, it picks the soul from its `--name`: `grumpy_villager1`
+plays `players/grumpy_villager/soul.md`, `soul_player3` the third persona.
 
 ## Local testing
 

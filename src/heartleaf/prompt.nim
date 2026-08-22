@@ -3,9 +3,7 @@
 ## so every gnome understands the state report and answers in the JSON
 ## the executor can carry out.
 
-import
-  std/[strutils],
-  heartleaf/[common, protocol, decisions, observation, souls]
+import std/strutils, heartleaf/souls
 
 const
   ## The rules of the game as the model must understand them: response

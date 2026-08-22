@@ -5,9 +5,9 @@
 ## waiting on the model with nothing left to do.
 
 import
-  std/[algorithm, options, strutils, tables, times],
-  heartleaf/[common, protocol, decisions, observation, navigation, villager,
-    executor, report, prompt, pacing, bedrock_client, souls]
+  std/[algorithm, options, strutils, tables],
+  heartleaf/[decisions, observation, navigation, villager, executor, report,
+    prompt, pacing, bedrock_client, souls]
 
 const
   PermanentConfirmations = 2

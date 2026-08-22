@@ -76,7 +76,7 @@
           "default": 0
         },
         "daySeconds": {
-          "description": "Real seconds per in-game day, before the 10-second score screen.",
+          "description": "Real seconds per in-game day, before the 10-second score screen. The league plays seven days of 180 seconds.",
           "type": "integer",
           "minimum": 30,
           "maximum": 600,

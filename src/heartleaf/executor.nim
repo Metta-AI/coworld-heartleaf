@@ -4,7 +4,7 @@
 ## villager state; the simulation applies the masks.
 
 import
-  std/[math, sets, strutils],
+  std/[math, sets],
   bitworld/spriteprotocol,
   heartleaf/[common, protocol, decisions, observation, navigation, villager]
 

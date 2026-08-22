@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nim with nimby
+        run: |
+          curl -fsSL -o /usr/local/bin/nimby \
+            https://github.com/treeform/nimby/releases/download/0.1.26/nimby-Linux-X64
+          chmod +x /usr/local/bin/nimby
+          nimby use 2.2.4
+          echo "$HOME/.nimby/nim/bin" >> "$GITHUB_PATH"
+
+      - name: Sync locked packages
+        run: nimby sync nimby.lock -g
+
+      - name: Build the game server
+        run: nim c -d:release src/heartleaf.nim
+
+      - name: Build the soul player
+        run: nim c -d:release players/soul_player/soul_player.nim
+
+      - name: Unit tests
+        run: nim r tests/tests.nim
+
+      - name: Integration tests
+        run: HEARTLEAF_SERVER=out/heartleaf nim r tests/integration.nim
