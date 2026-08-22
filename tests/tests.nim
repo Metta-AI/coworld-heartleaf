@@ -718,6 +718,28 @@ block:
   after.dinnerDone = true
   host.maybeRecordDinner(after)
   doAssert host.committedPartyHouse < 0, "dinner clears the party promise"
+  # Evening: a stay_inside at the host's house no longer shields a guest
+  # from the curfew promise; at home it does.
+  let lingerer = newVillager(5, soul, layout.gardens.len)
+  var evening = after
+  evening.minutes = 20 * 60 + 30
+  evening.scene = Indoors
+  evening.currentHouse = 1
+  lingerer.applyDecision(evening, layout,
+    Decision(valid: true, action: StayInside, houseIndex: UnknownHouse,
+      untilMinutes: -1), fromModel = true)
+  lingerer.modelUnavailable = true
+  lingerer.keepPromise(evening, navigation, layout)
+  doAssert lingerer.decision.action == GoHome,
+    "a guest lingering after dinner is sent home when the model cannot answer"
+  let homebody = newVillager(5, soul, layout.gardens.len)
+  evening.currentHouse = 5
+  homebody.applyDecision(evening, layout,
+    Decision(valid: true, action: StayInside, houseIndex: UnknownHouse,
+      untilMinutes: -1), fromModel = true)
+  homebody.modelUnavailable = true
+  homebody.keepPromise(evening, navigation, layout)
+  doAssert homebody.decision.action == StayInside, "staying home stands"
   let guest = newVillager(5, soul, layout.gardens.len)
   guest.applyDecision(observation, layout,
     Decision(valid: true, action: SayToPerson, targetName: "Anton",

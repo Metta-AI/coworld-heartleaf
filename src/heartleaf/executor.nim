@@ -1157,12 +1157,23 @@ proc keepPromise*(
   if not villager.modelUnavailable or observation.scene == Overlay:
     return
   # An explicit positioning decision from the model is its own answer to
-  # where to be; a kept promise only replaces gathering, chatting, and
-  # waiting, never go_home, go_to_party, or stay_inside.
-  if villager.hasDecision and
-      villager.decision.action in {GoHome, GoToParty, StayInside} and
-      not villager.decisionComplete(observation):
-    return
+  # where to be: before dinner a kept promise only replaces gathering,
+  # chatting, and waiting, never go_home, go_to_party, or stay_inside.
+  # After dinner the only place left is home, so only go_home, or staying
+  # inside one's own house, still stands.
+  if villager.hasDecision and not villager.decisionComplete(observation):
+    let atHome = observation.scene == Indoors and
+      observation.currentHouse == villager.houseIndex
+    let afterDinner = observation.dinnerDone or
+      observation.minutes >= DinnerMinutes + 60
+    case villager.decision.action
+    of GoHome:
+      return
+    of GoToParty, StayInside:
+      if not afterDinner or atHome:
+        return
+    else:
+      discard
   let due = villager.dueCommitment(observation, navigation, layout)
   if due.valid and
       (not villager.hasDecision or
