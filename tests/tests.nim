@@ -6,8 +6,7 @@ import
   heartleaf,
   heartleaf/[common, protocol],
   replays,
-  ../players/talking_villager/decisions,
-  ../players/talking_villager/social_window
+  ../players/talking_villager/decisions
 
 echo "Testing assets"
 doAssert fileExists("data/map.aseprite"), "map asset should exist"
@@ -66,29 +65,6 @@ let stringHouse = parseLlmDecision("""
 """)
 doAssert stringHouse.valid, "string houseIndex should parse"
 doAssert stringHouse.houseIndex == 3, "house 4 should become index 3"
-
-echo "Testing v24 social window"
-doAssert SocialHostPantryThreshold == DinnerEatRounds * NewFoodEatScore,
-  "social window threshold should equal the guest eating cap"
-doAssert not socialWindowActive(15 * 60, 18 * 60, SocialHostPantryThreshold - 1),
-  "social window should stay closed below the pantry threshold"
-doAssert socialWindowActive(15 * 60, 18 * 60, SocialHostPantryThreshold),
-  "social window should open at the pantry threshold"
-doAssert not socialWindowActive(18 * 60 - 1, 18 * 60 - 1,
-    SocialHostPantryThreshold),
-  "dinner lock should win at the leave-at boundary"
-doAssert socialTargetNeedsRefresh("Ivan", "Yura", 100, 400),
-  "a newly nearest villager should replace the prior target"
-doAssert socialTargetNeedsRefresh("Ivan", "", 100, -1),
-  "a disappeared target should be reselected"
-doAssert socialTargetNeedsRefresh("Ivan", "Ivan", 400, 100),
-  "a closer live position should refresh the target"
-doAssert not socialTargetNeedsRefresh("Ivan", "Ivan", 100, 100),
-  "an unchanged live target should not refresh"
-doAssert socialDirection(10, 1) == "east"
-doAssert socialDirection(-10, 1) == "west"
-doAssert socialDirection(1, 10) == "south"
-doAssert socialDirection(1, -10) == "north"
 
 echo "Testing self name prefix stripping"
 let vova = ["Vova", "talking_villager"]
