@@ -96,6 +96,16 @@ heard, the hour rolls, the bag crosses a size band, a crowd changes, the
 gnome is stuck, or a departure time arrives. A `commitParty` promise is
 kept for you if the model cannot be asked when it is time to leave.
 
+## The player protocol
+
+`/player` is not a sprite-protocol endpoint. It speaks only text frames:
+the player sends its soul file (and, on reconnect, `log-cursor game=N
+sequence=M`); the game answers `soul accepted ...` or `soul rejected: ...`
+and then streams the gnome's model log, one JSON line per frame. Binary
+frames from a player are ignored and no sprite packets are ever sent to
+it. The BitWorld sprite protocol remains the protocol of the global
+viewer (`/global`) and the replay viewer (`/replay`).
+
 ## Uploading
 
 The player websocket is `/player?slot=N&token=T` (hosted players get the

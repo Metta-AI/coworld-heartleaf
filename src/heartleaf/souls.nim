@@ -11,10 +11,15 @@ const
   SoulAcceptedReply* = "soul accepted"
   SoulRejectedPrefix* = "soul rejected: "
   SoulModelIdChars = {'a'..'z', 'A'..'Z', '0'..'9', '.', '-', '_', ':', '/'}
-  KnownModelPrefixes = [
-    "anthropic.", "us.anthropic.", "eu.anthropic.", "global.anthropic.",
-    "apac.anthropic."
+  ## Provider families Bedrock serves that the game knows how to call:
+  ## Claude through InvokeModel, everyone else through Converse. An id
+  ## may carry a cross-region profile prefix (us., eu., global., apac.).
+  KnownProviders = [
+    "anthropic", "openai", "xai", "meta", "deepseek", "qwen", "moonshot",
+    "moonshotai", "minimax", "zai", "mistral", "amazon", "google", "nvidia",
+    "ai21", "cohere", "writer"
   ]
+  RegionPrefixes = ["us.", "eu.", "global.", "apac."]
 
 type
   Soul* = object
@@ -71,11 +76,18 @@ proc parseSoul*(raw: string): Soul =
   Soul(modelId: modelId, text: body, raw: raw, seat: -1)
 
 proc knownModelFamily*(modelId: string): bool =
-  ## True when the model id looks like an Anthropic Bedrock model.
-  for prefix in KnownModelPrefixes:
-    if modelId.startsWith(prefix):
-      return true
-  false
+  ## True when the model id names a provider family the game can call.
+  ## Anything else is still accepted; the game only warns, since Bedrock
+  ## is the authority on what exists.
+  var id = modelId.toLowerAscii()
+  for prefix in RegionPrefixes:
+    if id.startsWith(prefix):
+      id = id[prefix.len .. ^1]
+      break
+  let dot = id.find('.')
+  if dot <= 0:
+    return false
+  id[0 ..< dot] in KnownProviders
 
 proc soulReply*(soul: Soul): string =
   ## The text frame the game sends back for an accepted soul.

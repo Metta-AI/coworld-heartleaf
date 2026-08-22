@@ -144,8 +144,6 @@ const
   InventoryCountSpriteBase = 4000
   ClockGlyphSpriteBase = 7000
   ScoreSpriteBase = 7100
-  MainWalkSpriteId = 8000
-  HomeWalkSpriteId = 8001
   ReplayTickSpriteId = 8400
   ReplayScrubberSpriteId = 8401
   ReplayControlsSpriteId = 8402
@@ -219,7 +217,6 @@ const
   TintHueMixes = [0.18, 0.30, 0.43, 0.57, 0.72]
   TintSaturationScales = [1.05, 1.12, 1.20, 1.30, 1.38]
   TintValueScales = [0.86, 0.70, 0.54, 0.39, 0.25]
-  LookingForSpriteId = 7190
 
 type
   Direction = enum
@@ -409,8 +406,6 @@ when not defined(emscripten):
       lock: Lock
       playerSlots: Table[WebSocket, int]
         ## Seat requested by each /player socket, -1 for any free seat.
-      playerViewers: Table[WebSocket, PlayerViewerState]
-        ## /player sockets that still receive sprite frames (spectators).
       globalViewers: Table[WebSocket, PlayerViewerState]
       replayViewers: Table[WebSocket, PlayerViewerState]
       playerUsernames: Table[WebSocket, string]
@@ -569,14 +564,6 @@ proc loadWorldMap(path, label: string): WorldMap =
       TintValueScales[i]
     )
   result.walkMask = walkImage.loadWalkMask()
-
-proc walkabilitySprite(world: WorldMap): RgbaSprite =
-  ## Builds an invisible helper sprite containing the walkable pixels.
-  result = newRgbaSprite(world.width, world.height)
-  for y in 0 ..< world.height:
-    for x in 0 ..< world.width:
-      if world.walkMask[y * world.width + x]:
-        result.putPixel(x, y, rgba(255, 255, 255, 255))
 
 proc loadGnomeSprites(path: string): seq[GnomeSprites] =
   ## Loads all gnome direction sets from the sheet.
@@ -1405,16 +1392,6 @@ proc addSpriteProtocolInit(
     sim.foods.marker,
     GardenMarkerLabel
   )
-  packet.addRgbaSprite(
-    MainWalkSpriteId,
-    sim.mainMap.walkabilitySprite(),
-    MainWalkabilityLabel
-  )
-  packet.addRgbaSprite(
-    HomeWalkSpriteId,
-    sim.homeMaps[0].walkabilitySprite(),
-    HomeWalkabilityLabel
-  )
   for gnomeIndex, gnome in sim.gnomes:
     for direction in Direction:
       packet.addRgbaSprite(
@@ -1778,19 +1755,6 @@ proc foodListText(foods: FoodCounts): string =
   if result.len == 0:
     result = "none"
 
-proc dinnerLabel(record: DinnerRecord, playerIndex: int): string =
-  ## Returns the dinner overlay sprite label. Besides the player index it
-  ## carries the dinner result as text so sprite-reading bots learn whose
-  ## table they sat at, who else was there, what was eaten or served, and
-  ## the score, without reading overlay pixels. foods= is last because
-  ## food names contain spaces.
-  DinnerLabelPrefix & $playerIndex &
-    " host=" & record.hostName &
-    " wasHost=" & $record.wasHost &
-    " score=" & $record.score &
-    " guests=" & record.guestNames.join(",") &
-    " foods=" & record.foods.foodListText()
-
 proc addScreenOverlay(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1804,7 +1768,7 @@ proc addScreenOverlay(
     label = ""
   if player.dinnerTicks > 0 and player.dinnerRecord != nil:
     overlay = sim.dinnerOverlaySprite(player.dinnerRecord)
-    label = player.dinnerRecord.dinnerLabel(playerIndex)
+    label = DinnerLabelPrefix & $playerIndex
   elif sim.scoreTicks > 0:
     overlay = sim.scoreOverlaySprite()
     label = ScoreLabelPrefix & $playerIndex
@@ -2234,25 +2198,6 @@ proc addInventoryObjects(
     )
     inc slot
 
-proc addLookingForObject(
-  packet: var seq[uint8],
-  player: Player
-) =
-  ## Appends one off-screen label of foods this gnome still needs to eat.
-  packet.addRgbaSprite(
-    LookingForSpriteId,
-    newRgbaSprite(1, 1),
-    player.eaten.lookingForLabel()
-  )
-  packet.addObject(
-    LookingForObjectId,
-    -8,
-    -8,
-    0,
-    UiLayerId,
-    LookingForSpriteId
-  )
-
 proc addClockObjects(packet: var seq[uint8], sim: SimServer) =
   ## Appends the upper-right clock using individual glyph objects.
   let text = sim.clockText()
@@ -2306,7 +2251,6 @@ proc addPlayerView(
       player,
       playerIndex
     )
-    packet.addLookingForObject(player)
     return true
   packet.addObject(
     BottomObjectId,
@@ -2351,7 +2295,6 @@ proc addPlayerView(
     cache,
     player
   )
-  packet.addLookingForObject(player)
   packet.addClockObjects(sim)
   return true
 
@@ -2398,25 +2341,6 @@ proc addGlobalWorldView(
     mainOverhangSpriteId(tintIndex)
   )
   packet.addClockObjects(sim)
-
-proc buildPlayerPacket(
-  sim: SimServer,
-  playerIndex: int,
-  state: PlayerViewerState,
-  nextState: var PlayerViewerState
-): seq[uint8] =
-  ## Builds one sprite protocol packet for a player viewer.
-  nextState =
-    if state == nil:
-      PlayerViewerState()
-    else:
-      state
-  if not nextState.initialized:
-    result.add(sim.playerInitPacket)
-    nextState.initialized = true
-
-  result.addClearObjects()
-  discard result.addPlayerView(sim, playerIndex, nextState.spriteCache)
 
 proc replayCommandAt(layer, x, y: int): char =
   ## Returns the replay transport command under a UI coordinate. The
@@ -3476,8 +3400,7 @@ proc observe*(sim: SimServer, playerIndex: int): Observation =
   result.foot = Point(x: player.playerFootX(), y: player.playerFootY())
   result.inventoryTotal = player.inventory.totalItems()
   result.foodCollectedText = player.inventory.foodListText()
-  result.foodLookingForText =
-    player.eaten.lookingForLabel()[LookingForLabelPrefix.len .. ^1].strip()
+  result.foodLookingForText = player.eaten.foodsNotEatenText()
   result.dinnerDone = sim.dinnerDone
   if player.dinnerTicks > 0 and player.dinnerRecord != nil:
     let record = player.dinnerRecord
@@ -3865,7 +3788,6 @@ when not defined(emscripten):
     appState = WebSocketAppState()
     initLock(appState.lock)
     appState.playerSlots = initTable[WebSocket, int]()
-    appState.playerViewers = initTable[WebSocket, PlayerViewerState]()
     appState.globalViewers = initTable[WebSocket, PlayerViewerState]()
     appState.replayViewers = initTable[WebSocket, PlayerViewerState]()
     appState.playerUsernames = initTable[WebSocket, string]()
@@ -4097,8 +4019,6 @@ when not defined(emscripten):
       appState.replayViewers.del(websocket)
     if websocket in appState.globalViewers:
       appState.globalViewers.del(websocket)
-    if websocket in appState.playerViewers:
-      appState.playerViewers.del(websocket)
     if websocket in appState.playerSlots:
       appState.playerSlots.del(websocket)
     if websocket in appState.playerUsernames:
@@ -4109,10 +4029,8 @@ when not defined(emscripten):
       appState.logSent.del(websocket)
 
   proc resetConnectedPlayers() =
-    ## Resets spectator views and log cursors for a fresh simulation: the
-    ## next game's log starts again at sequence 0.
-    for websocket in appState.playerViewers.keys:
-      appState.playerViewers[websocket] = PlayerViewerState()
+    ## Resets log cursors for a fresh simulation: the next game's log
+    ## starts again at sequence 0.
     for websocket in appState.logSent.keys:
       appState.logSent[websocket] = 0
 
@@ -4160,8 +4078,6 @@ when not defined(emscripten):
     appState.souls[seat] = soul
     appState.soulSockets[websocket] = seat
     appState.playerSlots[websocket] = seat
-    # The uploader only keeps the socket alive; it needs no sprite frames.
-    appState.playerViewers.del(websocket)
     echo "soul accepted seat=", seat, " model=", soul.modelId,
       " bytes=", raw.len, " username=", soul.username
     if not soul.modelId.knownModelFamily():
@@ -4353,7 +4269,6 @@ when not defined(emscripten):
       let websocket = request.upgradeToWebSocket()
       {.gcsafe.}:
         withLock appState.lock:
-          appState.playerViewers[websocket] = PlayerViewerState()
           appState.playerSlots[websocket] = slot
           appState.playerUsernames[websocket] = username
     elif request.path == GlobalWebSocketPath and request.httpMethod == "GET" and
@@ -4586,9 +4501,6 @@ when not defined(emscripten):
 
     while true:
       var
-        sockets: seq[WebSocket] = @[]
-        playerIndices: seq[int] = @[]
-        playerStates: seq[PlayerViewerState] = @[]
         globalSockets: seq[WebSocket] = @[]
         globalStates: seq[PlayerViewerState] = @[]
         inputs: seq[InputState]
@@ -4629,18 +4541,6 @@ when not defined(emscripten):
 
           if not simStarted:
             waitingSeats = seatsWaitingForSouls(tokens.len, appState.souls)
-
-          for websocket, slot in appState.playerSlots.pairs:
-            if websocket notin appState.playerViewers:
-              continue
-            sockets.add(websocket)
-            playerIndices.add(
-              if slot >= 0 and slot < HouseCount:
-                seatPlayers[slot]
-              else:
-                -1
-            )
-            playerStates.add(appState.playerViewers[websocket])
 
           for websocket, state in appState.globalViewers.pairs:
             globalSockets.add(websocket)
@@ -4723,24 +4623,6 @@ when not defined(emscripten):
             appState.logSent[websocket] = sent
           for websocket in logDrops:
             sim.removePlayer(websocket)
-
-      for i in 0 ..< sockets.len:
-        var nextState: PlayerViewerState
-        let packet = sim.buildPlayerPacket(
-          playerIndices[i],
-          playerStates[i],
-          nextState
-        )
-        try:
-          sockets[i].sendSpritePacket(packet)
-          {.gcsafe.}:
-            withLock appState.lock:
-              if sockets[i] in appState.playerViewers:
-                appState.playerViewers[sockets[i]] = nextState
-        except CatchableError:
-          {.gcsafe.}:
-            withLock appState.lock:
-              sim.removePlayer(sockets[i])
 
       for i in 0 ..< globalSockets.len:
         var nextState: PlayerViewerState

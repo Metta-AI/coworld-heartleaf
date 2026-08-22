@@ -201,19 +201,17 @@ doAssert "Zucchini" notin namedFoods, "old zucchini name should be gone"
 doAssert "Raspberries" notin namedFoods, "old raspberry name should be gone"
 doAssert "Hay Grass" notin namedFoods, "old hay grass name should be gone"
 
-echo "Testing looking-for labels"
+echo "Testing foods not eaten"
 var uneaten: array[FoodVeggieSlots, bool]
-doAssert lookingForLabel(uneaten).startsWith(LookingForLabelPrefix),
-  "looking-for label should use the protocol prefix"
-doAssert "Carrot" in lookingForLabel(uneaten),
+doAssert "Carrot" in foodsNotEatenText(uneaten),
   "a new gnome should still want carrot"
 uneaten[1] = true
-doAssert "Carrot" notin lookingForLabel(uneaten),
-  "eaten carrot should leave the looking-for list"
+doAssert "Carrot" notin foodsNotEatenText(uneaten),
+  "eaten carrot should leave the list"
 for i in 0 ..< FoodVeggieSlots:
   uneaten[i] = true
-doAssert lookingForLabel(uneaten) == LookingForLabelPrefix & "none",
-  "a finished gnome should look for none"
+doAssert foodsNotEatenText(uneaten) == "none",
+  "a finished gnome wants none"
 
 echo "Testing dinner bites"
 block:
@@ -461,7 +459,12 @@ block:
   doAssert soul.modelId == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
   doAssert soul.text == "Your name is {name}.\nBe kind.\n", "CRLF is normalised"
   doAssert soul.modelId.knownModelFamily()
-  doAssert not "mistral.large".knownModelFamily()
+  for id in ["us.openai.gpt-5.6-luna", "us.xai.grok-4.6", "qwen.qwen3-32b-v1:0",
+      "us.meta.llama4-maverick-17b-instruct-v1:0", "moonshotai.kimi-k2.5",
+      "mistral.mistral-large-3-675b-instruct", "global.anthropic.claude-sonnet-5"]:
+    doAssert id.knownModelFamily(), id & " is a family the game can call"
+  doAssert not "acme.gnome-9000".knownModelFamily()
+  doAssert not "claude-opus-5".knownModelFamily(), "a bare id has no provider"
   proc rejects(raw: string): bool =
     try:
       discard parseSoul(raw)
