@@ -136,6 +136,12 @@ proc main() =
   if options.mock:
     config["mockReply"] = %"""{"action": "keep_gathering_plants"}"""
 
+  # Nine gnomes on one key: the hosted sidecar allows 30 requests a
+  # minute, which at four game hours a minute starves the village; local
+  # play with your own key can afford more unless you say otherwise.
+  if not existsEnv("HEARTLEAF_LLM_REQUESTS_PER_MINUTE"):
+    putEnv("HEARTLEAF_LLM_REQUESTS_PER_MINUTE", "60")
+
   setControlCHook(proc() {.noconv.} =
     echo "\nplay: stopping"
     stopChildren()

@@ -27,6 +27,8 @@ const
   DecisionStuckTicks* = RepathStuckTicks * 2
   DoorGatherSlots = 5
   DoorGatherSpacing = 18
+  ## A moving target may drift this far before the follower repaths.
+  GoalDriftPixels = 12
   ## Walk-time estimates for the state report: top speed in pixels per
   ## tick from the sim (MaxSpeed 704 / MotionScale 256) and a fudge for
   ## acceleration, corners, and doors.
@@ -615,10 +617,17 @@ proc goalLabel(goal: Goal): string =
   of HoldPosition: "wait"
 
 proc sameGoal(a, b: Goal): bool =
-  ## True when two goals are the same navigation target.
-  a.kind == b.kind and a.scene == b.scene and a.x == b.x and a.y == b.y and
-    a.houseIndex == b.houseIndex and a.gardenIndex == b.gardenIndex and
-    a.targetName == b.targetName
+  ## True when two goals are the same navigation target. Standing beside
+  ## a gnome tracks a moving spot, so small drifts of the spot count as
+  ## the same goal; otherwise the path would be rebuilt every tick and
+  ## the follower would dither in place.
+  if a.kind != b.kind or a.scene != b.scene or a.houseIndex != b.houseIndex or
+      a.gardenIndex != b.gardenIndex or a.targetName != b.targetName:
+    return false
+  if a.kind == StandByPerson:
+    return distanceSquared(a.x, a.y, b.x, b.y) <=
+      GoalDriftPixels * GoalDriftPixels
+  a.x == b.x and a.y == b.y
 
 proc interactionMask(
   villager: Villager,
@@ -663,11 +672,18 @@ proc dueCommitment*(
   ## promise the model made, and only while the model cannot be asked.
   result = Decision(valid: false, action: Invalid,
     houseIndex: UnknownHouse, untilMinutes: -1)
-  if villager.committedPartyHouse < 0 or
-      observation.minutes >= DinnerMinutes + 60:
+  if observation.minutes >= DinnerMinutes + 60:
+    return
+  var house = villager.committedPartyHouse
+  if house < 0 and villager.hasDecision and
+      villager.decision.action in {StandAtHouseGarden, FindHouse}:
+    # Waiting at a door when it is time to go in is a promise in all but
+    # name: that is the table the gnome chose to be at.
+    house = villager.decisionHouse(villager.decision)
+  if house < 0:
     return
   let pixels = villager.walkPixelsToHouse(
-    observation, navigation, layout, villager.committedPartyHouse
+    observation, navigation, layout, house
   )
   if pixels < 0:
     return
@@ -675,6 +691,8 @@ proc dueCommitment*(
     LeaveMarginMinutes
   if observation.minutes < leaveAt:
     return
+  if villager.committedPartyHouse < 0:
+    villager.committedPartyHouse = house
   if villager.committedPartyHouse == villager.houseIndex:
     result = Decision(valid: true, action: GoHome,
       houseIndex: UnknownHouse, untilMinutes: -1,
@@ -833,8 +851,9 @@ proc decisionInterrupted*(
   let chatSignature = observation.visibleChatsSignature()
   if chatSignature.len > 0 and chatSignature != villager.decisionChatSignature:
     return true
-  if observation.timePhase() != villager.decisionTimePhase:
-    return true
+  # The hour rolling is not an interrupt: at four game hours a real minute
+  # that alone would outrun the request budget. The clock still lands in
+  # the history, and departure times interrupt on their own.
   if observation.foodBand() != villager.decisionFoodBand:
     return true
   observation.houseCrowdsSignature(layout) != villager.decisionCrowdSignature

@@ -643,6 +643,27 @@ block:
     doAssert brains.villagers[0].history[i].content == content,
       "the history is never rewritten"
 
+echo "Testing the implicit door promise"
+block:
+  var sim = initSimServer(99)
+  doAssert sim.addPlayer("carol", 2) == 0
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let villager = newVillager(2, soul, sim.worldLayoutFor().gardens.len)
+  let navigation = sim.navigationFor()
+  let layout = sim.worldLayoutFor()
+  var observation = sim.observe(0)
+  # Waiting at Anton's door (house 2) with no promise, at 5:30pm.
+  villager.applyDecision(observation, layout,
+    Decision(valid: true, action: StandAtHouseGarden, houseIndex: 1,
+      untilMinutes: -1), fromModel = true)
+  observation.minutes = 17 * 60 + 30
+  observation.scene = Outdoors
+  observation.currentHouse = -1
+  let due = villager.dueCommitment(observation, navigation, layout)
+  doAssert due.valid and due.action == GoToParty and due.houseIndex == 1,
+    "a gnome at a door when it is time to go in goes in there"
+  doAssert villager.committedPartyHouse == 1, "and that becomes the promise"
+
 echo "Testing a mock-driven replay round trip"
 block:
   const
