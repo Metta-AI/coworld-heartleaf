@@ -258,7 +258,10 @@ type
     decisionTimePhase: int
     decisionChatSignature: string
     dinnerLockOverrideCount: int
+    dinnerLockRedirectCount: int
     dinnerLockOverridden: bool
+    dinnerLockGuestAttempt: bool
+    dinnerLockRedirectReason: string
     dinnerLockOriginalAction: string
     dinnerLockOriginalHouse: int
     decisionCrowdSignature: string
@@ -786,9 +789,10 @@ identical-message ratios can be computed from the artifact. Invitations
 use live pantry food names, visible villager names, the bot's own house,
 and the current game time; they are limited to five attempts per day,
 one every three game hours, before dinner.
-Dinner-lock fields on decision records show whether a destination was
-overridden, the original action and house, and the cumulative override
-count.
+Dinner-lock fields on decision records show whether movement was
+redirected, the redirect reason, and (for guest attempts) the original
+action and house. `dinnerLockOverrideCount` counts guest attempts;
+`dinnerLockRedirectCount` counts ordinary end-of-day redirects.
 """
   createZipArchive(entries)
 
@@ -1506,6 +1510,8 @@ proc resetGardenPlan(bot: Bot) =
   bot.fallbackInvitationTemplate = ""
   bot.fallbackInvitationPending = false
   bot.dinnerLockOverridden = false
+  bot.dinnerLockGuestAttempt = false
+  bot.dinnerLockRedirectReason = ""
   bot.dinnerLockOriginalAction = ""
   bot.dinnerLockOriginalHouse = UnknownHouse
   bot.leaveTimeNoted = false
@@ -2076,7 +2082,10 @@ proc initBot(name: string, slot: int, soul: string): Bot =
   result.dinnerHouse = UnknownHouse
   result.fallbackDinnerTarget = UnknownHouse
   result.dinnerLockOverrideCount = 0
+  result.dinnerLockRedirectCount = 0
   result.dinnerLockOverridden = false
+  result.dinnerLockGuestAttempt = false
+  result.dinnerLockRedirectReason = ""
   result.dinnerLockOriginalHouse = UnknownHouse
   result.fallbackInvitationNamed = initHashSet[string]()
   result.fallbackInvitationLastMinutes = -1
@@ -2775,46 +2784,72 @@ proc dinnerDecisionTargetsOtherHouse(
   decision: LlmDecision
 ): bool =
   ## Returns whether a decision would send the bot away from its own house.
-  if decision.action == LlmGoHome:
-    return false
   let target =
-    if decision.action == LlmStayInside:
+    case decision.action
+    of LlmGoToParty, LlmFindHouse, LlmStandAtHouseGarden:
+      bot.decisionHouse(decision)
+    of LlmStayInside:
       if bot.committedPartyHouse >= 0:
         bot.committedPartyHouse
       else:
         bot.homeIndex
-    elif decision.action in {
-        LlmGoToParty, LlmFindHouse, LlmStandAtHouseGarden
-      } or decision.commitParty:
-      bot.decisionHouse(decision)
     else:
-      UnknownHouse
+      if decision.commitParty:
+        bot.decisionHouse(decision)
+      else:
+        UnknownHouse
   if target >= 0:
     return target != bot.homeIndex
-  decision.action notin {LlmSayToPerson}
+  false
+
+proc dinnerDecisionNeedsRedirect(
+  bot: Bot,
+  decision: LlmDecision
+): bool =
+  ## Returns whether a locked decision needs an ordinary home redirect.
+  if bot.dinnerDecisionTargetsOtherHouse(decision):
+    return true
+  case decision.action
+  of LlmGoHome, LlmSayToPerson:
+    false
+  of LlmStayInside:
+    false
+  else:
+    true
 
 proc markDinnerLockOverride(
   bot: Bot,
-  decision: LlmDecision
+  decision: LlmDecision,
+  guestAttempt: bool
 ) =
-  ## Records one dinner-lock override for the current decision.
+  ## Records one dinner-lock redirect for the current decision.
   if bot.dinnerLockOverridden:
     return
   bot.dinnerLockOverridden = true
-  bot.dinnerLockOriginalAction = decision.action.actionName()
-  bot.dinnerLockOriginalHouse = bot.decisionHouse(decision)
-  inc bot.dinnerLockOverrideCount
+  bot.dinnerLockGuestAttempt = guestAttempt
+  if guestAttempt:
+    bot.dinnerLockRedirectReason = "guest_attempt"
+    bot.dinnerLockOriginalAction = decision.action.actionName()
+    bot.dinnerLockOriginalHouse = bot.decisionHouse(decision)
+    inc bot.dinnerLockOverrideCount
+  else:
+    bot.dinnerLockRedirectReason = "end_of_day"
+    inc bot.dinnerLockRedirectCount
 
 proc writeDinnerLockOverride(bot: Bot) =
   ## Writes the dinner-lock metadata onto the current artifact record.
   if bot.artifactDecisionIndex >= 0:
     let record = bot.artifactDecisions[bot.artifactDecisionIndex]
     record["dinnerLockOverridden"] = %true
+    record["dinnerLockGuestAttempt"] = %bot.dinnerLockGuestAttempt
+    record["dinnerLockRedirectReason"] =
+      %bot.dinnerLockRedirectReason
     record["dinnerLockOriginalAction"] =
       %bot.dinnerLockOriginalAction
     record["dinnerLockOriginalHouse"] =
       %bot.dinnerLockOriginalHouse
     record["dinnerLockOverrideCount"] = %bot.dinnerLockOverrideCount
+    record["dinnerLockRedirectCount"] = %bot.dinnerLockRedirectCount
 
 proc dinnerLockGoal(bot: Bot): Goal =
   ## Returns a movement goal that gets the bot inside its own house.
@@ -2833,9 +2868,10 @@ proc dinnerLockDecision(
   ## Replaces a locked dinner destination with the bot's own house.
   result = decision
   if not bot.dinnerLockActive() or
-      not bot.dinnerDecisionTargetsOtherHouse(decision):
+      not bot.dinnerDecisionNeedsRedirect(decision):
     return
-  bot.markDinnerLockOverride(decision)
+  let guestAttempt = bot.dinnerDecisionTargetsOtherHouse(decision)
+  bot.markDinnerLockOverride(decision, guestAttempt)
   if decision.action == LlmSayToPerson:
     return
   result = LlmDecision(
@@ -2846,9 +2882,14 @@ proc dinnerLockDecision(
         LlmStayInside
       else:
         LlmGoHome,
+    houseIndex: UnknownHouse,
     untilMinutes: DinnerMinutes,
-    reason: "dinner lock: own house; overridden " &
-      bot.dinnerLockOriginalAction
+    reason:
+      if guestAttempt:
+        "dinner lock: own house; overridden " &
+          bot.dinnerLockOriginalAction
+      else:
+        "dinner lock: own house; end-of-day redirect"
   )
 
 proc fallbackInvitationTarget(bot: Bot): string =
@@ -3116,9 +3157,12 @@ proc recordArtifactDecision(
       else:
         "",
     "dinnerLockOverridden": bot.dinnerLockOverridden,
+    "dinnerLockGuestAttempt": bot.dinnerLockGuestAttempt,
+    "dinnerLockRedirectReason": bot.dinnerLockRedirectReason,
     "dinnerLockOriginalAction": bot.dinnerLockOriginalAction,
     "dinnerLockOriginalHouse": bot.dinnerLockOriginalHouse,
     "dinnerLockOverrideCount": bot.dinnerLockOverrideCount,
+    "dinnerLockRedirectCount": bot.dinnerLockRedirectCount,
     "chatSent": false,
     "chatSuppressed": false,
     "chatSuppressionReason": "",
@@ -3225,6 +3269,8 @@ proc applyDecision(bot: Bot, decision: LlmDecision, fromLlm = false) =
     else:
       bot.fallbackDecision()
   bot.dinnerLockOverridden = false
+  bot.dinnerLockGuestAttempt = false
+  bot.dinnerLockRedirectReason = ""
   bot.dinnerLockOriginalAction = ""
   bot.dinnerLockOriginalHouse = UnknownHouse
   nextDecision = bot.inferSocialCommitment(nextDecision)
@@ -3630,9 +3676,11 @@ proc decisionComplete(bot: Bot): bool =
   if not bot.hasDecision:
     return true
   if bot.dinnerLockActive() and
+      bot.decision.action == LlmSayToPerson and
+      not bot.visiblePlayerNear(bot.decision.targetName):
+    return true
+  if bot.dinnerLockActive() and
       bot.dinnerDecisionTargetsOtherHouse(bot.decision):
-    if bot.decision.action == LlmSayToPerson:
-      return bot.decisionChatSent or bot.dinnerRecorded
     return bot.screenKind == HomeMap and bot.currentHouse == bot.homeIndex
   if bot.decision.untilMinutes >= 0 and
       bot.decision.action != LlmSayToPerson:
@@ -3855,8 +3903,7 @@ proc maybeSendDecisionChat(bot: Bot, ws: WebSocket) =
     bot.decisionChatSent = true
     return
   if bot.decision.targetName.len > 0 and
-      not bot.visiblePlayerNear(bot.decision.targetName) and
-      not bot.dinnerLockActive():
+      not bot.visiblePlayerNear(bot.decision.targetName):
     return
   let normalized = normalizedChatLine(bot.decision.message)
   let duplicateReason = bot.duplicateChatReason(
