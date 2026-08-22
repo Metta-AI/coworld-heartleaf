@@ -398,6 +398,9 @@ type
       ## How long the village waits for every seat's soul before day 1.
     soulConnectionRequired: bool
       ## Whether a seat whose socket drops after its soul is a player failure.
+    mockReply: string
+      ## Offline stand-in for the model, for certification and smoke runs
+      ## only; empty in every hosted variant.
 
 when not defined(emscripten):
   type
@@ -4481,6 +4484,7 @@ when not defined(emscripten):
     playerNames: seq[string] = @[],
     soulTimeoutSeconds = DefaultSoulTimeoutSeconds,
     soulConnectionRequired = false,
+    mockReply = "",
     saveReplayPath = "",
     runtimeConfig = RuntimeConfig()
   ) =
@@ -4514,13 +4518,15 @@ when not defined(emscripten):
       seatPlayers[seat] = -1
     if tokens.len > 0:
       sim.seatCount = tokens.len
-    if tokens.len > 0 and not bedrockConfigured():
+    if tokens.len > 0 and not bedrockConfigured(mockReply):
       echo "fatal: ", BedrockNotConfiguredMessage
       quit(1)
+    if mockReply.len > 0:
+      echo "model mocked by config: every decision is ", mockReply
     let brains = newBrains(
       sim.navigationFor(),
       sim.worldLayoutFor(),
-      newBedrockClient(HouseCount),
+      newBedrockClient(HouseCount, mockReply),
       seed
     )
     brains.onSeatFailure = proc(seat: int, message: string) =
@@ -4875,6 +4881,7 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("day-seconds", config.daySeconds)
   node.readConfigInt("soulTimeoutSeconds", config.soulTimeoutSeconds)
   node.readConfigBool("soulConnectionRequired", config.soulConnectionRequired)
+  node.readConfigString("mockReply", config.mockReply)
   node.readConfigStrings("tokens", config.tokens)
   # Seat i spawns in house i, so more tokens than houses can never all
   # join. Fewer tokens is fine: the remaining houses simply stay empty.
@@ -4905,7 +4912,8 @@ proc echoStartupConfig(config: RunConfig) =
     " maxGames=", config.maxGames.limitText(),
     " daySeconds=", config.daySeconds,
     " soulTimeoutSeconds=", config.soulTimeoutSeconds,
-    " soulConnectionRequired=", config.soulConnectionRequired
+    " soulConnectionRequired=", config.soulConnectionRequired,
+    " mockReply=", (if config.mockReply.len > 0: "yes" else: "no")
 
 proc replayRunConfigFor(data: ReplayData): RunConfig =
   ## Reads the recorded simulation config from a replay header.
@@ -5226,6 +5234,7 @@ when isMainModule and not defined(emscripten):
     playerNames = config.playerNames,
     soulTimeoutSeconds = config.soulTimeoutSeconds,
     soulConnectionRequired = config.soulConnectionRequired,
+    mockReply = config.mockReply,
     saveReplayPath = localReplayPath,
     runtimeConfig = runtimeConfig
   )

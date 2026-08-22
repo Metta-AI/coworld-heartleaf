@@ -18,10 +18,7 @@
       "run": [
         "/bin/heartleaf"
       ],
-      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master",
-      "env": {
-        "HEARTLEAF_MOCK_REPLY": "{\"action\": \"keep_gathering_plants\"}"
-      }
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master"
     },
     "config_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -96,6 +93,11 @@
           "description": "When true a seat whose socket drops after its soul was accepted is reported as a player failure. Off by default: the game keeps playing the gnome.",
           "type": "boolean",
           "default": false
+        },
+        "mockReply": {
+          "description": "Offline stand-in for the model: when set, every decision is this literal reply and no model is called. Used by the certification fixture and local smoke runs only; hosted variants leave it unset so each soul's model is really called.",
+          "type": "string",
+          "default": ""
         }
       }
     },
@@ -347,7 +349,8 @@
     "game_config": {
       "seed": 1,
       "maxTicks": 300,
-      "maxGames": 1
+      "maxGames": 1,
+      "mockReply": "{\"action\": \"keep_gathering_plants\"}"
     },
     "players": [
       {

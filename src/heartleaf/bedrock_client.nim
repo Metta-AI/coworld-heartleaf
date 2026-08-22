@@ -107,10 +107,10 @@ proc bedrockPerformanceLatency(): string =
   if value == "standard" or value == "optimized":
     return value
 
-proc bedrockConfigured*(): bool =
+proc bedrockConfigured*(mockReply = ""): bool =
   ## True when the model can be called, or a mock reply stands in.
-  mockBedrockReply().len > 0 or bedrockToken().len > 0 or
-    hasAwsCredentialSignal()
+  mockReply.len > 0 or mockBedrockReply().len > 0 or
+    bedrockToken().len > 0 or hasAwsCredentialSignal()
 
 proc isAnthropicModel*(modelId: string): bool =
   ## True for Claude ids, which use the Anthropic InvokeModel body; every
@@ -376,12 +376,15 @@ proc classify*(reply: var BedrockReply) =
   else:
     reply.outcome = Transient
 
-proc newBedrockClient*(maxInFlight: int): BedrockClient =
-  ## A client for the live endpoint, or the mock when one is configured.
+proc newBedrockClient*(maxInFlight: int, mockReply = ""): BedrockClient =
+  ## A client for the live endpoint, or the mock when one is configured
+  ## (by game config, or by the environment for local runs). Hosted games
+  ## never set a mock: the certification fixture does, through config, so
+  ## league rounds always call the model a soul names.
   result = BedrockClient(
     kind: Live,
     promptCacheEnabled: getEnv("BEDROCK_PROMPT_CACHE").strip() != "0",
-    mockReply: mockBedrockReply()
+    mockReply: if mockReply.len > 0: mockReply else: mockBedrockReply()
   )
   if result.mockReply.len == 0:
     result.curl = newCurly(max(1, maxInFlight))

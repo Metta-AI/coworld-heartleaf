@@ -145,8 +145,10 @@ nim r players/soul_player/soul_player.nim \
   --url:'ws://localhost:8080/player?slot=0&token=a' --soul:my_soul.md
 ```
 
-`HEARTLEAF_MOCK_REPLY` is the literal reply every call gets (used by
-certification, which runs without Bedrock). Set `BEDROCK_KEY` or AWS
+`HEARTLEAF_MOCK_REPLY` (or the `mockReply` game config field, which is
+what the certification fixture uses) is the literal reply every call
+gets; hosted variants never set either, so league games always call the
+model a soul names. Set `BEDROCK_KEY` or AWS
 credentials instead to call the real model. Knobs:
 `HEARTLEAF_LLM_REQUESTS_PER_MINUTE` (30), `HEARTLEAF_LLM_MAX_IN_FLIGHT`
 (9), `HEARTLEAF_LLM_VILLAGER_MIN_SECONDS` (2), `BEDROCK_TIMEOUT_SECONDS`,
