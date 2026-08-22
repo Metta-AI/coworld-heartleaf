@@ -663,6 +663,30 @@ block:
   doAssert due.valid and due.action == GoToParty and due.houseIndex == 1,
     "a gnome at a door when it is time to go in goes in there"
   doAssert villager.committedPartyHouse == 1, "and that becomes the promise"
+  # Curfew promise: after dinner, away from home, late enough -> go home.
+  villager.applyDecision(observation, layout,
+    Decision(valid: true, action: StayInside, houseIndex: UnknownHouse,
+      untilMinutes: -1), fromModel = true)
+  observation.minutes = 20 * 60 + 30
+  observation.scene = Indoors
+  observation.currentHouse = 1
+  let night = villager.dueCommitment(observation, navigation, layout)
+  doAssert night.valid and night.action == GoHome,
+    "a guest still at the host's house is sent home before 9pm"
+  observation.currentHouse = 2
+  doAssert not villager.dueCommitment(observation, navigation, layout).valid,
+    "already home: nothing to do"
+  observation.scene = Outdoors
+  observation.currentHouse = -1
+  villager.leaveTimeNoted = false
+  villager.maybeNoteLeaveTime(observation, navigation, layout)
+  doAssert villager.interruptRequested, "the night departure note interrupts"
+  villager.interruptRequested = false
+  villager.leaveTimeNoted = false
+  observation.scene = Indoors
+  observation.currentHouse = 1
+  villager.maybeNoteLeaveTime(observation, navigation, layout)
+  doAssert villager.interruptRequested, "and it reaches a guest still indoors"
 
 echo "Testing a mock-driven replay round trip"
 block:

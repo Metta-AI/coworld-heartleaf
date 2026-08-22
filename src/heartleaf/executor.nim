@@ -152,8 +152,14 @@ proc maybeNoteLeaveTime*(
   ## the model gets to react; repeats every LeaveNudgeMinutes while the
   ## villager is still outside. Before dinner the reference point is the
   ## committed house, or, with no commitment, the farthest table. In the
-  ## evening it is home, for the end of the day.
-  if observation.scene != Outdoors:
+  ## evening it is home, for the end of the day, and a guest still inside
+  ## someone else's house after dinner is nudged too.
+  let awayFromHome = observation.scene == Outdoors or
+    (observation.scene == Indoors and
+      observation.currentHouse != villager.houseIndex)
+  if observation.scene == Overlay or not awayFromHome:
+    return
+  if observation.scene == Indoors and observation.minutes < DinnerMinutes:
     return
   if villager.leaveTimeNoted and
       observation.minutes - villager.leaveTimeNotedMinutes < LeaveNudgeMinutes:
@@ -673,7 +679,24 @@ proc dueCommitment*(
   result = Decision(valid: false, action: Invalid,
     houseIndex: UnknownHouse, untilMinutes: -1)
   if observation.minutes >= DinnerMinutes + 60:
-    return
+    # After dinner the only promise left is the curfew: be inside your
+    # own house when the day ends.
+    if observation.scene == Indoors and
+        observation.currentHouse == villager.houseIndex:
+      return
+    if observation.scene == Overlay:
+      return
+    let pixels = villager.walkPixelsToHouse(
+      observation, navigation, layout, villager.houseIndex
+    )
+    if pixels < 0:
+      return
+    let leaveAt = DayEndMinutes - observation.walkMinutes(pixels) -
+      LeaveMarginMinutes
+    if observation.minutes < leaveAt:
+      return
+    return Decision(valid: true, action: GoHome, houseIndex: UnknownHouse,
+      untilMinutes: -1, reason: "heading home before the day ends")
   var house = villager.committedPartyHouse
   if house < 0 and villager.hasDecision and
       villager.decision.action in {StandAtHouseGarden, FindHouse}:
