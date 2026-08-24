@@ -15,13 +15,13 @@
 # Competition entrants are champions: each player fields exactly its current
 # champion, so the league is not spammed with stale, benched versions of a
 # player's earlier submissions. The 9 game seats are filled by duplicating the
-# real champions (fill_seats: duplicate), not by seating outdated versions.
+# league filler bots (fill_seats: filler_policy), not by seating outdated versions.
 
 schedule_interval_minutes: 30
 
 defaults:
   seating: shuffled_window
-  fill_seats: duplicate
+  fill_seats: filler_policy
   min_entries_to_start: 2
   stage:
     label: Round
