@@ -1,25 +1,30 @@
 import
-  std/[json, math, os, random, strutils, tables, times],
+  std/[json, os, random, strutils, tables, times],
   flatty, jsony, pixie,
   bitworld/aseprite, bitworld/pixelfonts, bitworld/spriteprotocol,
   bitworld/resources, bitworld/sprites,
-  heartleaf/common, heartleaf/protocol,
+  heartleaf/common, heartleaf/protocol, heartleaf/souls,
+  heartleaf/observation, heartleaf/navigation,
   replays
 
 when not defined(emscripten):
   import
-    std/[locks, monotimes],
+    std/[locks, monotimes, sysrand],
     curly, mummy,
     bitworld/client as bitworldClient,
-    bitworld/runtime
+    bitworld/runtime,
+    heartleaf/brains, heartleaf/bedrock_client
 
 const
-  DefaultSeed = 0x484541
+  DefaultSeed* = 0x484541
   DefaultMaxTicks = 0
   DefaultMaxGames = 0
   MainMapIndex = 0
   HomeMapIndexBase = 1
-  UnassignedPlayerIndex = 0x7fffffff
+  DefaultSoulTimeoutSeconds* = 150
+  CogamePlayerFailureUriEnv = "COGAME_PLAYER_FAILURE_URI"
+  LogCursorPrefix = "log-cursor "
+  LogReadyMessage = "log-ready"
   FoodGridCols = 8
   FoodGridRows = 8
   DirectionCount = 4
@@ -37,7 +42,6 @@ const
   MinSpawnSpacing = 20
   SpawnScanStep = 4
   HouseSpawnMaxDistance = 96
-  ScoreScreenTicks = 10 * TicksPerSecond
   DinnerScreenTicks = 10 * TicksPerSecond
   DinnerTallyMinutes = DinnerMinutes
   DinnerEatRounds = 3
@@ -58,14 +62,12 @@ const
   ClockLayerId = 2
   GlobalPanelLayerId = 3
   ReplayCenterBottomLayerId = 4
-  ReplayBottomLeftLayerId = 5
   ReplayMismatchLayerId = 6
   MapLayerKind = 0
   GlobalPanelLayerKind = 1
   UiLayerKind = 3
   ClockLayerKind = 2
   ReplayCenterBottomLayerKind = 8
-  ReplayBottomLeftLayerKind = 4
   ReplayMismatchLayerKind = 5
   MapLayerFlags = 1
   UiLayerFlags = 2
@@ -140,8 +142,6 @@ const
   InventoryCountSpriteBase = 4000
   ClockGlyphSpriteBase = 7000
   ScoreSpriteBase = 7100
-  MainWalkSpriteId = 8000
-  HomeWalkSpriteId = 8001
   ReplayTickSpriteId = 8400
   ReplayScrubberSpriteId = 8401
   ReplayControlsSpriteId = 8402
@@ -160,7 +160,6 @@ const
   InsetBottomObjectId = 21_300
   InsetOverhangObjectId = 21_301
   InsetPlayerObjectBase = 21_400
-  InsetPlayerBorderObjectBase = 21_500
   HouseGnomeZ = 20_500
   HouseGnomeLift = 12
   InsetBottomZ = 31_000
@@ -215,7 +214,6 @@ const
   TintHueMixes = [0.18, 0.30, 0.43, 0.57, 0.72]
   TintSaturationScales = [1.05, 1.12, 1.20, 1.30, 1.38]
   TintValueScales = [0.86, 0.70, 0.54, 0.39, 0.25]
-  LookingForSpriteId = 7190
 
 type
   Direction = enum
@@ -308,6 +306,8 @@ type
     message: string
     messageTicks: int
     attackDown: bool
+    curfewMissed: bool
+      ## Caught outside home at the end of the day; cleared each morning.
 
   SpriteCacheEntry = ref object
     spriteId: int
@@ -385,26 +385,41 @@ type
     port: int
     seed: int
     maxTicks: int
+    maxDays: int
+      ## Game length in days, score screens included; overrides maxTicks.
     maxGames: int
     daySeconds: int
     tokens: seq[string]
     playerNames: seq[string]
       ## Per-slot display names from `players[].name`, filled by hosted
       ## dispatch with the policy or player name behind each slot.
+    soulTimeoutSeconds: int
+      ## How long the village waits for every seat's soul before day 1.
+    soulConnectionRequired: bool
+      ## Whether a seat whose socket drops after its soul is a player failure.
+    mockReply: string
+      ## Offline stand-in for the model, for certification and smoke runs
+      ## only; empty in every hosted variant.
 
 when not defined(emscripten):
   type
     WebSocketAppState = ref object
       lock: Lock
-      inputMasks: Table[WebSocket, uint8]
-      lastAppliedMasks: Table[WebSocket, uint8]
-      playerIndices: Table[WebSocket, int]
       playerSlots: Table[WebSocket, int]
-      playerViewers: Table[WebSocket, PlayerViewerState]
+        ## Seat requested by each /player socket, -1 for any free seat.
       globalViewers: Table[WebSocket, PlayerViewerState]
       replayViewers: Table[WebSocket, PlayerViewerState]
       playerUsernames: Table[WebSocket, string]
-      chatMessages: Table[WebSocket, string]
+      souls: Table[int, Soul]
+        ## Accepted soul per seat; a seat comes alive when its soul arrives.
+      soulSockets: Table[WebSocket, int]
+        ## Seat whose soul each socket delivered.
+      logSent: Table[WebSocket, int]
+        ## How many of the seat's log entries each soul socket has received.
+        ## A socket is only streamed to once it sent log-ready or a
+        ## log-cursor, so the first records never race the handshake.
+      gameNumber: int
+        ## One-based game of this process, matching the log records.
       closedSockets: seq[WebSocket]
       tokens: seq[string]
       playerNames: seq[string]
@@ -552,14 +567,6 @@ proc loadWorldMap(path, label: string): WorldMap =
       TintValueScales[i]
     )
   result.walkMask = walkImage.loadWalkMask()
-
-proc walkabilitySprite(world: WorldMap): RgbaSprite =
-  ## Builds an invisible helper sprite containing the walkable pixels.
-  result = newRgbaSprite(world.width, world.height)
-  for y in 0 ..< world.height:
-    for x in 0 ..< world.width:
-      if world.walkMask[y * world.width + x]:
-        result.putPixel(x, y, rgba(255, 255, 255, 255))
 
 proc loadGnomeSprites(path: string): seq[GnomeSprites] =
   ## Loads all gnome direction sets from the sheet.
@@ -980,8 +987,8 @@ proc dinnerOverlaySprite(sim: SimServer, record: DinnerRecord): RgbaSprite =
     sim.blitChatText(result, "Host: " & record.hostName, 8, 32)
     sim.drawFoodCounts(result, record.foods, 8, 44)
 
-proc scoreDisplayName(player: Player): string =
-  ## Returns the score-screen name with username and player name.
+proc attributedDisplayName(player: Player): string =
+  ## Returns the review name with username and fixed gnome name.
   if player.username.len == 0:
     return player.playerName
   return player.username & " (" & player.playerName & ")"
@@ -1005,7 +1012,7 @@ proc scoreOverlaySprite(sim: SimServer): RgbaSprite =
     )
     sim.blitChatText(
       result,
-      player.scoreDisplayName(),
+      player.playerName,
       x,
       y + GnomeSpriteSize + 2
     )
@@ -1076,8 +1083,8 @@ proc addGlobalScorePanel(
     packet.addRgbaSpriteCached(
       cache,
       nameSpriteId,
-      sim.globalPanelTextSprite(player.scoreDisplayName(), nameColor),
-      "global name " & player.scoreDisplayName()
+      sim.globalPanelTextSprite(player.attributedDisplayName(), nameColor),
+      "global name " & player.attributedDisplayName()
     )
     packet.addObject(
       GlobalPanelScoreObjectBase + i,
@@ -1247,7 +1254,7 @@ proc dailyResultsJson*(sim: SimServer): string =
         player = candidate
         break
     if player != nil:
-      names.add(%player.scoreDisplayName())
+      names.add(%player.attributedDisplayName())
       usernames.add(%player.username)
       playerNames.add(%player.playerName)
       scores.add(%player.score)
@@ -1387,16 +1394,6 @@ proc addSpriteProtocolInit(
     FoodMarkerSpriteId,
     sim.foods.marker,
     GardenMarkerLabel
-  )
-  packet.addRgbaSprite(
-    MainWalkSpriteId,
-    sim.mainMap.walkabilitySprite(),
-    MainWalkabilityLabel
-  )
-  packet.addRgbaSprite(
-    HomeWalkSpriteId,
-    sim.homeMaps[0].walkabilitySprite(),
-    HomeWalkabilityLabel
   )
   for gnomeIndex, gnome in sim.gnomes:
     for direction in Direction:
@@ -1761,19 +1758,6 @@ proc foodListText(foods: FoodCounts): string =
   if result.len == 0:
     result = "none"
 
-proc dinnerLabel(record: DinnerRecord, playerIndex: int): string =
-  ## Returns the dinner overlay sprite label. Besides the player index it
-  ## carries the dinner result as text so sprite-reading bots learn whose
-  ## table they sat at, who else was there, what was eaten or served, and
-  ## the score, without reading overlay pixels. foods= is last because
-  ## food names contain spaces.
-  DinnerLabelPrefix & $playerIndex &
-    " host=" & record.hostName &
-    " wasHost=" & $record.wasHost &
-    " score=" & $record.score &
-    " guests=" & record.guestNames.join(",") &
-    " foods=" & record.foods.foodListText()
-
 proc addScreenOverlay(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1787,7 +1771,7 @@ proc addScreenOverlay(
     label = ""
   if player.dinnerTicks > 0 and player.dinnerRecord != nil:
     overlay = sim.dinnerOverlaySprite(player.dinnerRecord)
-    label = player.dinnerRecord.dinnerLabel(playerIndex)
+    label = DinnerLabelPrefix & $playerIndex
   elif sim.scoreTicks > 0:
     overlay = sim.scoreOverlaySprite()
     label = ScoreLabelPrefix & $playerIndex
@@ -2217,25 +2201,6 @@ proc addInventoryObjects(
     )
     inc slot
 
-proc addLookingForObject(
-  packet: var seq[uint8],
-  player: Player
-) =
-  ## Appends one off-screen label of foods this gnome still needs to eat.
-  packet.addRgbaSprite(
-    LookingForSpriteId,
-    newRgbaSprite(1, 1),
-    player.eaten.lookingForLabel()
-  )
-  packet.addObject(
-    LookingForObjectId,
-    -8,
-    -8,
-    0,
-    UiLayerId,
-    LookingForSpriteId
-  )
-
 proc addClockObjects(packet: var seq[uint8], sim: SimServer) =
   ## Appends the upper-right clock using individual glyph objects.
   let text = sim.clockText()
@@ -2289,7 +2254,6 @@ proc addPlayerView(
       player,
       playerIndex
     )
-    packet.addLookingForObject(player)
     return true
   packet.addObject(
     BottomObjectId,
@@ -2334,7 +2298,6 @@ proc addPlayerView(
     cache,
     player
   )
-  packet.addLookingForObject(player)
   packet.addClockObjects(sim)
   return true
 
@@ -2381,25 +2344,6 @@ proc addGlobalWorldView(
     mainOverhangSpriteId(tintIndex)
   )
   packet.addClockObjects(sim)
-
-proc buildPlayerPacket(
-  sim: SimServer,
-  playerIndex: int,
-  state: PlayerViewerState,
-  nextState: var PlayerViewerState
-): seq[uint8] =
-  ## Builds one sprite protocol packet for a player viewer.
-  nextState =
-    if state == nil:
-      PlayerViewerState()
-    else:
-      state
-  if not nextState.initialized:
-    result.add(sim.playerInitPacket)
-    nextState.initialized = true
-
-  result.addClearObjects()
-  discard result.addPlayerView(sim, playerIndex, nextState.spriteCache)
 
 proc replayCommandAt(layer, x, y: int): char =
   ## Returns the replay transport command under a UI coordinate. The
@@ -3351,18 +3295,32 @@ proc startDay(sim: SimServer) =
   for player in sim.players.mitems:
     player.dinnerTicks = 0
     player.dinnerRecord = nil
+    player.curfewMissed = false
   for i in 0 ..< sim.players.len:
     sim.teleportPlayerToOwnHome(i)
 
 proc startScoreScreen(sim: SimServer) =
-  ## Starts the end-of-day scoring screen.
+  ## Starts the end-of-day scoring screen. Curfew: a gnome that is not
+  ## inside its own house when the day ends loses CurfewPenalty points
+  ## before everyone is sent home.
   sim.dayTick = sim.dayTicks
   sim.scoreTicks = ScoreScreenTicks
   for player in sim.players.mitems:
     player.dinnerTicks = 0
     player.dinnerRecord = nil
+    player.curfewMissed = player.mapIndex != player.homeFlag
+    if player.curfewMissed:
+      player.score -= CurfewPenalty
   for i in 0 ..< sim.players.len:
     sim.teleportPlayerToOwnHome(i)
+
+proc scoreScreenActive*(sim: SimServer): bool =
+  ## True while the end-of-day score screen is up.
+  sim.scoreTicks > 0
+
+proc playerScore*(sim: SimServer, playerIndex: int): int =
+  ## One player's cumulative score.
+  sim.players[playerIndex].score
 
 proc replayChatVisibleTo(sim: SimServer, speaker, viewer: Player): bool =
   ## Whether `viewer` would see `speaker`'s current speech bubble — the
@@ -3399,6 +3357,120 @@ proc replayChatAudience*(sim: SimServer, speakerSlot: int): seq[int] =
   for slot, viewer in sim.players:
     if slot != speakerSlot and sim.replayChatVisibleTo(speaker, viewer):
       result.add(slot)
+
+proc playerMapIndex*(sim: SimServer, playerIndex: int): int =
+  ## The map one player is on: 0 outdoors, 1..9 inside that house.
+  sim.players[playerIndex].mapIndex
+
+proc playerMessage*(sim: SimServer, playerIndex: int): string =
+  ## One player's current chat bubble text.
+  sim.players[playerIndex].message
+
+proc worldLayoutFor*(sim: SimServer): WorldLayout =
+  ## The static village layout the villager brains navigate.
+  for garden in sim.gardens:
+    result.gardens.add(garden.rect)
+  for i in 0 ..< HouseCount:
+    result.houses[i] = sim.houses[i].rect
+    result.houseValid[i] = sim.houses[i].valid
+  result.exit = sim.homeResources.exit
+  result.hasExit = sim.homeResources.hasExit
+
+proc navigationFor*(sim: SimServer): Navigation =
+  ## Navigation spaces over the same walk masks the simulation uses.
+  let home = sim.homeMaps[0]
+  newNavigation(
+    sim.mainMap.walkMask, sim.mainMap.width, sim.mainMap.height,
+    home.walkMask, home.width, home.height
+  )
+
+proc nameTagVisible(sim: SimServer, player: Player, screenX, screenY: int): bool =
+  ## Whether a gnome's name tag would be drawn, using the same geometry as
+  ## addNameTag without rendering the sprite.
+  let
+    width = max(1, sim.textFont.textWidth(player.playerName) + NamePadX * 2)
+    height = sim.textFont.height + NamePadY * 2
+    x = screenX + GnomeSpriteSize div 2 - width div 2
+    y = screenY - height - NameGapY
+  rectVisible(x, y, width, height, ViewportWidth, ViewportHeight)
+
+proc observe*(sim: SimServer, playerIndex: int): Observation =
+  ## What one gnome can see this tick: exactly what its own player view
+  ## would draw, read from ground truth instead of sprites.
+  let player = sim.players[playerIndex]
+  result.tick = sim.tickCount
+  result.dayNumber = sim.dayNumber
+  result.minutes = sim.currentDayMinutes()
+  result.ticksPerMinute = float(sim.dayTicks) / float(DayTotalMinutes)
+  result.scene =
+    if player.dinnerTicks > 0 or sim.scoreTicks > 0:
+      Overlay
+    elif player.mapIndex.isHomeMap():
+      Indoors
+    else:
+      Outdoors
+  result.currentHouse =
+    if player.mapIndex.isHomeMap():
+      player.mapIndex - HomeMapIndexBase
+    else:
+      -1
+  result.foot = Point(x: player.playerFootX(), y: player.playerFootY())
+  result.inventoryTotal = player.inventory.totalItems()
+  result.foodCollectedText = player.inventory.foodListText()
+  result.foodLookingForText = player.eaten.foodsNotEatenText()
+  result.dinnerDone = sim.dinnerDone
+  result.curfewMissed = player.curfewMissed
+  if player.dinnerTicks > 0 and player.dinnerRecord != nil:
+    let record = player.dinnerRecord
+    result.dinner = DinnerOutcome(
+      present: true,
+      hostName: record.hostName,
+      wasHost: record.wasHost,
+      score: record.score,
+      guests: record.guestNames,
+      foodsText: record.foods.foodListText()
+    )
+  if result.scene == Overlay:
+    return
+  let
+    cameraX = sim.cameraXFor(player)
+    cameraY = sim.cameraYFor(player)
+  for i, other in sim.players:
+    if i == playerIndex or other.mapIndex != player.mapIndex:
+      continue
+    let
+      screenX = other.x - cameraX
+      screenY = other.y - cameraY
+    if not rectVisible(screenX, screenY, GnomeSpriteSize, GnomeSpriteSize,
+        ViewportWidth, ViewportHeight):
+      continue
+    if not sim.nameTagVisible(other, screenX, screenY):
+      continue
+    var visible = VisiblePlayer(
+      name: other.playerName,
+      houseIndex: other.homeFlag - HomeMapIndexBase,
+      foot: Point(x: other.playerFootX(), y: other.playerFootY())
+    )
+    visible.distanceSquared = distanceSquared(
+      result.foot.x, result.foot.y, visible.foot.x, visible.foot.y
+    )
+    if other.message.len > 0 and other.messageTicks > 0 and
+        sim.replayChatVisibleTo(other, player):
+      visible.says = other.message
+    result.visiblePlayers.add(visible)
+  result.gardenMarkerOnScreen = newSeq[bool](sim.gardens.len)
+  result.gardenMarkerVisible = newSeq[bool](sim.gardens.len)
+  if result.scene == Outdoors:
+    for i, garden in sim.gardens:
+      let
+        center = garden.rect.center()
+        x = center.x - FoodSpriteSize div 2 - cameraX
+        y = center.y - FoodSpriteSize div 2 - cameraY
+      result.gardenMarkerOnScreen[i] = rectVisible(
+        x, y, FoodSpriteSize, FoodSpriteSize, ViewportWidth, ViewportHeight
+      )
+      result.gardenMarkerVisible[i] =
+        result.gardenMarkerOnScreen[i] and garden.hasFood()
 
 proc captureChatFeed(sim: SimServer) =
   ## Queues freshly spoken chats with their audience for the delay chat.
@@ -3733,15 +3805,14 @@ when not defined(emscripten):
     ## Initializes shared websocket state.
     appState = WebSocketAppState()
     initLock(appState.lock)
-    appState.inputMasks = initTable[WebSocket, uint8]()
-    appState.lastAppliedMasks = initTable[WebSocket, uint8]()
-    appState.playerIndices = initTable[WebSocket, int]()
     appState.playerSlots = initTable[WebSocket, int]()
-    appState.playerViewers = initTable[WebSocket, PlayerViewerState]()
     appState.globalViewers = initTable[WebSocket, PlayerViewerState]()
     appState.replayViewers = initTable[WebSocket, PlayerViewerState]()
     appState.playerUsernames = initTable[WebSocket, string]()
-    appState.chatMessages = initTable[WebSocket, string]()
+    appState.souls = initTable[int, Soul]()
+    appState.soulSockets = initTable[WebSocket, int]()
+    appState.logSent = initTable[WebSocket, int]()
+    appState.gameNumber = 1
     appState.closedSockets = @[]
     appState.tokens = @[]
     appState.replayServerMode = false
@@ -3959,58 +4030,106 @@ proc replayViewerFrame*(
   state = nextState
 
 when not defined(emscripten):
-  proc playerChatFromMessage(message: Message): string =
-    ## Reads player chat from text or binary websocket messages.
-    case message.kind
-    of TextMessage:
-      message.data
-    of BinaryMessage:
-      if message.data.isChatPacket():
-        return message.data.blobToChat()
-      message.data.readSpriteInputText()
-    of Ping, Pong:
-      ""
-
   proc removePlayer(sim: SimServer, websocket: WebSocket) =
-    ## Removes one websocket and keeps player indices compact.
+    ## Forgets one websocket. Gnomes are owned by their souls, not their
+    ## sockets, so a dropped player connection leaves the village as it is.
     if websocket in appState.replayViewers:
       appState.replayViewers.del(websocket)
     if websocket in appState.globalViewers:
       appState.globalViewers.del(websocket)
-    if websocket in appState.playerViewers:
-      appState.playerViewers.del(websocket)
     if websocket in appState.playerSlots:
       appState.playerSlots.del(websocket)
     if websocket in appState.playerUsernames:
       appState.playerUsernames.del(websocket)
-    if websocket in appState.chatMessages:
-      appState.chatMessages.del(websocket)
-    if websocket notin appState.playerIndices:
-      appState.inputMasks.del(websocket)
-      appState.lastAppliedMasks.del(websocket)
-      return
-
-    let removedIndex = appState.playerIndices[websocket]
-    appState.playerIndices.del(websocket)
-    appState.inputMasks.del(websocket)
-    appState.lastAppliedMasks.del(websocket)
-    if removedIndex >= 0 and removedIndex < sim.players.len:
-      sim.removePlayerAt(removedIndex)
-      for ws, value in appState.playerIndices.mpairs:
-        if value > removedIndex:
-          dec value
+    if websocket in appState.soulSockets:
+      appState.soulSockets.del(websocket)
+    if websocket in appState.logSent:
+      appState.logSent.del(websocket)
 
   proc resetConnectedPlayers() =
-    ## Marks connected player sockets for a fresh simulation join.
-    var sockets: seq[WebSocket] = @[]
-    for websocket in appState.playerIndices.keys:
-      sockets.add(websocket)
-    for websocket in sockets:
-      appState.playerIndices[websocket] = UnassignedPlayerIndex
-      appState.playerViewers[websocket] = PlayerViewerState()
-      appState.inputMasks[websocket] = 0
-      appState.lastAppliedMasks[websocket] = 0
-    appState.chatMessages.clear()
+    ## Resets log cursors for a fresh simulation: the next game's log
+    ## starts again at sequence 0.
+    for websocket in appState.logSent.keys:
+      appState.logSent[websocket] = 0
+
+  proc freeSeatForSoul(): int =
+    ## The lowest seat without a soul, or -1 when the village is full.
+    let seatLimit =
+      if appState.tokens.len > 0:
+        appState.tokens.len
+      else:
+        HouseCount
+    for seat in 0 ..< seatLimit:
+      if seat notin appState.souls:
+        return seat
+    -1
+
+  proc acceptSoul(websocket: WebSocket, raw: string): string =
+    ## Stores the soul a player socket sent and returns the reply text.
+    ## Souls are immutable for the episode; an identical resend is fine.
+    if websocket in appState.soulSockets:
+      let seat = appState.soulSockets[websocket]
+      if appState.souls[seat].raw == raw:
+        return appState.souls[seat].soulReply()
+      return soulRejection("seat " & $seat & " already has a soul")
+    var soul: Soul
+    try:
+      soul = parseSoul(raw)
+    except SoulError as e:
+      echo "soul rejected from ", appState.playerUsernames.getOrDefault(
+        websocket, ""), ": ", e.msg
+      return soulRejection(e.msg)
+    var seat = appState.playerSlots.getOrDefault(websocket, -1)
+    if seat < 0:
+      seat = freeSeatForSoul()
+      if seat < 0:
+        return soulRejection("no free seat")
+    if seat >= HouseCount:
+      return soulRejection("seat " & $seat & " does not exist")
+    if seat in appState.souls:
+      if appState.souls[seat].raw == raw:
+        appState.soulSockets[websocket] = seat
+        return appState.souls[seat].soulReply()
+      return soulRejection("seat " & $seat & " already has a soul")
+    soul.seat = seat
+    soul.username = appState.playerUsernames.getOrDefault(websocket, "")
+    appState.souls[seat] = soul
+    appState.soulSockets[websocket] = seat
+    appState.playerSlots[websocket] = seat
+    echo "soul accepted seat=", seat, " model=", soul.modelId,
+      " bytes=", raw.len, " username=", soul.username
+    if not soul.modelId.knownModelFamily():
+      echo "soul seat=", seat, " names an unfamiliar model: ", soul.modelId
+    soul.soulReply()
+
+  proc parseLogCursor(text: string): tuple[game, sequence: int] =
+    ## Reads "log-cursor game=N sequence=M"; missing parts read as 0 / -1.
+    result = (game: 0, sequence: -1)
+    for part in text[LogCursorPrefix.len .. ^1].splitWhitespace():
+      let pair = part.split('=')
+      if pair.len != 2:
+        continue
+      try:
+        if pair[0] == "game":
+          result.game = parseInt(pair[1])
+        elif pair[0] == "sequence":
+          result.sequence = parseInt(pair[1])
+      except ValueError:
+        discard
+
+  proc declarePlayerFailure(seat: int, message: string) =
+    ## Reports one seat as the reason the episode cannot go on. Hosted runs
+    ## write the Coworld player failure artifact and exit without results;
+    ## local runs only log it.
+    echo "player failure seat=", seat, ": ", message
+    if getEnv(CogamePlayerFailureUriEnv).len == 0:
+      return
+    writeCogameEnv(
+      CogamePlayerFailureUriEnv,
+      $(%*{"message": message, "failed_policy_index": seat}),
+      "application/json"
+    )
+    quit(1)
 
   proc isWebSocketUpgrade(request: Request): bool =
     ## Returns true when the request is a websocket upgrade.
@@ -4168,12 +4287,8 @@ when not defined(emscripten):
       let websocket = request.upgradeToWebSocket()
       {.gcsafe.}:
         withLock appState.lock:
-          appState.playerViewers[websocket] = PlayerViewerState()
-          appState.playerIndices[websocket] = UnassignedPlayerIndex
           appState.playerSlots[websocket] = slot
           appState.playerUsernames[websocket] = username
-          appState.inputMasks[websocket] = 0
-          appState.lastAppliedMasks[websocket] = 0
     elif request.path == GlobalWebSocketPath and request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
       let websocket = request.upgradeToWebSocket()
@@ -4216,7 +4331,7 @@ when not defined(emscripten):
     event: WebSocketEvent,
     message: Message
   ) =
-    ## Handles websocket ping, player input, and close events.
+    ## Handles websocket ping, soul uploads, viewer clicks, and close events.
     case event
     of OpenEvent:
       discard
@@ -4225,6 +4340,30 @@ when not defined(emscripten):
         websocket.send(message.data, Pong)
         return
       if message.kind == Pong:
+        return
+      if message.kind == TextMessage:
+        {.gcsafe.}:
+          withLock appState.lock:
+            if websocket in appState.soulSockets and
+                message.data.strip() == LogReadyMessage:
+              # The collector is ready for the log from the beginning.
+              appState.logSent[websocket] = 0
+            elif websocket in appState.soulSockets and
+                message.data.startsWith(LogCursorPrefix):
+              # A collector that already holds part of the log says where
+              # it stopped, so streaming resumes there instead of replaying.
+              let cursor = parseLogCursor(message.data)
+              if cursor.game == appState.gameNumber:
+                appState.logSent[websocket] = max(0, cursor.sequence + 1)
+              else:
+                appState.logSent[websocket] = 0
+            elif websocket in appState.playerSlots:
+              # Reply while still holding the lock: the loop streams log
+              # records under the same lock, so nothing can overtake the
+              # acceptance on this socket.
+              let reply = acceptSoul(websocket, message.data)
+              if reply.len > 0:
+                websocket.send(reply, TextMessage)
         return
       let clickedPlayer =
         if message.kind == BinaryMessage:
@@ -4277,21 +4416,7 @@ when not defined(emscripten):
                 appState.globalViewers[websocket].applyReplayViewerMessage(
                   message.data
                 )
-      if message.kind == BinaryMessage and message.data.len == 2 and
-          (
-            message.data[0].uint8 == PacketInput or
-            message.data[0].uint8 == 0x84'u8
-          ):
-        {.gcsafe.}:
-          withLock appState.lock:
-            if websocket in appState.playerViewers:
-              appState.inputMasks[websocket] = message.data[1].uint8 and 0x7f'u8
-      let chatText = message.playerChatFromMessage().cleanChatMessage()
-      if chatText.len > 0:
-        {.gcsafe.}:
-          withLock appState.lock:
-            if websocket in appState.playerViewers:
-              appState.chatMessages[websocket] = chatText
+      # Button masks and chat from /player sockets are ignored: souls play.
     of ErrorEvent:
       discard
     of CloseEvent:
@@ -4323,36 +4448,69 @@ when not defined(emscripten):
     port = DefaultPort,
     seed = DefaultSeed,
     maxTicks = DefaultMaxTicks,
+    maxDays = 0,
     maxGames = DefaultMaxGames,
     daySeconds = DefaultDaySeconds,
     tokens: seq[string] = @[],
     playerNames: seq[string] = @[],
+    soulTimeoutSeconds = DefaultSoulTimeoutSeconds,
+    soulConnectionRequired = false,
+    mockReply = "",
     saveReplayPath = "",
     runtimeConfig = RuntimeConfig()
   ) =
-    ## Runs the Heartleaf websocket game server.
+    ## Runs the Heartleaf websocket game server. A seat comes alive when its
+    ## soul arrives; with tokens configured the village waits for every seat
+    ## (or the soul timeout) before day 1 starts, so nobody misses a morning.
     initAppState()
     appState.tokens = tokens
     appState.playerNames = playerNames
+    let dayTicks = max(1, daySeconds) * TicksPerSecond
+    let totalTicks =
+      if maxDays > 0:
+        gameTicksForDays(maxDays, dayTicks)
+      else:
+        maxTicks
+    let deadlineProblem = hostedDeadlineProblem(totalTicks)
+    if deadlineProblem.len > 0:
+      echo "fatal: ", deadlineProblem
+      quit(1)
     var replayWriter = openReplayWriter(
       saveReplayPath,
       $(%*{
         "seed": seed,
-        "maxTicks": maxTicks,
+        "maxTicks": totalTicks,
         "maxGames": maxGames,
         "daySeconds": daySeconds,
         "tokenCount": tokens.len
       })
     )
-    let dayTicks = max(1, daySeconds) * TicksPerSecond
     var
       sim = initSimServer(seed, dayTicks)
       lastTick: MonoTime
       runTicks = 0
       gamesFinished = 0
       lastWrittenDay = 0
+      seatPlayers: array[HouseCount, int]
+      simStarted = tokens.len == 0
+      pausedSince = 0.0
+    for seat in 0 ..< HouseCount:
+      seatPlayers[seat] = -1
     if tokens.len > 0:
       sim.seatCount = tokens.len
+    if tokens.len > 0 and not bedrockConfigured(mockReply):
+      echo "fatal: ", BedrockNotConfiguredMessage
+      quit(1)
+    if mockReply.len > 0:
+      echo "model mocked by config: every decision is ", mockReply
+    let brains = newBrains(
+      sim.navigationFor(),
+      sim.worldLayoutFor(),
+      newBedrockClient(HouseCount, mockReply),
+      seed
+    )
+    brains.onSeatFailure = proc(seat: int, message: string) =
+      declarePlayerFailure(seat, message)
     # Load assets before healthz so /global can send on the first tick.
     let httpServer = newServer(
       httpHandler,
@@ -4369,107 +4527,142 @@ when not defined(emscripten):
     )
     httpServer.waitUntilReady()
     lastTick = getMonoTime()
+    let soulDeadline = epochTime() + soulTimeoutSeconds.float
+    if not simStarted:
+      echo "waiting for ", tokens.len, " souls (", soulTimeoutSeconds, "s)"
 
     while true:
       var
-        sockets: seq[WebSocket] = @[]
-        playerIndices: seq[int] = @[]
-        playerStates: seq[PlayerViewerState] = @[]
         globalSockets: seq[WebSocket] = @[]
         globalStates: seq[PlayerViewerState] = @[]
         inputs: seq[InputState]
+        waitingSeats: seq[int] = @[]
 
       {.gcsafe.}:
         withLock appState.lock:
           for websocket in appState.closedSockets:
-            if replayWriter.enabled and websocket in appState.playerIndices:
-              let playerIndex = appState.playerIndices[websocket]
-              if playerIndex >= 0 and playerIndex < sim.players.len:
-                replayWriter.writeLeave(tickTime(sim.tickCount), playerIndex)
-                if playerIndex < replayWriter.lastMasks.len:
-                  replayWriter.lastMasks.delete(playerIndex)
+            if soulConnectionRequired and websocket in appState.soulSockets:
+              let seat = appState.soulSockets[websocket]
+              declarePlayerFailure(
+                seat,
+                "Seat " & $seat & " disconnected after sending its soul"
+              )
             sim.removePlayer(websocket)
           appState.closedSockets.setLen(0)
 
-          for websocket in appState.playerIndices.keys:
-            if appState.playerIndices[websocket] == UnassignedPlayerIndex:
-              let playerIndex = sim.addPlayer(
-                appState.playerUsernames.getOrDefault(websocket, ""),
-                appState.playerSlots.getOrDefault(websocket, -1)
-              )
-              if playerIndex >= 0:
-                appState.playerIndices[websocket] = playerIndex
-                if replayWriter.enabled:
-                  replayWriter.writeJoin(
-                    tickTime(sim.tickCount),
-                    playerIndex,
-                    appState.playerUsernames.getOrDefault(websocket, ""),
-                    appState.playerSlots.getOrDefault(websocket, -1),
-                    ""
-                  )
-                  while replayWriter.lastMasks.len < sim.players.len:
-                    replayWriter.lastMasks.add(0)
-
-          inputs = newSeq[InputState](sim.players.len)
-          for websocket, playerIndex in appState.playerIndices.pairs:
-            sockets.add(websocket)
-            playerIndices.add(playerIndex)
-            playerStates.add(
-              appState.playerViewers.getOrDefault(
-                websocket,
-                PlayerViewerState()
-              )
-            )
-            if playerIndex < 0 or playerIndex >= inputs.len:
+          for seat, soul in appState.souls.pairs:
+            if seatPlayers[seat] >= 0:
               continue
-            let currentMask = appState.inputMasks.getOrDefault(websocket, 0)
-            inputs[playerIndex] = decodeInputMask(currentMask)
-            appState.lastAppliedMasks[websocket] = currentMask
-            replayWriter.writeInputMaskChange(
-              tickTime(sim.tickCount),
-              playerIndex,
-              currentMask
-            )
-            let chatText = appState.chatMessages.getOrDefault(websocket, "")
-            if chatText.len > 0:
-              sim.applyPlayerChat(playerIndex, chatText)
-              replayWriter.writeChat(
+            let playerIndex = sim.addPlayer(soul.username, seat)
+            if playerIndex < 0:
+              continue
+            seatPlayers[seat] = playerIndex
+            echo "seat ", seat, " joined as ",
+              sim.players[playerIndex].playerName, " (", soul.username, ")"
+            brains.attachSoul(seat, soul)
+            if replayWriter.enabled:
+              replayWriter.writeJoin(
                 tickTime(sim.tickCount),
                 playerIndex,
-                chatText
+                soul.username,
+                seat,
+                soul.modelId
               )
-              appState.chatMessages.del(websocket)
+              while replayWriter.lastMasks.len < sim.players.len:
+                replayWriter.lastMasks.add(0)
+
+          if not simStarted:
+            waitingSeats = seatsWaitingForSouls(tokens.len, appState.souls)
 
           for websocket, state in appState.globalViewers.pairs:
             globalSockets.add(websocket)
             globalStates.add(state)
 
-      let wasScoring = sim.scoreTicks > 0
-      sim.step(inputs)
-      sim.advanceChatFeed()
-      replayWriter.writeHash(uint32(sim.tickCount), sim.gameHash())
-      if not wasScoring and sim.scoreTicks > 0:
-        sim.writeArtifacts(runtimeConfig)
-        lastWrittenDay = sim.dayNumber
-      inc runTicks
+      if not simStarted:
+        if waitingSeats.len == 0:
+          simStarted = true
+          echo "all souls received, starting day 1"
+        elif epochTime() >= soulDeadline:
+          declarePlayerFailure(
+            waitingSeats[0],
+            "Seat " & $waitingSeats[0] & " sent no soul file within " &
+              $soulTimeoutSeconds & "s"
+          )
+          echo "starting without seats ", waitingSeats.join(", ")
+          simStarted = true
 
-      for i in 0 ..< sockets.len:
-        var nextState: PlayerViewerState
-        let packet = sim.buildPlayerPacket(
-          playerIndices[i],
-          playerStates[i],
-          nextState
-        )
+      var observations = initTable[int, Observation]()
+      for seat in 0 ..< HouseCount:
+        if seatPlayers[seat] >= 0:
+          observations[seat] = sim.observe(seatPlayers[seat])
+      let frame = brains.advance(observations, epochTime())
+      let paused = not simStarted or frame.paused
+      if paused:
+        if pausedSince == 0.0:
+          pausedSince = epochTime()
+          if simStarted:
+            echo "sim paused: waiting on ", frame.blockedNames.join(", ")
+        sim.advanceChatFeed()
+      else:
+        if pausedSince > 0.0:
+          echo "sim resumed after ",
+            formatFloat(epochTime() - pausedSince, ffDecimal, 1), "s"
+          pausedSince = 0.0
+        inputs = newSeq[InputState](sim.players.len)
+        for item in frame.outputs:
+          let playerIndex = seatPlayers[item.houseIndex]
+          if playerIndex < 0 or playerIndex >= inputs.len:
+            continue
+          inputs[playerIndex] = decodeInputMask(item.output.mask)
+          replayWriter.writeInputMaskChange(
+            tickTime(sim.tickCount),
+            playerIndex,
+            item.output.mask
+          )
+          let chatText = item.output.chat.cleanChatMessage()
+          if chatText.len > 0:
+            sim.applyPlayerChat(playerIndex, chatText)
+            replayWriter.writeChat(
+              tickTime(sim.tickCount),
+              playerIndex,
+              chatText
+            )
+        let wasScoring = sim.scoreTicks > 0
+        sim.step(inputs)
+        sim.advanceChatFeed()
+        replayWriter.writeHash(uint32(sim.tickCount), sim.gameHash())
+        if not wasScoring and sim.scoreTicks > 0:
+          sim.writeArtifacts(runtimeConfig)
+          lastWrittenDay = sim.dayNumber
+        inc runTicks
+
+      # Stream each seat's model log to the player that sent its soul and
+      # said it is ready: every turn appended to the history, plus notes,
+      # exactly once. Batches are gathered under the lock and sent after
+      # it is released so a slow socket never stalls the simulation.
+      var deliveries: seq[tuple[websocket: WebSocket, batch: seq[string]]]
+      {.gcsafe.}:
+        withLock appState.lock:
+          for websocket, seat in appState.soulSockets.pairs:
+            if websocket notin appState.logSent or seat notin brains.villagers:
+              continue
+            let entries = brains.villagers[seat].logEntries
+            let sent = appState.logSent[websocket]
+            if sent < entries.len:
+              deliveries.add((websocket, entries[sent ..< entries.len]))
+              appState.logSent[websocket] = entries.len
+      var logDrops: seq[WebSocket]
+      for delivery in deliveries:
         try:
-          sockets[i].sendSpritePacket(packet)
-          {.gcsafe.}:
-            withLock appState.lock:
-              if sockets[i] in appState.playerViewers:
-                appState.playerViewers[sockets[i]] = nextState
+          for entry in delivery.batch:
+            delivery.websocket.send(entry, TextMessage)
         except CatchableError:
-          {.gcsafe.}:
-            withLock appState.lock:
-              sim.removePlayer(sockets[i])
+          logDrops.add(delivery.websocket)
+      if logDrops.len > 0:
+        {.gcsafe.}:
+          withLock appState.lock:
+            for websocket in logDrops:
+              sim.removePlayer(websocket)
 
       for i in 0 ..< globalSockets.len:
         var nextState: PlayerViewerState
@@ -4485,7 +4678,7 @@ when not defined(emscripten):
             withLock appState.lock:
               sim.removePlayer(globalSockets[i])
 
-      if maxTicks > 0 and runTicks >= maxTicks:
+      if totalTicks > 0 and runTicks >= totalTicks:
         if lastWrittenDay == 0:
           sim.writeArtifacts(runtimeConfig)
         if replayWriter.enabled:
@@ -4499,10 +4692,16 @@ when not defined(emscripten):
         if maxGames > 0 and gamesFinished >= maxGames:
           quit(0)
         sim = initSimServer(seed + gamesFinished, dayTicks)
+        if tokens.len > 0:
+          sim.seatCount = tokens.len
         runTicks = 0
         lastWrittenDay = 0
+        for seat in 0 ..< HouseCount:
+          seatPlayers[seat] = -1
+        brains.resetForNewGame()
         {.gcsafe.}:
           withLock appState.lock:
+            appState.gameNumber = brains.gameNumber
             resetConnectedPlayers()
 
       runFrameLimiter(lastTick)
@@ -4530,6 +4729,18 @@ proc readConfigInt(node: JsonNode, name: string, value: var int) =
       "Config field " & name & " must be an integer."
     )
   value = item.getInt()
+
+proc readConfigBool(node: JsonNode, name: string, value: var bool) =
+  ## Reads one optional boolean config field.
+  if not node.hasKey(name):
+    return
+  let item = node[name]
+  if item.kind != JBool:
+    raise newException(
+      HeartleafError,
+      "Config field " & name & " must be a boolean."
+    )
+  value = item.getBool()
 
 proc readConfigStrings(node: JsonNode, name: string, value: var seq[string]) =
   ## Reads one optional string array config field.
@@ -4567,6 +4778,40 @@ proc readConfigPlayerNames(node: JsonNode, value: var seq[string]) =
       )
     value.add(child["name"].getStr())
 
+proc seedPinned*(configJson: string): bool =
+  ## True when the runtime config pins a seed other than DefaultSeed.
+  if configJson.len == 0:
+    return false
+  try:
+    let node = parseJson(configJson)
+    node.kind == JObject and node.hasKey("seed") and
+      node["seed"].getInt != DefaultSeed
+  except CatchableError:
+    false
+
+proc randomSeed*(): int =
+  ## A crypto-random 31-bit seed from the OS.
+  when defined(emscripten):
+    raise newException(HeartleafError, "OS entropy source unavailable.")
+  else:
+    var buf: array[4, byte]
+    if not urandom(buf):
+      raise newException(HeartleafError, "OS entropy source unavailable.")
+    (int(buf[0]) shl 24 or int(buf[1]) shl 16 or
+      int(buf[2]) shl 8 or int(buf[3])) and 0x7FFF_FFFF
+
+proc stripUnpinnedSeed*(configJson: string): string =
+  ## Drops the DefaultSeed sentinel so it cannot clobber a randomized seed.
+  if configJson.len == 0:
+    return configJson
+  try:
+    let node = parseJson(configJson)
+    if node.kind == JObject and node.hasKey("seed"):
+      node.delete("seed")
+    $node
+  except CatchableError:
+    configJson
+
 proc update(config: var RunConfig, jsonText: string) =
   ## Updates the run config from a JSON object.
   if jsonText.len == 0:
@@ -4586,10 +4831,14 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("seed", config.seed)
   node.readConfigInt("maxTicks", config.maxTicks)
   node.readConfigInt("max-ticks", config.maxTicks)
+  node.readConfigInt("maxDays", config.maxDays)
   node.readConfigInt("maxGames", config.maxGames)
   node.readConfigInt("max-games", config.maxGames)
   node.readConfigInt("daySeconds", config.daySeconds)
   node.readConfigInt("day-seconds", config.daySeconds)
+  node.readConfigInt("soulTimeoutSeconds", config.soulTimeoutSeconds)
+  node.readConfigBool("soulConnectionRequired", config.soulConnectionRequired)
+  node.readConfigString("mockReply", config.mockReply)
   node.readConfigStrings("tokens", config.tokens)
   # Seat i spawns in house i, so more tokens than houses can never all
   # join. Fewer tokens is fine: the remaining houses simply stay empty.
@@ -4617,8 +4866,12 @@ proc echoStartupConfig(config: RunConfig) =
     " tokens=", config.tokens.len,
     " playerNames=", config.playerNames.len,
     " maxTicks=", config.maxTicks.limitText(),
+    " maxDays=", config.maxDays.limitText(),
     " maxGames=", config.maxGames.limitText(),
-    " daySeconds=", config.daySeconds
+    " daySeconds=", config.daySeconds,
+    " soulTimeoutSeconds=", config.soulTimeoutSeconds,
+    " soulConnectionRequired=", config.soulConnectionRequired,
+    " mockReply=", (if config.mockReply.len > 0: "yes" else: "no")
 
 proc replayRunConfigFor(data: ReplayData): RunConfig =
   ## Reads the recorded simulation config from a replay header.
@@ -4629,7 +4882,8 @@ proc replayRunConfigFor(data: ReplayData): RunConfig =
     maxTicks: DefaultMaxTicks,
     maxGames: DefaultMaxGames,
     daySeconds: DefaultDaySeconds,
-    tokens: @[]
+    tokens: @[],
+    soulTimeoutSeconds: DefaultSoulTimeoutSeconds
   )
   result.update(data.configJson)
 
@@ -4904,9 +5158,15 @@ when isMainModule and not defined(emscripten):
       maxTicks: DefaultMaxTicks,
       maxGames: DefaultMaxGames,
       daySeconds: DefaultDaySeconds,
-      tokens: @[]
+      tokens: @[],
+      soulTimeoutSeconds: DefaultSoulTimeoutSeconds
     )
-  config.update(runtimeConfig.config)
+  if seedPinned(runtimeConfig.config):
+    config.update(runtimeConfig.config)
+  else:
+    config.seed = randomSeed()
+    config.update(stripUnpinnedSeed(runtimeConfig.config))
+    echo "seed not pinned; randomized"
   config.echoStartupConfig()
   if runtimeConfig.resultsUri.len > 0:
     echo "Using results target: " & runtimeConfig.resultsUri
@@ -4926,10 +5186,14 @@ when isMainModule and not defined(emscripten):
     config.port,
     seed = config.seed,
     maxTicks = config.maxTicks,
+    maxDays = config.maxDays,
     maxGames = config.maxGames,
     daySeconds = config.daySeconds,
     tokens = config.tokens,
     playerNames = config.playerNames,
+    soulTimeoutSeconds = config.soulTimeoutSeconds,
+    soulConnectionRequired = config.soulConnectionRequired,
+    mockReply = config.mockReply,
     saveReplayPath = localReplayPath,
     runtimeConfig = runtimeConfig
   )

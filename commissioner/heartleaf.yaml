@@ -1,7 +1,16 @@
 # Heartleaf ruleset-strategy commissioner config.
 #
-# Mirrors the bundled default config with one deviation:
+# Mirrors the bundled default config with these deviations:
 # - Rounds run every 30 minutes (one Heartleaf day per round).
+# - shuffled_window seating (2026-08-21): baseline_window kept a stable
+#   entrant ring, so the same nine policies sat the same nine houses
+#   every round (and one guest always dined at one host). shuffled_window
+#   permutes the ring each scheduling (wall-clock seeded) so both who
+#   meets whom and which house they spawn in move, while keeping the
+#   every-entrant >=1 appearance guarantee. Window construction itself
+#   is unchanged. See coworld-tools ruleset_strategy/scheduling.py.
+# - Each episode gets a fresh random seed from the commissioner protocol
+#   default; the game treats the old hosted seed 4731713 as unpinned.
 #
 # Competition entrants are champions: each player fields exactly its current
 # champion, so the league is not spammed with stale, benched versions of a
@@ -11,7 +20,7 @@
 schedule_interval_minutes: 30
 
 defaults:
-  seating: baseline_window
+  seating: shuffled_window
   fill_seats: duplicate
   min_entries_to_start: 2
   stage:

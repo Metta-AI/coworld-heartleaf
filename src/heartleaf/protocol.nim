@@ -19,10 +19,7 @@ const
   InventoryCountObjectBase* = 6000
   ClockObjectBase* = 7000
   ScoreObjectBase* = 7100
-  LookingForObjectId* = 7200
   ChatMaxChars* = 96
-  MainWalkabilityLabel* = "heartleaf main walkability"
-  HomeWalkabilityLabel* = "heartleaf home walkability"
   MainBottomLabelPrefix* = "heartleaf bottom"
   HomeBottomLabelPrefix* = "heartleaf home bottom"
   MainOverhangLabelPrefix* = "heartleaf overhang"
@@ -34,7 +31,6 @@ const
   ClockLabelPrefix* = "clock "
   ScoreLabelPrefix* = "score "
   DinnerLabelPrefix* = "dinner "
-  LookingForLabelPrefix* = "looking "
   WeekdayNames* = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
   FoodNames* = [
     "Lettuce",
@@ -83,18 +79,17 @@ proc foodName*(foodIndex: int): string =
     return FoodNames[foodIndex]
   "food " & $foodIndex
 
-proc lookingForLabel*(eaten: openArray[bool]): string =
-  ## Returns the sprite label listing foods not yet eaten this game.
+proc foodsNotEatenText*(eaten: openArray[bool]): string =
+  ## The foods not yet eaten this game, as "Carrot, Beet" or "none".
   var names: seq[string]
   for i in 0 ..< FoodNames.len:
     let alreadyEaten = i < eaten.len and eaten[i]
     if not alreadyEaten:
       names.add(FoodNames[i])
-  result = LookingForLabelPrefix
   if names.len == 0:
-    result.add("none")
+    "none"
   else:
-    result.add(names.join(", "))
+    names.join(", ")
 
 proc playerNameForHouse*(houseIndex: int): string =
   ## Returns the fixed in-game player name for one house.

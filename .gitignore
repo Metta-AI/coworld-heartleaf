@@ -27,3 +27,4 @@ tmp/
 build/
 *.dSYM/
 nim.cfg
+logs/

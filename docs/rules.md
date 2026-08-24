@@ -6,8 +6,13 @@ and cumulative score.
 
 ## Day Cycle
 
-Each round is one in-game day. The day starts at 8:00 AM and ends at
-10:00 PM. A full day lasts 5 minutes of real time.
+A game is a week of seven in-game days. Each day runs from 9:00 AM to
+9:00 PM and lasts three real minutes, so four game hours pass every real
+minute (15 seconds a game hour at 24 frames a second), followed by a
+10-second score screen. A whole game is about 22 minutes of play, inside
+the hosted 30-minute deadline (the game refuses a configuration that is
+not). Dinner is served at 6:00 PM and the dinner result stays on screen
+for 10 seconds.
 
 Gnomes spend the day collecting vegetables from garden plots. Gardens
 with food show an exclamation marker. A gnome collects food by standing
@@ -53,7 +58,28 @@ host's served food is removed. Visitors keep their own inventory.
 Hosts gain the food-times-visitors score above, plus whatever they ate.
 Guests gain only their eating score.
 
+## Curfew
+
+When the day ends at 9:00 PM, every gnome that is not inside its own
+house loses 3 points. Being inside someone else's house counts as out.
+A score can go below zero.
+
+## Souls And Brains
+
+Every gnome is played by the game from its player's soul file. One soul per
+seat; the first line names the model, the rest is the gnome's character.
+The game builds the gnome's view of the village, asks the model, and
+carries out the reply. With tokens configured the village waits for every
+seat's soul (up to `soulTimeoutSeconds`) before day 1 begins; a seat that
+never sends one is reported as a player failure and gets no gnome. A
+player that disconnects after its soul was accepted keeps playing.
+
+Model calls for different gnomes overlap. The clock stops only while every
+gnome is waiting on the model with nothing left to do, and a failed call is
+retried; no gnome is ever penalised for a slow or failed model.
+
 ## End Of Day
 
-At 10:00 PM, every gnome returns to their own house. Each gnome sees
-their cumulative score, then the next day begins from the morning setup.
+At 9:00 PM the curfew is checked, every gnome returns to their own house,
+and each gnome sees their cumulative score; then the next day begins from
+the morning setup.
