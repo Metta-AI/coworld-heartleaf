@@ -15,13 +15,21 @@
 # Competition entrants are champions: each player fields exactly its current
 # champion, so the league is not spammed with stale, benched versions of a
 # player's earlier submissions. The 9 game seats are filled by duplicating the
-# league filler bots (fill_seats: filler_policy), not by seating outdated versions.
+# baseline example souls parked in the staging division (fill_seats:
+# fill_from_divisions below), not by seating outdated versions.
 
 schedule_interval_minutes: 30
 
 defaults:
   seating: shuffled_window
-  fill_seats: filler_policy
+  fill_seats: fill_from_divisions
+  fill_from:
+    - match:
+        name: Qualifiers
+      entrants:
+        status: competing
+        substatus: baseline
+        match_substatus: true
   min_entries_to_start: 2
   stage:
     label: Round
