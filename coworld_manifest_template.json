@@ -100,7 +100,7 @@
           "default": ""
         },
         "maxDays": {
-          "description": "Game length in days, score screens included; overrides maxTicks. The league plays 7. The game refuses a length past the 30-minute hosted deadline.",
+          "description": "Game length in days, score screens included; overrides maxTicks. The league plays 7. The game refuses a length past the 40-minute hosted deadline.",
           "type": "integer",
           "minimum": 0,
           "default": 0
@@ -387,5 +387,5 @@
     ]
   },
   "players_per_user": 9,
-  "episode_timeout_minutes": 30
+  "episode_timeout_minutes": 40
 }

@@ -10,7 +10,7 @@ A game is a week of seven in-game days. Each day runs from 9:00 AM to
 9:00 PM and lasts three real minutes, so four game hours pass every real
 minute (15 seconds a game hour at 24 frames a second), followed by a
 10-second score screen. A whole game is about 22 minutes of play, inside
-the hosted 30-minute deadline (the game refuses a configuration that is
+the hosted 40-minute deadline (the game refuses a configuration that is
 not). Dinner is served at 6:00 PM and the dinner result stays on screen
 for 10 seconds.
 

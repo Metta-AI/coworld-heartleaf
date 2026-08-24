@@ -38,7 +38,7 @@ const
   CurfewPenalty* = 3
   ## Hosted episodes must finish inside the deadline the manifest sets
   ## (episode_timeout_minutes); the rest is for soul upload and pauses.
-  HostedDeadlineSeconds* = 30 * 60
+  HostedDeadlineSeconds* = 40 * 60
 
 type
   Rect* = object

@@ -14,9 +14,10 @@
 #
 # Competition entrants are champions: each player fields exactly its current
 # champion, so the league is not spammed with stale, benched versions of a
-# player's earlier submissions. The 9 game seats are filled by duplicating the
-# baseline example souls parked in the staging division (fill_seats:
-# fill_from_divisions below), not by seating outdated versions.
+# player's earlier submissions. Empty game seats are filled from the baseline
+# example souls parked in Competition as competing/baseline non-champions
+# (fill_seats: fill_from_divisions below); submissions land directly in
+# Competition, so that is where the parked souls live.
 
 schedule_interval_minutes: 30
 
@@ -25,7 +26,7 @@ defaults:
   fill_seats: fill_from_divisions
   fill_from:
     - match:
-        name: Qualifiers
+        name: Competition
       entrants:
         status: competing
         substatus: baseline
