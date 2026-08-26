@@ -22,5 +22,9 @@ nimcache
 # Project specific ignores.
 out/
 /dist/
+wasm/dist/
+tmp/
+build/
 *.dSYM/
 nim.cfg
+logs/

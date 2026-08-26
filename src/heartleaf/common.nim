@@ -17,9 +17,28 @@ const
   PlayerBoxOffsetY* = 22
   FootHalfWidth* = PlayerBoxWidth div 2
   FootHalfHeight* = PlayerBoxHeight div 2
-  DayStartMinutes* = 8 * 60
-  DayEndMinutes* = 22 * 60
+  ## The clock in round numbers: a day is the twelve hours from 9am to
+  ## 9pm and lasts three real minutes, so four game hours pass every real
+  ## minute (15 seconds a game hour, 360 ticks at 24 frames a second); a
+  ## game is a week of seven days, each ending with a ten-second score
+  ## screen, about 22 minutes in all. Local runs, league rounds, and
+  ## walk-time estimates all share this clock.
+  DayStartMinutes* = 9 * 60
+  DayEndMinutes* = 21 * 60
   DinnerMinutes* = 18 * 60
+  DayTotalMinutes* = DayEndMinutes - DayStartMinutes
+  TicksPerSecond* = 24
+  SecondsPerGameHour* = 15
+  DefaultDaySeconds* = SecondsPerGameHour * (DayTotalMinutes div 60)
+  DefaultDayCount* = 7
+  DayTicks* = DefaultDaySeconds * TicksPerSecond
+  ScoreScreenSeconds* = 10
+  ScoreScreenTicks* = ScoreScreenSeconds * TicksPerSecond
+  ## Points lost for not being inside your own house when the day ends.
+  CurfewPenalty* = 3
+  ## Hosted episodes must finish inside the deadline the manifest sets
+  ## (episode_timeout_minutes); the rest is for soul upload and pauses.
+  HostedDeadlineSeconds* = 40 * 60
 
 type
   Rect* = object
@@ -27,6 +46,26 @@ type
 
   Point* = object
     x*, y*: int
+
+proc gameTicksForDays*(days, dayTicks: int): int =
+  ## The ticks a game of `days` days takes, score screens included.
+  days * (dayTicks + ScoreScreenTicks)
+
+proc hostedDeadlineProblem*(maxTicks: int): string =
+  ## Why a game of maxTicks ticks cannot run hosted, or "" when it fits
+  ## inside HostedDeadlineSeconds. Pauses add real time on top, so the
+  ## tick budget alone must fit.
+  if maxTicks <= 0:
+    return ""
+  let seconds = maxTicks div TicksPerSecond
+  if seconds > HostedDeadlineSeconds:
+    return "a game of " & $maxTicks & " ticks runs " & $(seconds div 60) &
+      " minutes at " & $TicksPerSecond & " fps, past the " &
+      $(HostedDeadlineSeconds div 60) & " minute hosted deadline"
+
+static:
+  doAssert hostedDeadlineProblem(gameTicksForDays(DefaultDayCount, DayTicks)) == "",
+    "the default week must fit the hosted deadline"
 
 proc toRect*(rect: ResourceRect): Rect =
   ## Converts one resource rectangle to a gameplay rectangle.

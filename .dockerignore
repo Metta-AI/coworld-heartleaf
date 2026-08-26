@@ -3,4 +3,6 @@
 nimcache
 out
 tmp
+build
+wasm/dist
 *.tmp

@@ -27,7 +27,7 @@ env:
 jobs:
   upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -84,6 +84,7 @@ jobs:
         run: |
           uvx --from "$COWORLD_CLI" coworld upload-coworld tmp/coworld_manifest.json \
             --server https://softmax.com/api \
+            --timeout-seconds 180 \
             --wait-hosted-smoke \
             --hosted-smoke-timeout-seconds 1800
 
@@ -101,5 +102,5 @@ jobs:
               raise SystemExit(f"::error::{name}:{version} not found after upload")
           if not match.get("canonical"):
               raise SystemExit(f"::error::{name}:{version} uploaded but is not canonical")
-          print(f"{name}:{version} is canonical ({match['id']})")
+          print("%s:%s is canonical (%s)" % (name, version, match["id"]))
           ' "$COWORLD_NAME" "${{ steps.version.outputs.version }}"

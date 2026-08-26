@@ -6,9 +6,14 @@ and cumulative score.
 
 ## Day Cycle
 
-Each round is one in-game day. The day starts at 8:00 AM and ends at
-10:00 PM. How long a full day lasts in real time is configurable and can
-change; it is currently set to 3 minutes.
+A game is a week of seven in-game days. Each day runs from 9:00 AM to
+9:00 PM. How long a day lasts in real time is configurable and can
+change; currently it is three minutes, so four game hours pass every
+real minute (15 seconds a game hour at 24 frames a second), followed by
+a 10-second score screen. At that setting a whole game is about 22
+minutes of play, inside the hosted 40-minute deadline (the game refuses
+a configuration that is not). Dinner is served at 6:00 PM and the dinner
+result stays on screen for 10 seconds.
 
 Gnomes spend the day collecting vegetables from garden plots. Gardens
 with food show an exclamation marker. A gnome collects food by standing
@@ -27,22 +32,55 @@ another house does not remove the visitor's own inventory.
 Dinner happens at 6:00 PM. A house hosts dinner if its owner is inside
 the house and at least one visiting gnome is also inside.
 
-The visitors eat from the host's inventory. Each visitor gets the full
-amount of every food item the host collected. After dinner, the host's
-served food is removed. Visitors keep their own inventory.
+The host score is counted first from the pantry as it was when dinner
+started:
+
+```text
+host score = (food items in the host inventory) x (number of visitors)
+```
+
+Everyone at that party then eats from the host inventory only, including
+the host. Guests never spend their own stash. Diners are shuffled into
+one random order and that order is reused for 3 rounds. Each gnome takes
+1 bite per round.
+
+On each bite:
+
+- If the host still has a type that gnome has not eaten this game, they
+  take it and score +3.
+- Else if any food remains, they take a random leftover and score +1.
+- If the host pantry is empty, they skip and score 0.
+
+One dinner is at most 9 eating points (`3 x 3`). After dinner, the
+host's served food is removed. Visitors keep their own inventory.
 
 ## Scoring
 
-Only hosts score points. A host gains:
+Hosts gain the food-times-visitors score above, plus whatever they ate.
+Guests gain only their eating score.
 
-```text
-Total hosted food items x number of visitors
-```
+## Curfew
 
-Visitors do not gain score for eating. Their benefit is that they can
-eat elsewhere while keeping their own food for hosting.
+When the day ends at 9:00 PM, every gnome that is not inside its own
+house loses 3 points. Being inside someone else's house counts as out.
+A score can go below zero.
+
+## Souls And Brains
+
+Every gnome is played by the game from its player's soul file. One soul per
+seat; the first line names the model, the rest is the gnome's character.
+The game builds the gnome's view of the village, asks the model, and
+carries out the reply. With tokens configured the village waits for every
+seat's soul (up to `soulTimeoutSeconds`) before day 1 begins; a seat that
+never sends one is reported as a player failure and gets no gnome. A
+player that disconnects after its soul was accepted keeps playing.
+
+Model calls for different gnomes overlap. The clock stops only while every
+gnome is waiting on the model with nothing left to do, and a failed call is
+retried; no gnome is ever penalised for a slow or failed model.
 
 ## End Of Day
 
-At 10:00 PM, every gnome returns to their own house. Each gnome sees
-their cumulative score, then the next day begins from the morning setup.
+At 9:00 PM the curfew is checked, every gnome returns to their own house,
+and each gnome sees their cumulative score; then the next day begins from
+the morning setup.

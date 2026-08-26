@@ -19,9 +19,7 @@ const
   InventoryCountObjectBase* = 6000
   ClockObjectBase* = 7000
   ScoreObjectBase* = 7100
-  ChatMaxChars* = 48
-  MainWalkabilityLabel* = "heartleaf main walkability"
-  HomeWalkabilityLabel* = "heartleaf home walkability"
+  ChatMaxChars* = 96
   MainBottomLabelPrefix* = "heartleaf bottom"
   HomeBottomLabelPrefix* = "heartleaf home bottom"
   MainOverhangLabelPrefix* = "heartleaf overhang"
@@ -34,6 +32,32 @@ const
   ScoreLabelPrefix* = "score "
   DinnerLabelPrefix* = "dinner "
   WeekdayNames* = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+  FoodNames* = [
+    "Lettuce",
+    "Carrot",
+    "Apple",
+    "Tomato",
+    "Cucumber",
+    "Yellow Squash",
+    "Beet",
+    "Pear",
+    "Cabbage",
+    "Purple Cabbage",
+    "Grapes",
+    "Strawberries",
+    "Yam",
+    "Potato",
+    "Wheat",
+    "Rice",
+    "Avocado",
+    "Red Pepper",
+    "Green Pepper",
+    "Blueberries",
+    "Corn",
+    "Radish",
+    "Garlic",
+    "Onion"
+  ]
   PlayerNames* = [
     "Ivan",
     "Anton",
@@ -45,6 +69,27 @@ const
     "Dima",
     "Egor"
   ]
+
+when FoodNames.len != FoodVeggieSlots:
+  {.error: "FoodNames must match FoodVeggieSlots.".}
+
+proc foodName*(foodIndex: int): string =
+  ## Returns the display name for one garden food slot.
+  if foodIndex >= 0 and foodIndex < FoodNames.len:
+    return FoodNames[foodIndex]
+  "food " & $foodIndex
+
+proc foodsNotEatenText*(eaten: openArray[bool]): string =
+  ## The foods not yet eaten this game, as "Carrot, Beet" or "none".
+  var names: seq[string]
+  for i in 0 ..< FoodNames.len:
+    let alreadyEaten = i < eaten.len and eaten[i]
+    if not alreadyEaten:
+      names.add(FoodNames[i])
+  if names.len == 0:
+    "none"
+  else:
+    names.join(", ")
 
 proc playerNameForHouse*(houseIndex: int): string =
   ## Returns the fixed in-game player name for one house.
