@@ -43,9 +43,10 @@ A gnome can leave the house again through the exit.
 
 Each round is one in-game day.
 
-The day starts at 8:00 AM and ends at 10:00 PM. A full day lasts 3 minutes of
-real time by default. The clock advances in 5 minute in-game intervals and is shown in the
-upper right of the UI.
+The day starts at 8:00 AM and ends at 10:00 PM. How long a full day lasts in
+real time is configurable and can change; it is currently set to 3 minutes. The
+clock advances in 5 minute in-game intervals and is shown in the upper right of
+the UI.
 
 The world starts bright in the morning. Later in the day, the map darkens
 through five visible evening stages. The evening colors shift from daylight into
