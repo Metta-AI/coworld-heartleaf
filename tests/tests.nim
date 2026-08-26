@@ -3,6 +3,7 @@ import
   bitworld/client as bitworldClient,
   bitworld/resources,
   bitworld/spriteprotocol,
+  curly,
   heartleaf,
   heartleaf/[common, protocol, decisions, souls, observation, navigation,
     villager, executor, report, prompt, pacing, bedrock_client, brains],
@@ -443,6 +444,14 @@ block:
   let sonnet46 = parseJson(bedrockBody(turns, "Ivan", false, "us.anthropic.claude-sonnet-4-6"))
   doAssert sonnet46.hasKey("temperature") and not sonnet46.hasKey("thinking")
 
+echo "Testing Coworld player attribution headers"
+block:
+  putEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "http://127.0.0.1:18000")
+  let headers = bedrockHeaders("{}", "us.anthropic.claude-sonnet-4-6", 4)
+  doAssert headers[CoworldPlayerSlotHeader] == "4",
+    "hosted model calls identify the logical player slot"
+  delEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME")
+
 echo "Testing Converse bodies for other providers"
 block:
   doAssert "us.anthropic.claude-opus-5".isAnthropicModel()
@@ -539,6 +548,8 @@ block:
   doAssert frame.paused, "nobody has a decision yet, so the village waits"
   doAssert frame.blockedNames.len == 2
   doAssert client.started.len == 2, "both villagers asked the model"
+  doAssert client.started.mapIt(it.playerSlot) == @[0, 1],
+    "each model request carries its Coworld player slot"
   var answered = 0
   proc answer(text: string) =
     client.scriptReply(BedrockReply(

@@ -113,6 +113,7 @@ proc startRequest(
   let request = BedrockRequest(
     tag: villager.requestTag(),
     modelId: villager.soul.modelId,
+    playerSlot: villager.houseIndex,
     playerName: villager.name,
     messages: villager.requestMessages(
       observation, brains.navigation, brains.layout

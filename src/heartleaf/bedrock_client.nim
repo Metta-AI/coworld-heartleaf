@@ -15,6 +15,7 @@ const
   DefaultBedrockTimeoutSeconds = 20
   DefaultBedrockMaxTokens = 192
   BedrockTemperature = 0.2
+  CoworldPlayerSlotHeader* = "X-Coworld-Player-Slot"
   MockReplyEnv* = "HEARTLEAF_MOCK_REPLY"
   BedrockNotConfiguredMessage* =
     "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
@@ -31,6 +32,7 @@ type
   BedrockRequest* = object
     tag*: string
     modelId*: string
+    playerSlot*: int
     playerName*: string
     messages*: seq[ConversationMessage]
 
@@ -137,11 +139,12 @@ proc bedrockUrl(modelId: string): string =
     return sidecar.joinUrl(bedrockPath(modelId))
   "https://" & bedrockHost() & bedrockPath(modelId)
 
-proc bedrockHeaders(body, modelId: string): HttpHeaders =
+proc bedrockHeaders*(body, modelId: string, playerSlot: int): HttpHeaders =
   ## One header set for the request body.
   if hasSidecarEndpoint():
     result["Accept"] = "application/json"
     result["Content-Type"] = "application/json"
+    result[CoworldPlayerSlotHeader] = $playerSlot
   elif bedrockToken().len > 0:
     result["Authorization"] = "Bearer " & bedrockToken()
     result["Accept"] = "application/json"
@@ -427,9 +430,10 @@ proc start*(client: BedrockClient, request: BedrockRequest) =
     client.curl.startRequest(
       "POST",
       bedrockUrl(request.modelId),
-      bedrockHeaders(body, request.modelId),
+      bedrockHeaders(body, request.modelId, request.playerSlot),
       body,
-      max(bedrockTimeoutSeconds(), modelTuning(request.modelId).minTimeoutSeconds),
+      max(bedrockTimeoutSeconds(), modelTuning(
+          request.modelId).minTimeoutSeconds),
       request.tag
     )
 
