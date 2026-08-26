@@ -1,5 +1,6 @@
 ## The state report: the facts one villager is told each time the model is
-## asked, and the full message list for one request.
+## asked, and the full message list for one request. The report is live:
+## sent as the last user turn, logged, and not kept in history.
 
 import
   heartleaf/[common, protocol, decisions, observation, navigation, villager]
@@ -61,12 +62,12 @@ proc requestMessages*(
   navigation: Navigation,
   layout: WorldLayout
 ): seq[ConversationMessage] =
-  ## The full message list for one request: the system prompt and the
-  ## whole history, with this request's state report appended to the
-  ## history first so it stays part of what the model saw.
-  villager.appendHistory(
-    "user", villager.stateReport(observation, navigation, layout)
-  )
+  ## The full message list for one request: the system prompt, the
+  ## history, and this request's state report as a live last user turn
+  ## that is logged but not kept.
+  let report = villager.stateReport(observation, navigation, layout)
+  villager.logLiveReport(report)
   result.add(ConversationMessage(role: "system", content: villager.systemPrompt))
   for message in villager.history:
     result.add(message)
+  result.add(ConversationMessage(role: "user", content: report))

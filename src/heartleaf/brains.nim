@@ -99,8 +99,9 @@ proc villagerForTag(brains: Brains, tag: string): Villager =
 proc abandonRequest(villager: Villager) =
   ## Forgets a request in flight; its reply is dropped when it lands.
   if villager.requestInFlight:
-    villager.log("llm request " & villager.requestTag() & " abandoned")
+    villager.logLlm("abandon", "tag=" & villager.requestTag())
   villager.requestInFlight = false
+  villager.lastHeldInterrupt = ""
 
 proc startRequest(
   brains: Brains,
@@ -130,10 +131,20 @@ proc startRequest(
   villager.requestInFlight = true
   villager.lastRequestAt = now
   villager.waitingSinceTick = -1
+  villager.interruptRequested = false
+  villager.lastHeldInterrupt = ""
+  villager.requestChatSignature = observation.visibleChatsSignature()
+  villager.requestFoodBand = observation.foodBand()
+  villager.requestCrowdSignature = observation.houseCrowdsSignature(
+    brains.layout
+  )
   brains.budget.noteRequest(now)
-  villager.log("llm request " & request.tag & " model=" & request.modelId &
-    " rpm=" & $brains.budget.requestsInLastMinute(now) &
-    " inFlight=" & $brains.budget.inFlight)
+  villager.logLlm(
+    "request",
+    "tag=" & request.tag &
+    " model=" & request.modelId &
+    " inFlight=" & $brains.budget.inFlight
+  )
 
 proc handleReply(
   brains: Brains,
@@ -144,6 +155,7 @@ proc handleReply(
 ) =
   ## Applies one reply to its villager.
   villager.requestInFlight = false
+  villager.lastHeldInterrupt = ""
   let took = formatFloat(now - villager.lastRequestAt, ffDecimal, 1)
   case reply.outcome
   of Usable:
@@ -152,20 +164,26 @@ proc handleReply(
     if decision.valid:
       villager.noteUsableReply()
       brains.budget.noteHealthy()
-      villager.log("llm reply " & reply.tag & " " & reply.usage &
-        " took=" & took & "s")
+      var extra = "tag=" & reply.tag & " outcome=usable took=" & took & "s"
+      if reply.usage.len > 0:
+        extra.add(" " & reply.usage)
+      villager.logLlm("reply", extra)
       villager.applyDecision(
         observation, brains.layout, decision, fromModel = true
       )
     else:
       villager.lastError = decision.error
       let wait = villager.noteTransientFailure(brains.budget, now)
+      villager.logLlm("reply", "tag=" & reply.tag &
+        " outcome=parse took=" & took & "s")
       villager.log("llm parse error " & decision.error & " reply=" &
         reply.text.replace("\n", " ") & ", retry in " &
         formatFloat(wait, ffDecimal, 1) & "s")
       villager.noteLog("reply could not be used: " & decision.error)
   of Transient:
     villager.lastError = reply.error
+    villager.logLlm("reply", "tag=" & reply.tag &
+      " outcome=transient took=" & took & "s")
     villager.log("llm error status=" & $reply.statusCode & " " &
       reply.error.replace("\n", " "))
     villager.noteLog("llm error status=" & $reply.statusCode & " " &
@@ -193,6 +211,8 @@ proc handleReply(
   of Permanent:
     villager.lastError = reply.error
     inc villager.permanentHits
+    villager.logLlm("reply", "tag=" & reply.tag &
+      " outcome=permanent took=" & took & "s")
     villager.log("llm error status=" & $reply.statusCode & " " &
       reply.error.replace("\n", " "))
     villager.noteLog("llm error status=" & $reply.statusCode & " " &
@@ -235,16 +255,23 @@ proc scheduleRequests(
   observations: Table[int, Observation],
   now: float
 ) =
-  ## Starts requests for the villagers that need a decision, fairest
-  ## first: those with no decision at all, then the longest waiting.
+  ## Starts requests for villagers that need a decision, or that still
+  ## owe a retry after a failed call. Fairest first: those with no
+  ## decision at all, then the longest waiting. A retry waits only for
+  ## backoff, not for the current action to finish.
   var ready: seq[Villager]
   for houseIndex, villager in brains.villagers.pairs:
     if houseIndex notin observations:
       continue
     let observation = observations[houseIndex]
-    if not villager.needsFreshDecision(observation, brains.layout):
-      villager.waitingSinceTick = -1
+    if villager.requestInFlight or villager.failed:
       continue
+    if observation.scene == Overlay:
+      continue
+    if not villager.retryPending:
+      if not villager.needsFreshDecision(observation, brains.layout):
+        villager.waitingSinceTick = -1
+        continue
     if villager.waitingSinceTick < 0:
       villager.waitingSinceTick = observation.tick
     if now < villager.retryAt:
@@ -275,9 +302,11 @@ proc advance*(
     if houseIndex notin observations:
       continue
     let observation = observations[houseIndex]
+    villager.now = now
     if observation.dayNumber != villager.dayNumber and villager.dayNumber > 0:
       villager.abandonRequest()
     villager.observeWorld(observation, brains.navigation, brains.layout)
+    villager.maybeLogHeldInterrupt(observation, brains.layout)
   brains.pollReplies(observations, now)
   brains.scheduleRequests(observations, now)
   if brains.client.mockReply.len > 0:

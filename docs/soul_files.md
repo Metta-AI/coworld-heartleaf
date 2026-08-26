@@ -51,8 +51,8 @@ The soul is only the character. After it, the game appends the same fixed
 text for every gnome, so a soul never needs to explain the rules:
 
 - the JSON reply format and the allowed actions;
-- how the conversation memory works (the transcript of heard chat, own
-  lines, and events like `(Day 2 begins.)` or `(Dinner: ...)`);
+- how the conversation memory works (the transcript of heard chat,
+  JSON replies, and events like `(Day 2 begins.)` or `(Dinner: ...)`);
 - host or guest rules, never repeating a line, greeting once a day, the
   vegetable hunt.
 
@@ -62,7 +62,7 @@ else is added.
 ## Each turn
 
 The model receives the system prompt, the gnome's transcript so far, and
-one state report:
+one live state report that is not kept in the transcript:
 
 ```
 Day 2 3:20pm (160 minutes until dinner)
@@ -76,8 +76,11 @@ Return JSON now.
 
 Only what the gnome could see on its own screen is reported: gnomes and
 chat bubbles inside its viewport. The clock every hour, departure-time
-warnings, pickups, sightings and dinners arrive as history lines instead,
-so each report stays small and the history stays cheap to resend.
+warnings, pickups, sightings and dinners arrive as history lines instead.
+Old reports are not resent; only chat, events, and JSON replies stay in
+the transcript. The JSON `message` field is the line said out loud, so
+that line is not stored again as its own assistant turn. The `reason`
+field is kept as the gnome's notes to itself.
 
 The model replies with one JSON object:
 
@@ -139,13 +142,15 @@ log to it, one JSON text frame per entry:
 starts a new log at sequence 0 for each) and `sequence` numbers the
 records of one game densely, so a collector can spot gaps and
 duplicates. `role` is `system` (the prompt, sent once, `index` -1), `user` or
-`assistant` (a turn of the conversation, `index` is its position in the
-history), or `note` (errors and retries the model never sees, `index`
--1). The history is append-only: every request sends the system prompt
-plus the whole history, with that request's state report appended as the
-last user turn, and the model's raw reply is appended as an assistant
-turn. So a player that records every frame ends the game holding
-exactly what its model was sent and what it answered. Nothing is
+`assistant` (a history turn, `index` is its position), `user` with
+`index` -1 (the live state report for that call, not kept), or `note`
+(errors and retries the model never sees, `index` -1). The history is
+append-only chat, events, and JSON replies. Every
+request sends the system prompt plus that history, with that request's
+state report as a live last user turn that is logged (`index` -1) but
+not kept. The model's raw reply is appended as an assistant turn. So a
+player that records every frame ends the game holding the transcript
+plus each live report that was sent. Nothing is
 streamed until the player sends `log-ready` (stream from the start) or
 `log-cursor game=N sequence=M` (resume at M+1), so a reconnecting or
 restarted collector never downloads what it already has; `soul_player`
@@ -170,6 +175,6 @@ what the certification fixture uses) is the literal reply every call
 gets; hosted variants never set either, so league games always call the
 model a soul names. Set `BEDROCK_KEY` or AWS
 credentials instead to call the real model. Knobs:
-`HEARTLEAF_LLM_REQUESTS_PER_MINUTE` (30), `HEARTLEAF_LLM_MAX_IN_FLIGHT`
-(9), `HEARTLEAF_LLM_VILLAGER_MIN_SECONDS` (2), `BEDROCK_TIMEOUT_SECONDS`,
-`BEDROCK_MAX_TOKENS`, `BEDROCK_PROMPT_CACHE=0`.
+`HEARTLEAF_LLM_MAX_IN_FLIGHT` (9), `HEARTLEAF_LLM_VILLAGER_MIN_SECONDS`
+(2), `BEDROCK_TIMEOUT_SECONDS`, `BEDROCK_MAX_TOKENS`,
+`BEDROCK_PROMPT_CACHE=0`.

@@ -44,6 +44,8 @@ type
       ## The garden's marker spot is inside the viewport.
     gardenMarkerVisible*: seq[bool]
       ## The marker is on screen and the garden still has food.
+    gardensWithFood*: int
+      ## Gardens in the village that still have food, not just on screen.
     dinner*: DinnerOutcome
     dinnerDone*: bool
     curfewMissed*: bool

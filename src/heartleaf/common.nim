@@ -26,6 +26,9 @@ const
   DayStartMinutes* = 9 * 60
   DayEndMinutes* = 21 * 60
   DinnerMinutes* = 18 * 60
+  DinnerDepartMinutes* = 16 * 60
+    ## By 4:00pm every gnome starts for its table, sooner if the walk
+    ## would miss 6pm.
   DayTotalMinutes* = DayEndMinutes - DayStartMinutes
   TicksPerSecond* = 24
   SecondsPerGameHour* = 15

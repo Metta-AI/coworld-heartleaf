@@ -3430,6 +3430,10 @@ proc observe*(sim: SimServer, playerIndex: int): Observation =
       guests: record.guestNames,
       foodsText: record.foods.foodListText()
     )
+  result.gardensWithFood = 0
+  for garden in sim.gardens:
+    if garden.hasFood():
+      inc result.gardensWithFood
   if result.scene == Overlay:
     return
   let

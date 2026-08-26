@@ -36,9 +36,6 @@ const
   WalkTimeFudge = 1.5
   LeaveMarginMinutes* = 30
   LeaveNudgeMinutes = 30
-  ## From this long before dinner a gnome no longer sets off across the
-  ## village after someone it cannot see.
-  LateWanderMinutes = 90
   HouseDistanceCachePixels = 16
   UnstuckMasks = [
     ButtonUp,
@@ -64,6 +61,11 @@ proc walkMinutes*(observation: Observation, pixels: int): int =
   let ticks = float(pixels) / WalkPixelsPerTick * WalkTimeFudge
   let minutes = ticks / max(0.1, observation.ticksPerMinute)
   max(5, (int(minutes) + 4) div 5 * 5)
+
+proc dinnerLeaveAt*(observation: Observation, walk: int): int =
+  ## When this gnome must start for dinner: 4pm, or earlier if the walk
+  ## plus the margin would miss 6pm.
+  min(DinnerDepartMinutes, DinnerMinutes - walk - LeaveMarginMinutes)
 
 proc computeHouseDistances(
   villager: Villager,
@@ -177,7 +179,7 @@ proc maybeNoteLeaveTime*(
       if pixels < 0:
         return
       let walk = observation.walkMinutes(pixels)
-      if minutes < DinnerMinutes - walk - LeaveMarginMinutes:
+      if minutes < observation.dinnerLeaveAt(walk):
         return
       let where =
         if villager.committedPartyHouse == villager.houseIndex:
@@ -188,7 +190,7 @@ proc maybeNoteLeaveTime*(
         " takes about " & $walk & " minutes and dinner is at 6:00pm."
     else:
       let walk = villager.farthestWalkMinutes(observation, navigation, layout)
-      if walk <= 0 or minutes < DinnerMinutes - walk - LeaveMarginMinutes:
+      if walk <= 0 or minutes < observation.dinnerLeaveAt(walk):
         return
       text = "Latest departure time for dinner: you have not promised " &
         "any table yet; the farthest house is about " & $walk &
@@ -210,9 +212,9 @@ proc maybeNoteLeaveTime*(
     return
   villager.leaveTimeNoted = true
   villager.leaveTimeNotedMinutes = minutes
-  villager.interruptRequested = true
   villager.recordEvent(text)
   villager.log("leave time: " & text)
+  villager.noteInterrupt("reason=leave")
 
 ## Goals
 
@@ -527,7 +529,7 @@ proc standNextToPersonGoal(
   # in the afternoon, do not set off across the village either: dinner
   # is close and the walk would cost it.
   if observation.scene == Outdoors and
-      observation.minutes < DinnerMinutes - LateWanderMinutes:
+      observation.minutes < DinnerDepartMinutes:
     let houseIndex = name.houseIndexForPlayerName()
     if houseIndex >= 0:
       return villager.gatherAtHouseGoal(
@@ -744,8 +746,9 @@ proc dueCommitment*(
   )
   if pixels < 0:
     return
-  let leaveAt = DinnerMinutes - observation.walkMinutes(pixels) -
-    LeaveMarginMinutes
+  let leaveAt = observation.dinnerLeaveAt(
+    observation.walkMinutes(pixels)
+  )
   if observation.minutes < leaveAt:
     return
   if villager.committedPartyHouse < 0:
@@ -810,20 +813,33 @@ proc applyDecision*(
   ## own replies are already in the history; a promise kept for it gets
   ## an event line so it knows what happened.
   var nextDecision = villager.inferSocialCommitment(decision)
+  let afterDinner = observation.dinnerDone or
+    observation.minutes >= DinnerMinutes + 60
+  let tableLocked =
+    villager.committedPartyHouse >= 0 and
+    observation.minutes >= DinnerDepartMinutes and
+    not afterDinner
   let commitHouse =
-    if nextDecision.houseIndex >= 0:
+    if tableLocked:
+      villager.committedPartyHouse
+    elif nextDecision.houseIndex >= 0:
       nextDecision.houseIndex
     elif nextDecision.commitParty:
       villager.houseIndex
     else:
       UnknownHouse
   if nextDecision.action == GoToParty and commitHouse >= 0:
-    villager.committedPartyHouse = commitHouse
-    nextDecision.houseIndex = commitHouse
+    if not tableLocked:
+      villager.committedPartyHouse = commitHouse
+    nextDecision.houseIndex = villager.committedPartyHouse
     nextDecision.commitParty = true
+    if tableLocked:
+      nextDecision.targetName =
+        villager.committedPartyHouse.playerNameForHouse()
   elif nextDecision.commitParty and commitHouse >= 0:
-    villager.committedPartyHouse = commitHouse
-    nextDecision.houseIndex = commitHouse
+    if not tableLocked:
+      villager.committedPartyHouse = commitHouse
+    nextDecision.houseIndex = villager.committedPartyHouse
   let keepPath = villager.hasDecision and
     villager.decision.sameDecisionTarget(nextDecision)
   villager.decision = nextDecision
@@ -835,7 +851,6 @@ proc applyDecision*(
   villager.decisionChatSignature = observation.visibleChatsSignature()
   villager.decisionCrowdSignature = observation.houseCrowdsSignature(layout)
   villager.decisionVisibleNames = observation.visibleGnomeNames()
-  villager.interruptRequested = false
   if not keepPath:
     villager.path.setLen(0)
     villager.goal = idleGoal(observation.scene)
@@ -886,6 +901,74 @@ proc decisionComplete*(villager: Villager, observation: Observation): bool =
   of Invalid:
     true
 
+proc heldInterruptCause*(
+  villager: Villager,
+  observation: Observation,
+  layout: WorldLayout
+): string =
+  ## Why the current action should be interrupted, besides the explicit
+  ## interruptRequested flag. Empty when nothing sticky has tripped.
+  ## First sightings and leave-time notes log themselves at the source.
+  if not villager.hasDecision:
+    return ""
+  if observation.tick - villager.decisionStartedTick < DecisionRetryTicks:
+    return ""
+  if villager.stuckTicks >= DecisionStuckTicks:
+    return "stuck"
+  if villager.decision.action in {StandAtHouseGarden, FindHouse}:
+    for name in observation.visibleGnomeNames():
+      if name notin villager.decisionVisibleNames:
+        return "arrived"
+  let chatSignature = observation.visibleChatsSignature()
+  if chatSignature.len > 0 and chatSignature != villager.decisionChatSignature:
+    return "chat"
+  if observation.foodBand() != villager.decisionFoodBand:
+    return "food"
+  if observation.houseCrowdsSignature(layout) != villager.decisionCrowdSignature:
+    return "crowd"
+  ""
+
+proc inflightInterruptCause*(
+  villager: Villager,
+  observation: Observation,
+  layout: WorldLayout
+): string =
+  ## Why a request already in flight should be followed by another call.
+  ## Compared to the world at request start, so the event that started
+  ## this call does not queue a second one by itself.
+  if villager.hasDecision and villager.stuckTicks >= DecisionStuckTicks:
+    return "stuck"
+  if villager.hasDecision and
+      villager.decision.action in {StandAtHouseGarden, FindHouse}:
+    for name in observation.visibleGnomeNames():
+      if name notin villager.decisionVisibleNames:
+        return "arrived"
+  if observation.visibleChatsSignature() != villager.requestChatSignature:
+    return "chat"
+  if observation.foodBand() != villager.requestFoodBand:
+    return "food"
+  if observation.houseCrowdsSignature(layout) !=
+      villager.requestCrowdSignature:
+    return "crowd"
+  ""
+
+proc maybeLogHeldInterrupt*(
+  villager: Villager,
+  observation: Observation,
+  layout: WorldLayout
+) =
+  ## Logs one interrupt when the world changed in a way that should
+  ## re-ask the model. In-flight, the same cause is recorded once and
+  ## several causes share one follow-up after the reply.
+  let cause =
+    if villager.requestInFlight:
+      villager.inflightInterruptCause(observation, layout)
+    else:
+      villager.heldInterruptCause(observation, layout)
+  if cause.len == 0:
+    return
+  villager.noteInterrupt("reason=" & cause)
+
 proc decisionInterrupted*(
   villager: Villager,
   observation: Observation,
@@ -893,8 +976,9 @@ proc decisionInterrupted*(
 ): bool =
   ## True when something happened that the model should react to: the
   ## villager is stuck, a new chat bubble appeared, a gnome was seen for
-  ## the first time today, the hour changed, the food band changed, or
-  ## the visible house crowds changed. Interrupts wait DecisionRetryTicks
+  ## the first time today, the food band changed, or the visible house
+  ## crowds changed. The hour rolling is not an interrupt: departure
+  ## times interrupt on their own. Interrupts wait DecisionRetryTicks
   ## after a decision so a burst of events costs one request.
   if not villager.hasDecision:
     return true
@@ -904,21 +988,7 @@ proc decisionInterrupted*(
     return true
   if villager.interruptRequested:
     return true
-  # Waiting at a door is for meeting people: a gnome who walks into view
-  # is a reason to ask the model again right now.
-  if villager.decision.action in {StandAtHouseGarden, FindHouse}:
-    for name in observation.visibleGnomeNames():
-      if name notin villager.decisionVisibleNames:
-        return true
-  let chatSignature = observation.visibleChatsSignature()
-  if chatSignature.len > 0 and chatSignature != villager.decisionChatSignature:
-    return true
-  # The hour rolling is not an interrupt: at four game hours a real minute
-  # that alone would outrun the request budget. The clock still lands in
-  # the history, and departure times interrupt on their own.
-  if observation.foodBand() != villager.decisionFoodBand:
-    return true
-  observation.houseCrowdsSignature(layout) != villager.decisionCrowdSignature
+  villager.heldInterruptCause(observation, layout).len > 0
 
 proc decisionSettling*(villager: Villager, observation: Observation): bool =
   ## True for the first DecisionRetryTicks after a decision was applied:
@@ -933,17 +1003,16 @@ proc needsFreshDecision*(
   observation: Observation,
   layout: WorldLayout
 ): bool =
-  ## True when the model should be asked again.
+  ## True when the model should be asked: no decision yet, or an
+  ## interrupt has been flagged. Completing an action does not re-ask.
+  discard layout
   if villager.requestInFlight or villager.failed:
     return false
   if observation.scene == Overlay:
     return false
   if not villager.hasDecision:
     return true
-  if villager.decisionSettling(observation):
-    return false
-  villager.decisionComplete(observation) or
-    villager.decisionInterrupted(observation, layout)
+  villager.interruptRequested
 
 proc hasExecutableDecision*(villager: Villager, observation: Observation): bool =
   ## True when the villager has something to do this tick, or is still
@@ -972,7 +1041,6 @@ proc pendingChat(villager: Villager, observation: Observation): string =
     villager.decisionChatSent = true
     villager.log("chat suppressed, already said today: " & decision.message)
     return ""
-  villager.recordOwnChat(decision.message)
   villager.saidToday.add(decision.message)
   villager.decisionChatSent = true
   if decision.targetName.len > 0:
@@ -1129,6 +1197,7 @@ proc observeWorld*(
   ## Updates memory from one observation: the day, what was heard and
   ## seen, the clock, the bag, dinner, and departure times. Runs every
   ## frame, including paused ones, so nothing is missed.
+  villager.tick = observation.tick
   if villager.footKnown:
     villager.velocity = Point(
       x: observation.foot.x - villager.previousFoot.x,
@@ -1143,6 +1212,8 @@ proc observeWorld*(
   villager.scanHeardChats(observation)
   villager.scanSeenGnomes(observation)
   villager.maybeRecordClock(observation)
+  villager.maybeRecordVeggies(observation)
+  villager.maybeRecordHouse(observation)
   villager.maybeRecordCarry(observation)
   villager.maybeRecordDinner(observation)
   villager.maybeRecordCurfew(observation)
@@ -1154,33 +1225,47 @@ proc keepPromise*(
   navigation: Navigation,
   layout: WorldLayout
 ) =
-  ## While the model cannot be asked (request in flight, backing off, or
-  ## over budget), a promise that comes due is carried out at once; the
-  ## next reply still replaces it.
-  if not villager.modelUnavailable or observation.scene == Overlay:
+  ## Carries out a dinner or curfew promise that has come due. After 4pm
+  ## the dinner table is locked even while the model is answering, so a
+  ## new reply cannot turn them toward another house. After dinner the
+  ## curfew still waits until the model cannot be asked.
+  if observation.scene == Overlay:
     return
-  # An explicit positioning decision from the model is its own answer to
-  # where to be: before dinner a kept promise only replaces gathering,
-  # chatting, and waiting, never go_home, go_to_party, or stay_inside.
-  # After dinner the only place left is home, so only go_home, or staying
-  # inside one's own house, still stands.
+  let afterDinner = observation.dinnerDone or
+    observation.minutes >= DinnerMinutes + 60
+  let locked = not afterDinner and
+    observation.minutes >= DinnerDepartMinutes
+  if afterDinner and not villager.modelUnavailable:
+    return
+  if not locked and not afterDinner and not villager.modelUnavailable:
+    return
+  let due = villager.dueCommitment(observation, navigation, layout)
+  if not due.valid:
+    return
   if villager.hasDecision and not villager.decisionComplete(observation):
+    if villager.decision.sameDecisionTarget(due):
+      return
     let atHome = observation.scene == Indoors and
       observation.currentHouse == villager.houseIndex
-    let afterDinner = observation.dinnerDone or
-      observation.minutes >= DinnerMinutes + 60
-    case villager.decision.action
-    of GoHome:
-      return
-    of GoToParty, StayInside:
-      if not afterDinner or atHome:
+    if not locked:
+      case villager.decision.action
+      of GoHome:
         return
+      of GoToParty, StayInside:
+        if not afterDinner or atHome:
+          return
+      else:
+        discard
     else:
-      discard
-  let due = villager.dueCommitment(observation, navigation, layout)
-  if due.valid and
-      (not villager.hasDecision or
-        not villager.decision.sameDecisionTarget(due)):
+      case villager.decision.action
+      of StayInside:
+        if observation.scene == Indoors and
+            observation.currentHouse == villager.committedPartyHouse:
+          return
+      else:
+        discard
+  if not villager.hasDecision or
+      not villager.decision.sameDecisionTarget(due):
     villager.applyDecision(observation, layout, due, fromModel = false)
 
 proc villagerTick*(

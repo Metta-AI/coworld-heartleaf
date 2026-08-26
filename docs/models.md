@@ -14,10 +14,10 @@ serves but does not price on its public page, so check the AWS console
 before fielding them in a league.
 
 How cost adds up in a game: a gnome makes roughly 40 calls per game day,
-and every call resends the whole append-only history, which reaches about
-500 turns (on the order of 15k tokens) by the last day. Over a seven-day
-game that is about 2M input tokens and 20k output tokens per gnome. Claude
-models read most of that from the prompt cache at a tenth of the price;
+and every call resends the append-only transcript of chat, events, and
+JSON replies. The current state report is live-only and is not kept, so
+old bag-and-viewport dumps do not compound. Claude models read most
+of that from the prompt cache at a tenth of the price;
 the others pay full input price every call, so a cheap-per-token open
 model and a cached Claude model can land close to each other.
 
@@ -75,8 +75,8 @@ it is the cheapest Claude by a wide margin in a long game. Its play is
 competent rather than clever: it gathers diligently, greets, invites, and
 keeps promises, but it rarely builds a plan across days and its chat stays
 close to the soul's example phrases. For most seats, and for anything you
-run often, start here. With nine gnomes sharing 30 requests a minute its
-speed matters less than its price; you are budget-bound, not latency-bound.
+run often, start here. With nine gnomes calling at once its speed
+matters less than its price.
 
 ## Claude Sonnet 4.5 and 4.6
 
