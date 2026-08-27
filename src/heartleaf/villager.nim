@@ -41,6 +41,9 @@ type
   GameLog* = ref object
     entries*: seq[string]
       ## Village-wide LLM and world stamps, one JSON line each.
+    conversationLines*: seq[string]
+      ## Conversation enter/exit rows not yet copied into the replay;
+      ## the server loop drains this every frame.
     path*: string
     file: File
     writing: bool
@@ -265,6 +268,10 @@ proc addGameLog(
     villager.gameLog.entries.len, role, -1, text, kind
   )
   villager.gameLog.add(line)
+  if kind.startsWith("convo-"):
+    # Conversation rows also ride into the replay, so playback can
+    # rebuild the timeline without the game.log next to it.
+    villager.gameLog.conversationLines.add(line)
 
 proc logLlm*(villager: Villager, kind, extra: string) =
   ## Records one LLM lifecycle event on stdout and in the game log.

@@ -1,0 +1,442 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Metta-AI/metta/main/packages/coworld/src/coworld/coworld_manifest_schema.json",
+  "tags": [
+    "garden",
+    "multiplayer",
+    "social"
+  ],
+  "game": {
+    "name": "heartleaf-conversations",
+    "version": "0.1.3",
+    "description": "Heartleaf with conversation circles and a two-step leapfrog clock: gnomes hold real turn-based conversations inside visible sparkle circles, and talking costs a fixed 4 game-minutes per line independent of model latency. Fork of coworld-heartleaf; see PR #33.",
+    "owner": "alessandro.solbiati@gmail.com",
+    "config_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tokens"
+      ],
+      "properties": {
+        "tokens": {
+          "description": "One connection token per player seat, indexed by seat. 2-9 seats; empty houses stay closed.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 9,
+          "items": {
+            "type": "string",
+            "minLength": 0
+          }
+        },
+        "players": {
+          "description": "Per-seat display names, 2-9 seats. Hosted dispatch fills each name with the policy or player behind the seat; the score panel shows it instead of player_N.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 9,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "seed": {
+          "description": "Random seed. The hosted default 4731713 is an unpinned sentinel: the game draws a fresh seed. Pin any other integer to freeze the village RNG.",
+          "type": "integer",
+          "minimum": 0,
+          "default": 4731713
+        },
+        "maxTicks": {
+          "description": "Maximum simulation ticks before starting a fresh game, where 0 means no tick limit.",
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "maxGames": {
+          "description": "Maximum fresh games before shutdown, where 0 means no game limit.",
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "daySeconds": {
+          "description": "Real seconds per in-game day (9am to 9pm), before the 10-second score screen. 180 is the league clock: four game hours per real minute.",
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 600,
+          "default": 180
+        },
+        "soulTimeoutSeconds": {
+          "description": "Seconds the village waits after start-up for every seat's soul file before day 1 begins. A seat still missing its soul at the deadline is reported as a player failure.",
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 600,
+          "default": 150
+        },
+        "soulConnectionRequired": {
+          "description": "When true a seat whose socket drops after its soul was accepted is reported as a player failure. Off by default: the game keeps playing the gnome.",
+          "type": "boolean",
+          "default": false
+        },
+        "mockReply": {
+          "description": "Offline stand-in for the model: when set, every decision is this literal reply and no model is called. Used by the certification fixture and local smoke runs only; hosted variants leave it unset so each soul's model is really called.",
+          "type": "string",
+          "default": ""
+        },
+        "maxDays": {
+          "description": "Game length in days, score screens included; overrides maxTicks. The league plays 7. The game refuses a length past the 40-minute hosted deadline.",
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      }
+    },
+    "results_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "day",
+        "names",
+        "usernames",
+        "playerNames",
+        "scores"
+      ],
+      "properties": {
+        "day": {
+          "description": "One-based Heartleaf day number for this score row.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "names": {
+          "description": "Player names in seat order.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 9,
+          "items": {
+            "type": "string"
+          }
+        },
+        "usernames": {
+          "description": "Connection usernames in seat order.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 9,
+          "items": {
+            "type": "string"
+          }
+        },
+        "playerNames": {
+          "description": "Fixed Heartleaf gnome names in seat order.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 9,
+          "items": {
+            "type": "string"
+          }
+        },
+        "scores": {
+          "description": "Cumulative player scores at the end of this day; the 9pm curfew penalty can take a score below zero.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 9,
+          "items": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "runnable": {
+      "type": "game",
+      "image": "coworld-heartleaf-game:coworld-c66e15490dea",
+      "run": [
+        "/bin/heartleaf"
+      ],
+      "env": {},
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/674afcaacdce53c3d845b273e10aad33e712f1a5"
+    },
+    "protocols": {
+      "player": {
+        "type": "uri",
+        "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/docs/soul_files.md"
+      },
+      "global": {
+        "type": "uri",
+        "value": "https://github.com/Metta-AI/bitworld/blob/master/docs/sprite_v1.md"
+      }
+    },
+    "docs": {
+      "readme": {
+        "type": "uri",
+        "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/README.md"
+      },
+      "pages": [
+        {
+          "id": "soul_files.md",
+          "title": "soul_files.md",
+          "content": {
+            "type": "uri",
+            "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/docs/soul_files.md"
+          }
+        },
+        {
+          "id": "models.md",
+          "title": "models.md",
+          "content": {
+            "type": "uri",
+            "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/docs/models.md"
+          }
+        },
+        {
+          "id": "strategy.md",
+          "title": "strategy.md",
+          "content": {
+            "type": "uri",
+            "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/docs/strategy.md"
+          }
+        },
+        {
+          "id": "rules.md",
+          "title": "rules.md",
+          "content": {
+            "type": "uri",
+            "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/docs/rules.md"
+          }
+        },
+        {
+          "id": "play_heartleaf.md",
+          "title": "play_heartleaf.md",
+          "content": {
+            "type": "uri",
+            "value": "https://github.com/Metta-AI/coworld-heartleaf/blob/master/docs/play_heartleaf.md"
+          }
+        }
+      ]
+    },
+    "replay_viewer": {
+      "bundle": "build/static-replay-viewer"
+    }
+  },
+  "player": [
+    {
+      "type": "player",
+      "image": "coworld-heartleaf-shy-villager:coworld-2d9a73e798c8",
+      "run": [
+        "/bin/soul_player"
+      ],
+      "env": {},
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/674afcaacdce53c3d845b273e10aad33e712f1a5/players/shy_villager",
+      "id": "shy_villager",
+      "name": "Shy Villager",
+      "description": "Shy Heartleaf gnome soul that gathers quietly, speaks softly, and honors party invitations."
+    },
+    {
+      "type": "player",
+      "image": "coworld-heartleaf-chatty-villager:coworld-57ca18c6de56",
+      "run": [
+        "/bin/soul_player"
+      ],
+      "env": {},
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/674afcaacdce53c3d845b273e10aad33e712f1a5/players/chatty_villager",
+      "id": "chatty_villager",
+      "name": "Chatty Villager",
+      "description": "Chatty Heartleaf gnome soul that greets everyone, talks constantly, and spreads party invitations."
+    },
+    {
+      "type": "player",
+      "image": "coworld-heartleaf-friendly-villager:coworld-327bac3ad9c7",
+      "run": [
+        "/bin/soul_player"
+      ],
+      "env": {},
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/674afcaacdce53c3d845b273e10aad33e712f1a5/players/friendly_villager",
+      "id": "friendly_villager",
+      "name": "Friendly Villager",
+      "description": "Friendly Heartleaf gnome soul that welcomes everyone, shares food, and hosts warm dinners."
+    },
+    {
+      "type": "player",
+      "image": "coworld-heartleaf-fatherly-villager:coworld-607dc34bf87e",
+      "run": [
+        "/bin/soul_player"
+      ],
+      "env": {},
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/674afcaacdce53c3d845b273e10aad33e712f1a5/players/fatherly_villager",
+      "id": "fatherly_villager",
+      "name": "Fatherly Villager",
+      "description": "Fatherly Heartleaf gnome soul that checks on others, shares food, and makes sure nobody dines alone."
+    }
+  ],
+  "reporter": [],
+  "commissioner": [
+    {
+      "type": "commissioner",
+      "image": "coworld-heartleaf-commissioner:coworld-c4c3383eab12",
+      "run": [],
+      "env": {},
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/674afcaacdce53c3d845b273e10aad33e712f1a5/commissioner",
+      "id": "default-commissioner",
+      "name": "Default Commissioner",
+      "description": "Config-driven ruleset_strategy commissioner with shuffled_window seating and per-episode random seeds."
+    }
+  ],
+  "grader": [
+    {
+      "type": "grader",
+      "image": "coworld-heartleaf-grader:coworld-96150d1b2627",
+      "run": [],
+      "env": {},
+      "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/674afcaacdce53c3d845b273e10aad33e712f1a5/grader/graders/bitworld_score/bitworld_score_grader",
+      "id": "bitworld-score-grader",
+      "name": "BitWorld Score Grader",
+      "description": "Generic BitWorld grader that scores episode interest from score spread and game-specific activity signals."
+    }
+  ],
+  "diagnoser": [],
+  "optimizer": [],
+  "variants": [
+    {
+      "id": "league",
+      "name": "League",
+      "game_config": {
+        "seed": 4731713,
+        "maxGames": 1,
+        "players": [
+          {
+            "name": "Villager 1"
+          },
+          {
+            "name": "Villager 2"
+          },
+          {
+            "name": "Villager 3"
+          },
+          {
+            "name": "Villager 4"
+          },
+          {
+            "name": "Villager 5"
+          },
+          {
+            "name": "Villager 6"
+          },
+          {
+            "name": "Villager 7"
+          },
+          {
+            "name": "Villager 8"
+          },
+          {
+            "name": "Villager 9"
+          }
+        ],
+        "maxDays": 7
+      },
+      "description": "A week of seven Heartleaf days (9am to 9pm, three real minutes each, about 22 minutes) for hosted league rounds. Seed 4731713 is unpinned: each episode draws a fresh village RNG."
+    },
+    {
+      "id": "freeplay",
+      "name": "Freeplay",
+      "game_config": {
+        "seed": 4731713,
+        "maxTicks": 0,
+        "maxGames": 0
+      },
+      "description": "Open-ended Heartleaf configuration for local player testing."
+    },
+    {
+      "id": "smoke",
+      "name": "Smoke",
+      "game_config": {
+        "seed": 1,
+        "maxTicks": 300,
+        "maxGames": 1
+      },
+      "description": "Short deterministic Heartleaf configuration used for smoke checks."
+    },
+    {
+      "id": "league-2d",
+      "name": "League (2 days)",
+      "game_config": {
+        "seed": 4731713,
+        "maxGames": 1,
+        "players": [
+          {
+            "name": "Villager 1"
+          },
+          {
+            "name": "Villager 2"
+          },
+          {
+            "name": "Villager 3"
+          },
+          {
+            "name": "Villager 4"
+          },
+          {
+            "name": "Villager 5"
+          },
+          {
+            "name": "Villager 6"
+          },
+          {
+            "name": "Villager 7"
+          },
+          {
+            "name": "Villager 8"
+          },
+          {
+            "name": "Villager 9"
+          }
+        ],
+        "maxDays": 2
+      },
+      "description": "Two Heartleaf days with the league seating: a shorter run for debugging."
+    }
+  ],
+  "certification": {
+    "game_config": {
+      "seed": 1,
+      "maxTicks": 300,
+      "maxGames": 1,
+      "mockReply": "{\"action\": \"keep_gathering_plants\"}"
+    },
+    "players": [
+      {
+        "player_id": "shy_villager"
+      },
+      {
+        "player_id": "shy_villager"
+      },
+      {
+        "player_id": "shy_villager"
+      },
+      {
+        "player_id": "chatty_villager"
+      },
+      {
+        "player_id": "chatty_villager"
+      },
+      {
+        "player_id": "friendly_villager"
+      },
+      {
+        "player_id": "friendly_villager"
+      },
+      {
+        "player_id": "fatherly_villager"
+      },
+      {
+        "player_id": "fatherly_villager"
+      }
+    ]
+  },
+  "players_per_user": 9,
+  "episode_timeout_minutes": 40
+}

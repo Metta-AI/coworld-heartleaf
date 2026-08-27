@@ -1,4 +1,5 @@
 import
+  std/strutils,
   bitworld/replays as replayCodec
 
 type
@@ -83,6 +84,35 @@ proc writeInputMaskChange*(
     keys: mask
   ))
   writer.lastMasks[playerIndex] = mask
+
+proc writeConversationRecord*(
+  writer: var ReplayWriter,
+  time: uint32,
+  payload: string
+) =
+  ## Writes one conversation log line into the replay itself. The
+  ## payload is the same stamped JSON row that goes to game.log; it
+  ## rides the debug-sprite channel of the codec, so the format and
+  ## old replays are untouched, and every viewer - native, wasm,
+  ## hosted - can rebuild the conversation timeline from the one
+  ## replay file.
+  var bytes = newSeq[uint8](payload.len)
+  for i, ch in payload:
+    bytes[i] = uint8(ch)
+  writer.writeDebugSprite(time, 0, bytes)
+
+proc conversationRecordText*(record: ReplayDebugSprite): string =
+  ## The JSON payload of one conversation record as text.
+  result = newString(record.packet.len)
+  for i, b in record.packet:
+    result[i] = char(b)
+
+proc conversationLogText*(data: ReplayData): string =
+  ## Every conversation record in this replay as game.log-shaped lines.
+  var rows: seq[string]
+  for record in data.debugSprites:
+    rows.add(record.conversationRecordText())
+  rows.join("\n")
 
 proc initReplayPlayer*(data: ReplayData): ReplayPlayer =
   ## Builds replay playback state.

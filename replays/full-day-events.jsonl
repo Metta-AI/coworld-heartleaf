@@ -1,0 +1,73 @@
+{"type":"event","tick":1,"day":1,"minutes":540,"clock":"9:00am","kind":"join","slot":0,"name":"Ivan","user":"chatty_village","home":0}
+{"type":"event","tick":1,"day":1,"minutes":540,"clock":"9:00am","kind":"join","slot":1,"name":"Anton","user":"curious_villag","home":1}
+{"type":"event","tick":1,"day":1,"minutes":540,"clock":"9:00am","kind":"enter_house","slot":1,"name":"Anton","user":"curious_villag","house":1,"own":true}
+{"type":"event","tick":1,"day":1,"minutes":540,"clock":"9:00am","kind":"join","slot":2,"name":"Yura","user":"fatherly_villa","home":2}
+{"type":"event","tick":1,"day":1,"minutes":540,"clock":"9:00am","kind":"enter_house","slot":2,"name":"Yura","user":"fatherly_villa","house":2,"own":true}
+{"type":"event","tick":12,"day":1,"minutes":540,"clock":"9:00am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":1,"foods":[{"food":"Red Pepper","count":1}]}
+{"type":"event","tick":22,"day":1,"minutes":540,"clock":"9:00am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":2,"foods":[{"food":"Garlic","count":1}]}
+{"type":"event","tick":23,"day":1,"minutes":540,"clock":"9:00am","kind":"exit_house","slot":1,"name":"Anton","user":"curious_villag","house":1,"own":true}
+{"type":"event","tick":32,"day":1,"minutes":545,"clock":"9:05am","kind":"harvest","slot":1,"name":"Anton","user":"curious_villag","amount":1,"total":1,"foods":[{"food":"Carrot","count":1}]}
+{"type":"event","tick":38,"day":1,"minutes":545,"clock":"9:05am","kind":"exit_house","slot":2,"name":"Yura","user":"fatherly_villa","house":2,"own":true}
+{"type":"event","tick":41,"day":1,"minutes":545,"clock":"9:05am","kind":"harvest","slot":1,"name":"Anton","user":"curious_villag","amount":1,"total":2,"foods":[{"food":"Strawberries","count":1}]}
+{"type":"event","tick":47,"day":1,"minutes":545,"clock":"9:05am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":1,"foods":[{"food":"Cabbage","count":1}]}
+{"type":"event","tick":50,"day":1,"minutes":545,"clock":"9:05am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":3,"foods":[{"food":"Onion","count":1}]}
+{"type":"event","tick":66,"day":1,"minutes":550,"clock":"9:10am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":2,"foods":[{"food":"Strawberries","count":1}]}
+{"type":"event","tick":90,"day":1,"minutes":555,"clock":"9:15am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":3,"foods":[{"food":"Green Pepper","count":1}]}
+{"type":"event","tick":111,"day":1,"minutes":555,"clock":"9:15am","kind":"harvest","slot":1,"name":"Anton","user":"curious_villag","amount":1,"total":3,"foods":[{"food":"Apple","count":1}]}
+{"type":"event","tick":125,"day":1,"minutes":560,"clock":"9:20am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":4,"foods":[{"food":"Beet","count":1}]}
+{"type":"event","tick":134,"day":1,"minutes":560,"clock":"9:20am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":5,"foods":[{"food":"Blueberries","count":1}]}
+{"type":"event","tick":138,"day":1,"minutes":560,"clock":"9:20am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":4,"foods":[{"food":"Corn","count":1}]}
+{"type":"event","tick":152,"day":1,"minutes":565,"clock":"9:25am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":5,"foods":[{"food":"Green Pepper","count":1}]}
+{"type":"event","tick":210,"day":1,"minutes":575,"clock":"9:35am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":6,"foods":[{"food":"Purple Cabbage","count":1}]}
+{"type":"event","tick":215,"day":1,"minutes":575,"clock":"9:35am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":6,"foods":[{"food":"Cabbage","count":1}]}
+{"type":"event","tick":231,"day":1,"minutes":575,"clock":"9:35am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":7,"foods":[{"food":"Pear","count":1}]}
+{"type":"event","tick":243,"day":1,"minutes":580,"clock":"9:40am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":7,"foods":[{"food":"Avocado","count":1}]}
+o did we "type":"event","tick":260,"day":1,"minutes":580,"clock":"9:40am","kind":"chat","slot":1,"name":"Anton","user":"curious_villag","text":"Yura! Good morning. How are the beets coming?","heard_count":1,"heard_by":[{"slot":2,"name":"Yura"}]}
+{"type":"event","tick":284,"day":1,"minutes":585,"clock":"9:45am","kind":"chat","slot":2,"name":"Yura","user":"fatherly_villa","text":"Slow - but the cabbage is proud this year. Why, what is up?","heard_count":1,"heard_by":[{"slot":1,"name":"Anton"}]}
+{"type":"event","tick":308,"day":1,"minutes":590,"clock":"9:50am","kind":"chat","slot":1,"name":"Anton","user":"curious_villag","text":"My tomatoes doubled overnight. Trade you two for a beet?","heard_count":1,"heard_by":[{"slot":2,"name":"Yura"}]}
+{"type":"event","tick":320,"day":1,"minutes":590,"clock":"9:50am","kind":"chat","slot":2,"name":"Yura","user":"fatherly_villa","text":"Two tomatoes for a beet? Done.","heard_count":1,"heard_by":[{"slot":1,"name":"Anton"}]}
+{"type":"event","tick":332,"day":1,"minutes":595,"clock":"9:55am","kind":"chat","slot":1,"name":"Anton","user":"curious_villag","text":"Deal. Save the biggest beet for tonight - you will see why.","heard_count":1,"heard_by":[{"slot":2,"name":"Yura"}]}
+{"type":"event","tick":356,"day":1,"minutes":595,"clock":"9:55am","kind":"chat","slot":2,"name":"Yura","user":"fatherly_villa","text":"Mysterious! Fine, the big beet comes tonight.","heard_count":1,"heard_by":[{"slot":1,"name":"Anton"}]}
+{"type":"event","tick":425,"day":1,"minutes":610,"clock":"10:10am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":8,"foods":[{"food":"Garlic","count":1}]}
+{"type":"event","tick":437,"day":1,"minutes":610,"clock":"10:10am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":9,"foods":[{"food":"Apple","count":1}]}
+{"type":"event","tick":516,"day":1,"minutes":625,"clock":"10:25am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":10,"foods":[{"food":"Purple Cabbage","count":1}]}
+{"type":"event","tick":535,"day":1,"minutes":625,"clock":"10:25am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":11,"foods":[{"food":"Lettuce","count":1}]}
+{"type":"event","tick":555,"day":1,"minutes":630,"clock":"10:30am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":12,"foods":[{"food":"Onion","count":1}]}
+{"type":"event","tick":563,"day":1,"minutes":630,"clock":"10:30am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":8,"foods":[{"food":"Radish","count":1}]}
+{"type":"event","tick":572,"day":1,"minutes":635,"clock":"10:35am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":9,"foods":[{"food":"Rice","count":1}]}
+{"type":"event","tick":595,"day":1,"minutes":635,"clock":"10:35am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":13,"foods":[{"food":"Yellow Squash","count":1}]}
+{"type":"event","tick":613,"day":1,"minutes":640,"clock":"10:40am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":14,"foods":[{"food":"Strawberries","count":1}]}
+{"type":"event","tick":656,"day":1,"minutes":645,"clock":"10:45am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":15,"foods":[{"food":"Red Pepper","count":1}]}
+{"type":"event","tick":668,"day":1,"minutes":650,"clock":"10:50am","kind":"harvest","slot":1,"name":"Anton","user":"curious_villag","amount":1,"total":4,"foods":[{"food":"Pear","count":1}]}
+{"type":"event","tick":732,"day":1,"minutes":660,"clock":"11:00am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":10,"foods":[{"food":"Blueberries","count":1}]}
+{"type":"event","tick":743,"day":1,"minutes":660,"clock":"11:00am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":16,"foods":[{"food":"Wheat","count":1}]}
+{"type":"event","tick":762,"day":1,"minutes":665,"clock":"11:05am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":17,"foods":[{"food":"Yam","count":1}]}
+{"type":"event","tick":786,"day":1,"minutes":670,"clock":"11:10am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":18,"foods":[{"food":"Avocado","count":1}]}
+{"type":"event","tick":841,"day":1,"minutes":680,"clock":"11:20am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":19,"foods":[{"food":"Green Pepper","count":1}]}
+{"type":"event","tick":900,"day":1,"minutes":690,"clock":"11:30am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":20,"foods":[{"food":"Garlic","count":1}]}
+{"type":"event","tick":914,"day":1,"minutes":690,"clock":"11:30am","kind":"harvest","slot":0,"name":"Ivan","user":"chatty_village","amount":1,"total":21,"foods":[{"food":"Lettuce","count":1}]}
+{"type":"event","tick":997,"day":1,"minutes":705,"clock":"11:45am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":11,"foods":[{"food":"Avocado","count":1}]}
+{"type":"event","tick":1012,"day":1,"minutes":705,"clock":"11:45am","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":12,"foods":[{"food":"Yam","count":1}]}
+{"type":"event","tick":1126,"day":1,"minutes":725,"clock":"12:05pm","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":13,"foods":[{"food":"Apple","count":1}]}
+{"type":"event","tick":1151,"day":1,"minutes":730,"clock":"12:10pm","kind":"chat","slot":0,"name":"Ivan","user":"chatty_village","text":"Anton! Any news from your side of the village?","heard_count":1,"heard_by":[{"slot":1,"name":"Anton"}]}
+{"type":"event","tick":1175,"day":1,"minutes":735,"clock":"12:15pm","kind":"chat","slot":1,"name":"Anton","user":"curious_villag","text":"All quiet - except Yura's cabbage is winning again.","heard_count":1,"heard_by":[{"slot":0,"name":"Ivan"}]}
+{"type":"event","tick":1199,"day":1,"minutes":735,"clock":"12:15pm","kind":"chat","slot":0,"name":"Ivan","user":"chatty_village","text":"The creek is high and the strawberries went wild. And you?","heard_count":1,"heard_by":[{"slot":1,"name":"Anton"}]}
+{"type":"event","tick":1223,"day":1,"minutes":740,"clock":"12:20pm","kind":"chat","slot":1,"name":"Anton","user":"curious_villag","text":"Come at six, my table. Bring Yura - I found something red and ripe.","heard_count":1,"heard_by":[{"slot":0,"name":"Ivan"}]}
+{"type":"event","tick":1247,"day":1,"minutes":745,"clock":"12:25pm","kind":"chat","slot":0,"name":"Ivan","user":"chatty_village","text":"Six at your table then. I will tell Yura when I see him.","heard_count":1,"heard_by":[{"slot":1,"name":"Anton"}]}
+{"type":"event","tick":1354,"day":1,"minutes":765,"clock":"12:45pm","kind":"harvest","slot":2,"name":"Yura","user":"fatherly_villa","amount":1,"total":14,"foods":[{"food":"Yam","count":1}]}
+{"type":"event","tick":2052,"day":1,"minutes":880,"clock":"2:40pm","kind":"chat","slot":2,"name":"Yura","user":"fatherly_villa","text":"Ivan! You look pleased. What is the news?","heard_count":1,"heard_by":[{"slot":0,"name":"Ivan"}]}
+{"type":"event","tick":2076,"day":1,"minutes":885,"clock":"2:45pm","kind":"chat","slot":0,"name":"Ivan","user":"chatty_village","text":"Anton hosts at six - something red and ripe, he says. Come along.","heard_count":1,"heard_by":[{"slot":2,"name":"Yura"}]}
+{"type":"event","tick":2100,"day":1,"minutes":890,"clock":"2:50pm","kind":"chat","slot":2,"name":"Yura","user":"fatherly_villa","text":"Six at Anton's then. The beet comes too.","heard_count":1,"heard_by":[{"slot":0,"name":"Ivan"}]}
+{"type":"event","tick":3007,"day":1,"minutes":1040,"clock":"5:20pm","kind":"enter_house","slot":0,"name":"Ivan","user":"chatty_village","house":1,"own":false}
+{"type":"event","tick":3017,"day":1,"minutes":1040,"clock":"5:20pm","kind":"enter_house","slot":1,"name":"Anton","user":"curious_villag","house":1,"own":true}
+{"type":"event","tick":3166,"day":1,"minutes":1065,"clock":"5:45pm","kind":"enter_house","slot":2,"name":"Yura","user":"fatherly_villa","house":1,"own":false}
+{"type":"event","tick":3240,"day":1,"minutes":1080,"clock":"6:00pm","kind":"score","slot":0,"name":"Ivan","user":"chatty_village","amount":6,"total":6}
+{"type":"event","tick":3240,"day":1,"minutes":1080,"clock":"6:00pm","kind":"dinner","slot":0,"name":"Ivan","user":"chatty_village","host":"Anton","was_host":false,"guests":2,"food":2,"score":6}
+{"type":"event","tick":3240,"day":1,"minutes":1080,"clock":"6:00pm","kind":"score","slot":1,"name":"Anton","user":"curious_villag","amount":11,"total":11}
+{"type":"event","tick":3240,"day":1,"minutes":1080,"clock":"6:00pm","kind":"dinner","slot":1,"name":"Anton","user":"curious_villag","host":"Anton","was_host":true,"guests":2,"food":4,"score":8}
+{"type":"event","tick":3240,"day":1,"minutes":1080,"clock":"6:00pm","kind":"score","slot":2,"name":"Yura","user":"fatherly_villa","amount":3,"total":3}
+{"type":"event","tick":3240,"day":1,"minutes":1080,"clock":"6:00pm","kind":"dinner","slot":2,"name":"Yura","user":"fatherly_villa","host":"Anton","was_host":false,"guests":2,"food":1,"score":3}
+{"type":"event","tick":3613,"day":1,"minutes":1140,"clock":"7:00pm","kind":"exit_house","slot":0,"name":"Ivan","user":"chatty_village","house":1,"own":false}
+{"type":"event","tick":3643,"day":1,"minutes":1145,"clock":"7:05pm","kind":"exit_house","slot":2,"name":"Yura","user":"fatherly_villa","house":1,"own":false}
+{"type":"event","tick":3767,"day":1,"minutes":1165,"clock":"7:25pm","kind":"enter_house","slot":2,"name":"Yura","user":"fatherly_villa","house":2,"own":true}
+{"type":"event","tick":3822,"day":1,"minutes":1175,"clock":"7:35pm","kind":"enter_house","slot":0,"name":"Ivan","user":"chatty_village","house":0,"own":true}

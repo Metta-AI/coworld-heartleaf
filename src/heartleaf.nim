@@ -2216,11 +2216,22 @@ proc inferConversationCircles*(sim: SimServer) =
   for id in gone:
     sim.conversationAnchors.del(id)
 
-proc attachConversationLog*(sim: SimServer, replayPath: string) =
-  ## Loads chat-mode enter/exit events from the game.log next to one
-  ## replay so rings follow conversations, not nearby walkers.
+proc attachConversationTimeline*(
+  sim: SimServer,
+  data: ReplayData,
+  replayPath: string
+) =
+  ## Loads chat-mode enter/exit events so rings follow conversations,
+  ## not nearby walkers. The replay's own conversation records come
+  ## first - they travel inside the one file, so hosted and wasm
+  ## viewers get rings too; a game.log next to the replay is the
+  ## fallback for replays recorded before the records existed.
   sim.conversationTimeline = ConversationTimeline()
   sim.conversationAnchors.clear()
+  let recorded = data.conversationLogText()
+  if recorded.len > 0:
+    sim.conversationTimeline = parseConversationTimeline(recorded)
+    return
   if replayPath.len == 0:
     return
   sim.conversationTimeline =
@@ -4922,6 +4933,16 @@ when not defined(emscripten):
             playerIndex,
             chatText
           )
+      # Conversation enter/exit rows ride inside the replay so playback
+      # can rebuild the ring timeline from the one file.
+      if not brains.gameLog.isNil and
+          brains.gameLog.conversationLines.len > 0:
+        if replayWriter.enabled:
+          for line in brains.gameLog.conversationLines:
+            replayWriter.writeConversationRecord(
+              tickTime(sim.tickCount), line
+            )
+        brains.gameLog.conversationLines.setLen(0)
       let wasScoring = sim.scoreTicks > 0
       sim.step(stepInputs)
       sim.advanceChatFeed()
@@ -5433,7 +5454,7 @@ when not defined(emscripten):
           ReplayPlayer()
       lastTick: MonoTime
     if replayLoaded:
-      sim.attachConversationLog(cliLoadReplayPath())
+      sim.attachConversationTimeline(replayData, cliLoadReplayPath())
       replay.buildReplayKeyframes(replaySeed, replayDayTicks)
     # Load assets before healthz so replay viewers get frames immediately.
     let httpServer = newServer(
@@ -5476,7 +5497,9 @@ when not defined(emscripten):
           replaySeed = replayConfig.seed
           replayDayTicks = max(1, replayConfig.daySeconds) * TicksPerSecond
           sim = initSimServer(replaySeed, replayDayTicks)
-          sim.attachConversationLog(replayFilePath(pendingReplayUri))
+          sim.attachConversationTimeline(
+            replayData, replayFilePath(pendingReplayUri)
+          )
           replay = initReplayPlayer(replayData)
           replay.buildReplayKeyframes(replaySeed, replayDayTicks)
           replayLoaded = true
