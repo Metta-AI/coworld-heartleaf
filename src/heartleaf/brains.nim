@@ -12,6 +12,14 @@ const
   PermanentConfirmations = 2
   PermanentRetrySeconds = 5.0
   ContextRetrySeconds = 2.0
+  ## The two-step conversation clock inside a movement turn: every
+  ## interval, each conversation gets one speaking slot (a conversation
+  ## tick). The world holds for at most slotSeconds while the line is
+  ## composed, so talking costs a fixed few game minutes per line, not
+  ## a whole hourly turn.
+  ConversationSlotIntervalTicks = 24
+  DefaultConversationSlotSeconds = 3.0
+  ConversationSilentSlotLimit = 5
 
 type
   SeatFailureHandler* = proc(seat: int, message: string) {.closure.}
@@ -40,6 +48,24 @@ type
     book*: EncounterBook
     gameLog*: GameLog
       ## One village log for LLM lifecycle and world stamps.
+    conversationTick*: int
+      ## Counts conversation ticks: the short world-holds inside a
+      ## movement turn where one member of each conversation speaks.
+    slotSeconds: float
+      ## Wall seconds one conversation tick may hold the world.
+    slotWaitSeats: seq[int]
+      ## Seats composing a line right now; the world holds for them.
+    slotDeadline: float
+    slotMoveTicks: int
+      ## Movement ticks since the last conversation tick.
+    slotLinesAtOpen: Table[int, int]
+      ## Encounter id -> lines count when its slot opened.
+    slotSpeakerFor: Table[int, int]
+      ## Encounter id -> seat asked to speak this slot.
+    encounterLastSpeaker: Table[int, int]
+      ## Encounter id -> seat that spoke last (round-robin cursor).
+    encounterSilentSlots: Table[int, int]
+      ## Encounter id -> consecutive silent conversation ticks.
 
 proc newBrains*(
   navigation: Navigation,
@@ -58,7 +84,11 @@ proc newBrains*(
     phase: LlmPhase,
     turnIndex: 0,
     book: initEncounterBook(),
-    gameLog: newGameLog()
+    gameLog: newGameLog(),
+    slotSeconds: parseFloat(getEnv(
+      "HEARTLEAF_CONVERSATION_TICK_SECONDS",
+      $DefaultConversationSlotSeconds
+    ))
   )
 
 proc openGameLog*(brains: Brains, dir: string) =
@@ -91,6 +121,13 @@ proc resetForNewGame*(brains: Brains) =
   brains.turnIndex = 0
   brains.moveTicksLeft = 0
   brains.book = initEncounterBook()
+  brains.conversationTick = 0
+  brains.slotWaitSeats.setLen(0)
+  brains.slotMoveTicks = 0
+  brains.slotLinesAtOpen.clear()
+  brains.slotSpeakerFor.clear()
+  brains.encounterLastSpeaker.clear()
+  brains.encounterSilentSlots.clear()
   for (houseIndex, soul) in souls:
     brains.attachSoul(houseIndex, soul)
 
@@ -368,6 +405,125 @@ proc logPhase(brains: Brains, kind: string) =
   for villager in brains.villagers.values:
     villager.logTurn(kind, brains.turnIndex)
 
+proc nextSlotSpeaker(brains: Brains, encounter: Encounter): int =
+  ## The member whose turn it is: round-robin after the last speaker.
+  if encounter == nil or encounter.members.len < 2:
+    return -1
+  let last = brains.encounterLastSpeaker.getOrDefault(encounter.id, -1)
+  var start = 0
+  for i, seat in encounter.members:
+    if seat == last:
+      start = i + 1
+      break
+  for offset in 0 ..< encounter.members.len:
+    let seat = encounter.members[(start + offset) mod encounter.members.len]
+    if seat in brains.villagers and not brains.villagers[seat].failed:
+      return seat
+  -1
+
+proc logConversationTick(
+  brains: Brains,
+  encounter: Encounter,
+  seat: int,
+  silent: bool
+) =
+  ## Stamps one closed conversation tick; the row rides into the replay.
+  if seat in brains.villagers:
+    brains.villagers[seat].logConversation(
+      "tick",
+      "id=" & $encounter.id &
+      " ct=" & $brains.conversationTick &
+      " speaker=" & (if silent: "" else: seat.playerNameForHouse()) &
+      " silent=" & $silent
+    )
+
+proc dissolveSilent(brains: Brains, encounter: Encounter) =
+  ## Ends a conversation that has gone quiet for too many ticks.
+  for houseIndex in encounter.members:
+    if houseIndex in brains.villagers:
+      let villager = brains.villagers[houseIndex]
+      villager.logConversation(
+        "exit", "id=" & $encounter.id & " turn=" & $brains.turnIndex
+      )
+      villager.recordEvent("(The conversation fell quiet and ended.)")
+      villager.encounterId = 0
+  brains.book.dissolve(encounter)
+
+proc closeConversationSlot(brains: Brains, now: float) =
+  ## Ends the current conversation tick: the turn passes, silence
+  ## counts, and a conversation quiet for too long dissolves.
+  var dissolved: seq[Encounter]
+  for id, seat in brains.slotSpeakerFor.pairs:
+    let encounter = brains.book.encounter(id)
+    if encounter == nil:
+      continue
+    let spoke =
+      encounter.lines.len > brains.slotLinesAtOpen.getOrDefault(id, 0)
+    brains.encounterLastSpeaker[id] = seat
+    if spoke:
+      brains.encounterSilentSlots[id] = 0
+    else:
+      brains.encounterSilentSlots[id] =
+        brains.encounterSilentSlots.getOrDefault(id, 0) + 1
+    brains.logConversationTick(encounter, seat, not spoke)
+    if brains.encounterSilentSlots.getOrDefault(id, 0) >=
+        ConversationSilentSlotLimit:
+      dissolved.add(encounter)
+  for encounter in dissolved:
+    brains.dissolveSilent(encounter)
+  brains.slotWaitSeats.setLen(0)
+  brains.slotLinesAtOpen.clear()
+  brains.slotSpeakerFor.clear()
+
+proc slotSettled(brains: Brains, now: float): bool =
+  ## True when every asked speaker has replied or the hold expired.
+  ## A late line still lands - in the next conversation tick.
+  if now >= brains.slotDeadline:
+    return true
+  for seat in brains.slotWaitSeats:
+    if seat in brains.villagers and brains.villagers[seat].requestInFlight:
+      return false
+  true
+
+proc openConversationSlots(
+  brains: Brains,
+  observations: Table[int, Observation],
+  now: float
+) =
+  ## Opens one speaking slot per conversation - a conversation tick.
+  ## The chosen member of each circle is asked for a line and the
+  ## world holds while they compose; a busy or backing-off speaker
+  ## passes their turn as a silent slot.
+  brains.slotWaitSeats.setLen(0)
+  brains.slotLinesAtOpen.clear()
+  brains.slotSpeakerFor.clear()
+  var encounterIds: seq[int]
+  for id in brains.book.encounters.keys:
+    encounterIds.add(id)
+  var opened = false
+  for id in encounterIds:
+    let encounter = brains.book.encounter(id)
+    if encounter == nil or encounter.members.len < 2:
+      continue
+    let seat = brains.nextSlotSpeaker(encounter)
+    if seat < 0 or seat notin observations:
+      continue
+    let villager = brains.villagers[seat]
+    brains.slotSpeakerFor[id] = seat
+    brains.slotLinesAtOpen[id] = encounter.lines.len
+    if villager.requestInFlight or now < villager.retryAt or
+        not brains.budget.canRequest(now):
+      continue
+    brains.startRequest(villager, observations[seat], now)
+    if villager.requestInFlight:
+      brains.slotWaitSeats.add(seat)
+      opened = true
+  if brains.slotSpeakerFor.len > 0:
+    inc brains.conversationTick
+    brains.slotDeadline = now + brains.slotSeconds
+    if not opened:
+      brains.closeConversationSlot(now)
+
 proc handleReply(
   brains: Brains,
   villager: Villager,
@@ -556,6 +712,10 @@ proc advance*(
       villager.turnReady = false
       brains.phase = LlmPhase
       brains.moveTicksLeft = 0
+      brains.slotWaitSeats.setLen(0)
+      brains.slotLinesAtOpen.clear()
+      brains.slotSpeakerFor.clear()
+      brains.slotMoveTicks = 0
     villager.observeWorld(observation, brains.navigation, brains.layout)
   brains.pollReplies(observations, now)
   brains.scheduleRequests(observations, now)
@@ -594,9 +754,33 @@ proc advance*(
       inc brains.turnIndex
       brains.moveTicksLeft = MovementTurnTicks
       brains.logPhase("move")
+      brains.slotMoveTicks = 0
     else:
       result.paused = true
       return
+  # The conversation clock inside a movement turn: every interval each
+  # circle gets one speaking slot, and the world holds while the line
+  # is composed. Game time advances only between the holds.
+  if brains.slotSpeakerFor.len > 0:
+    if brains.slotSettled(now):
+      brains.closeConversationSlot(now)
+    else:
+      result.paused = true
+      for seat in brains.slotWaitSeats:
+        if seat in brains.villagers:
+          result.blockedNames.add(brains.villagers[seat].name)
+      return
+  else:
+    inc brains.slotMoveTicks
+    if brains.slotMoveTicks >= ConversationSlotIntervalTicks:
+      brains.slotMoveTicks = 0
+      brains.openConversationSlots(observations, now)
+      if brains.slotWaitSeats.len > 0:
+        result.paused = true
+        for seat in brains.slotWaitSeats:
+          if seat in brains.villagers:
+            result.blockedNames.add(brains.villagers[seat].name)
+        return
   brains.tickTalks(observations)
   result.paused = false
   for houseIndex, villager in brains.villagers.pairs:
