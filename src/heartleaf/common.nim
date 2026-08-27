@@ -27,14 +27,21 @@ const
   DayEndMinutes* = 21 * 60
   DinnerMinutes* = 18 * 60
   DinnerDepartMinutes* = 16 * 60
-    ## By 4:00pm every gnome starts for its table, sooner if the walk
-    ## would miss 6pm.
+    ## Kept for the clock; dinner no longer auto-walks at 4pm.
   DayTotalMinutes* = DayEndMinutes - DayStartMinutes
   TicksPerSecond* = 24
   SecondsPerGameHour* = 15
   DefaultDaySeconds* = SecondsPerGameHour * (DayTotalMinutes div 60)
   DefaultDayCount* = 7
   DayTicks* = DefaultDaySeconds * TicksPerSecond
+  ## Leapfrog movement slice: one game hour, 15 sim-seconds at 24 ticks,
+  ## 12 slices per day. Game time advances only here. Wall time is not
+  ## paced to those ticks.
+  MovementTurnSeconds* = SecondsPerGameHour
+  MovementTurnTicks* = MovementTurnSeconds * TicksPerSecond
+  ## One movement turn in game minutes (15s at 15s per game hour = 60).
+  MovementTurnMinutes* = MovementTurnSeconds * 60 div SecondsPerGameHour
+  MovementTurnsPerDay* = DefaultDaySeconds div MovementTurnSeconds
   ScoreScreenSeconds* = 10
   ScoreScreenTicks* = ScoreScreenSeconds * TicksPerSecond
   ## Points lost for not being inside your own house when the day ends.
@@ -69,6 +76,9 @@ proc hostedDeadlineProblem*(maxTicks: int): string =
 static:
   doAssert hostedDeadlineProblem(gameTicksForDays(DefaultDayCount, DayTicks)) == "",
     "the default week must fit the hosted deadline"
+  doAssert DefaultDaySeconds mod MovementTurnSeconds == 0
+  doAssert MovementTurnsPerDay == 12
+  doAssert MovementTurnTicks == 360
 
 proc toRect*(rect: ResourceRect): Rect =
   ## Converts one resource rectangle to a gameplay rectangle.

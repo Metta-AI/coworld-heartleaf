@@ -6,7 +6,8 @@ import
   curly,
   heartleaf,
   heartleaf/[common, protocol, decisions, souls, observation, navigation,
-    villager, executor, report, prompt, pacing, bedrock_client, brains],
+    villager, executor, report, prompt, pacing, bedrock_client, brains,
+    encounters],
   replays,
   ../tools/llm_chart
 
@@ -33,49 +34,58 @@ doAssert homeRects.len > 0, "home resource rectangles should parse"
 doAssert homeRects[0].name == "exit", "home exit should be first"
 
 echo "Testing decisions"
-let inviteDecision = parseDecision("""
+let talkDecision = parseDecision("""
 {
-  "action": "say_to_person",
+  "action": "talk_to",
   "targetName": "Ivan",
-  "houseIndex": 2,
-  "message": "Come to my party?",
-  "commitParty": true,
-  "reason": "I have lots of food."
+  "message": "Got any carrot?",
+  "reason": "I still need carrot."
 }
 """)
-doAssert inviteDecision.valid, "invite decision should parse"
-doAssert inviteDecision.action == SayToPerson, "action should match"
-doAssert inviteDecision.targetName == "Ivan", "target should parse"
-doAssert inviteDecision.houseIndex == 1, "house index should be zero based"
-doAssert inviteDecision.message == "Come to my party?", "message should parse"
-doAssert inviteDecision.commitParty, "commitment should parse"
+doAssert talkDecision.valid, "talk_to should parse"
+doAssert talkDecision.action == TalkTo, "action should match"
+doAssert talkDecision.targetName == "Ivan", "target should parse"
+doAssert talkDecision.houseIndex == 0, "a named gnome fills houseIndex"
+doAssert talkDecision.message == "Got any carrot?", "message should parse"
 
 let invalidDecision = parseDecision("""{"action": "dance"}""")
 doAssert not invalidDecision.valid, "unknown actions should be invalid"
+doAssert not invalidDecision.malformed, "unknown actions are still JSON"
 
 let fencedDecision = parseDecision("""
 ```json
-{"action": "go_to_party", "houseIndex": 9, "commitParty": true}
+{"action": "go_to_house", "targetName": "Egor"}
 ```
 """)
 doAssert fencedDecision.valid, "fenced JSON should parse defensively"
-doAssert fencedDecision.action == GoToParty, "party action should parse"
-doAssert fencedDecision.houseIndex == 8, "house 9 should become index 8"
+doAssert fencedDecision.action == GoToHouse, "go_to_house should parse"
+doAssert fencedDecision.houseIndex == 8, "Egor is house 9"
 
 let trailing = parseDecision("""
-{"action": "say_to_person", "targetName": "Kiran", "message": "Hi {there}"}
+{"action": "say", "message": "Hi {there}"}
 user(You now carry: Corn.) Return JSON now.
 {"action": "go_home"}
 """)
-doAssert trailing.valid and trailing.action == SayToPerson,
+doAssert trailing.valid and trailing.action == Say,
   "only the first complete object counts, braces in strings included"
 doAssert trailing.message == "Hi {there}"
 
-let stringHouse = parseDecision("""
-{"action": "go_to_party", "houseIndex": "4", "targetName": "Sasha"}
-""")
-doAssert stringHouse.valid, "string houseIndex should parse"
-doAssert stringHouse.houseIndex == 3, "house 4 should become index 3"
+for pair in [
+  ("gather_plants", GatherPlants),
+  ("keep_gathering_plants", GatherPlants),
+  ("talk_to", TalkTo),
+  ("say", Say),
+  ("bye", Bye),
+  ("follow", Follow),
+  ("go_home", GoHome),
+  ("go_to_house", GoToHouse),
+  ("go_to_garden", GoToGarden),
+  ("wait", Wait),
+  ("wander", Wander)
+]:
+  let parsed = parseDecision("{\"action\": \"" & pair[0] &
+    "\", \"targetName\": \"Anton\", \"message\": \"ok\"}")
+  doAssert parsed.valid and parsed.action == pair[1], pair[0] & " should parse"
 
 echo "Testing self name prefix stripping"
 let vova = ["Vova", "grumpy_villager"]
@@ -102,25 +112,12 @@ doAssert "Vova:".stripSelfPrefix(vova) == "",
 doAssert "Vova: hello".stripSelfPrefix([]) == "Vova: hello",
   "no names means nothing is stripped"
 let prefixedDecision = parseDecision("""
-{"action": "say_to_person", "targetName": "Anton", "message": "Vova: hi Anton"}
+{"action": "talk_to", "targetName": "Anton", "message": "Vova: hi Anton"}
 """, vova)
 doAssert prefixedDecision.message == "hi Anton",
   "decision messages should lose the self label"
 doAssert "today\u2014found pear\u2026 \u201cnice\u201d".cleanDecisionText() ==
   "today - found pear... \"nice\"", "model punctuation becomes ASCII"
-
-echo "Testing untilTime parsing"
-let untilDecision = parseDecision("""
-{"action": "stand_at_house_garden", "houseIndex": 3, "untilTime": "5:15pm"}
-""")
-doAssert untilDecision.valid and untilDecision.untilMinutes == 17 * 60 + 15,
-  "untilTime accepts am/pm clocks"
-doAssert parseDecision("""{"action": "go_home", "untilTime": "18:30"}""")
-  .untilMinutes == 18 * 60 + 30, "untilTime accepts 24h clocks"
-doAssert parseDecision("""{"action": "go_home", "untilTime": 1110}""")
-  .untilMinutes == 1110, "untilTime accepts day minutes"
-doAssert parseDecision("""{"action": "go_home"}""").untilMinutes == -1,
-  "untilTime defaults to none"
 
 echo "Testing food name lists"
 doAssert "Yellow Squash x2, Beet".foodNamesIn() ==
@@ -386,6 +383,9 @@ block:
 echo "Testing the game clock fits the hosted deadline"
 doAssert DayTotalMinutes == 12 * 60, "a day is twelve hours"
 doAssert DayTicks == 180 * TicksPerSecond, "three-minute days"
+doAssert MovementTurnTicks == MovementTurnSeconds * TicksPerSecond
+doAssert MovementTurnTicks == 360, "one game hour is 15s at 24 ticks"
+doAssert MovementTurnsPerDay == 12, "twelve hourly slices fill a day"
 doAssert SecondsPerGameHour * 4 == 60, "four game hours per real minute"
 doAssert DayTicks mod (DayTotalMinutes div 5) == 0, "one clock step is a whole number of ticks"
 let week = gameTicksForDays(DefaultDayCount, DayTicks)
@@ -513,8 +513,9 @@ block:
   let text = systemPrompt(soul, "Vova")
   doAssert text.startsWith("Your name is Vova. You are shy."), "{name} is filled in"
   doAssert "{name}" notin text
-  let sections = ["Response format:", "Conversation memory:", "Host or guest:",
-    "Repeating yourself:", "Actions:", "Greeting:", "Vegetable hunt:"]
+  let sections = ["Response format:", "Conversation memory:", "Talking:",
+    "Actions:", "\nDinner:\n", "Repeating yourself:", "Greeting:",
+    "Vegetable hunt:"]
   var last = 0
   for section in sections:
     let at = text.find(section)
@@ -522,9 +523,13 @@ block:
     last = at
   doAssert MechanicsBlock in text, "the mechanics follow the soul"
   doAssert text.endsWith(housesText()), "the house table comes last"
-  doAssert "1 Ivan," in text and "9 Egor." in text, "houses are numbered by owner"
+  doAssert "Ivan," in text and "Egor." in text, "houses are listed by owner"
   doAssert "Earlier state reports" in text, "old reports are not part of memory"
   doAssert "reason field is your notes" in text, "reason stays as self memory"
+  doAssert "Talking:" in text, "the mechanics lock talk mode"
+  doAssert "Dinner bell" in text, "the dinner bell is in the mechanics"
+  doAssert "Where line" in text, "location is in the mechanics"
+  doAssert "Last JSON was ignored" in text, "ignored actions are told why"
   let bare = systemPrompt(parseSoul("#!m\nJust a soul.\n"), "Ivan")
   doAssert bare.startsWith("Your name is Ivan. You are a Heartleaf gnome player."),
     "a soul without {name} gets a name line"
@@ -542,22 +547,355 @@ block:
     layout = sim.worldLayoutFor()
   let first = villager.requestMessages(observation, navigation, layout)
   doAssert first[^1].role == "user"
-  doAssert "until dinner" in first[^1].content, "the live report is last"
+  doAssert "Where:" in first[^1].content, "the live report is last"
   doAssert villager.history.len == 0, "the live report is not kept"
   villager.appendHistory(
     "assistant",
     """{"action":"keep_gathering_plants","reason":"start"}"""
   )
   let second = villager.requestMessages(observation, navigation, layout)
-  doAssert second[^1].content.contains("until dinner")
+  doAssert second[^1].content.contains("Where:")
   doAssert villager.history.len == 1
   doAssert villager.history[0].role == "assistant"
   var reportLogs = 0
   for entry in villager.logEntries:
     let node = parseJson(entry)
-    if node["index"].getInt() < 0 and "until dinner" in node["text"].getStr():
+    if node["index"].getInt() < 0 and "Where:" in node["text"].getStr():
       inc reportLogs
   doAssert reportLogs == 2, "each live report is logged"
+
+echo "Testing live headers omit empty next-to lines"
+block:
+  var sim = initSimServer(7)
+  doAssert sim.addPlayer("alice", 0) == 0
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let villager = newVillager(0, soul, sim.worldLayoutFor().gardens.len)
+  var observation = sim.observe(0)
+  let layout = sim.worldLayoutFor()
+  let navigation = sim.navigationFor()
+  let report = villager.stateReport(observation, navigation, layout)
+  doAssert "People next to" notin report
+  doAssert "Houses next to" notin report
+  doAssert "Conversation:" notin report
+  doAssert "Talking: no" in report
+  doAssert "minutes until dinner" notin report
+  doAssert "Food collected:" notin report, "carry nothing, omit the line"
+  doAssert "Where: inside Ivan's house" in report
+  doAssert "People next to: none" notin report
+  doAssert "Houses next to: none" notin report
+  doAssert report.endsWith("Return JSON now.")
+  villager.lastError = "Talking: yes, so action must be talk_to, say, or bye."
+  let talking = villager.stateReport(observation, navigation, layout)
+  doAssert "Talking: yes. Only" notin talking
+  doAssert "Last JSON was ignored:" in talking
+  observation.minutes = DinnerDepartMinutes
+  observation.scene = Outdoors
+  observation.currentHouse = -1
+  let bell = villager.stateReport(observation, navigation, layout)
+  doAssert "Dinner bell:" in bell
+  doAssert "leave now" in bell
+  doAssert "Where: outside, in the village" in bell
+  observation.scene = Indoors
+  observation.currentHouse = 2
+  let inside = villager.stateReport(observation, navigation, layout)
+  doAssert "Where: inside Yura's house" in inside
+  doAssert "Stay through 6:00pm" in inside
+
+echo "Testing house-circuit wander"
+block:
+  var sim = initSimServer(1)
+  doAssert sim.addPlayer("alice", 0) == 0
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let villager = newVillager(0, soul, sim.worldLayoutFor().gardens.len)
+  doAssert villager.nextWanderHouse() == 0, "the circuit starts at house 0"
+  villager.wanderedDoors[0] = true
+  doAssert villager.nextWanderHouse() == 1
+  for i in 0 ..< HouseCount:
+    villager.wanderedDoors[i] = i != villager.houseIndex
+  doAssert villager.nextWanderHouse() == villager.houseIndex,
+    "own house is on the circuit, never skipped"
+  for i in 0 ..< HouseCount:
+    villager.wanderedDoors[i] = true
+  doAssert villager.nextWanderHouse() == 0, "all 9 reset the circuit"
+  doAssert not villager.wanderedDoors[0]
+  var observation = sim.observe(0)
+  observation.scene = Outdoors
+  for i in 0 ..< HouseCount:
+    observation.houseOnScreen[i] = false
+  observation.houseOnScreen[4] = true
+  villager.markSeenDoors(observation)
+  doAssert villager.wanderedDoors[4], "a door on screen is marked"
+  doAssert villager.nextWanderHouse() != 4, "a seen door is not the next target"
+
+echo "Testing n-way encounters"
+block:
+  var book = initEncounterBook()
+  let group = book.startEncounter(0, 1)
+  doAssert group.members.len == 2
+  group.addMember(2)
+  doAssert group.members.len == 3
+  group.addLine("Ivan", "hey")
+  group.addLine("Anton", "hi")
+  let text = group.conversationText("Yura")
+  doAssert "Ivan: hey" in text
+  doAssert "Anton: hi" in text
+  group.removeMember(0)
+  doAssert group.members.len == 2
+  var sim = initSimServer(1)
+  for i in 0 .. 2:
+    doAssert sim.addPlayer("p" & $i, i) == i
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let brains = newBrains(
+    sim.navigationFor(), sim.worldLayoutFor(), newScriptedBedrockClient(), 1
+  )
+  for i in 0 .. 2:
+    brains.attachSoul(i, soul)
+  let
+    ivan = brains.villagers[0]
+    anton = brains.villagers[1]
+    yura = brains.villagers[2]
+  let say = parseDecision("""{"action": "say", "message": "hi"}""")
+  let bye = parseDecision("""{"action": "bye", "message": "later"}""")
+  let wait = parseDecision("""{"action": "wait"}""")
+  doAssert not ivan.modeAllows(say), "say outside talk is rejected"
+  doAssert not ivan.modeAllows(bye), "bye outside talk is rejected"
+  doAssert ivan.modeAllows(wait)
+  discard brains.joinOrStartTalk(ivan, "Anton")
+  doAssert ivan.talking and anton.talking
+  doAssert brains.book.encounter(ivan.encounterId).members.len == 2
+  brains.speakInEncounter(ivan, "hey there")
+  var ivanYou, antonHeard = 0
+  for line in ivan.history:
+    if line.content == "You: hey there":
+      inc ivanYou
+  for line in anton.history:
+    if line.content == "Ivan: hey there":
+      inc antonHeard
+  doAssert ivanYou == 1 and antonHeard == 1, "each spoken line is one history turn"
+  discard brains.joinOrStartTalk(ivan, "Yura")
+  doAssert yura.talking
+  doAssert brains.book.encounter(ivan.encounterId).members.len == 3
+  var yuraHeard = 0
+  for line in yura.history:
+    if line.content == "Ivan: hey there":
+      inc yuraHeard
+  doAssert yuraHeard == 1, "a joiner gets the lines so far, once"
+  doAssert ivan.modeAllows(say)
+  doAssert not ivan.modeAllows(wait), "must bye to walk off"
+  brains.leaveEncounter(ivan)
+  doAssert not ivan.talking
+  doAssert anton.talking and yura.talking
+  doAssert brains.book.encounter(anton.encounterId).members.len == 2
+  brains.leaveEncounter(anton)
+  doAssert not anton.talking and not yura.talking,
+    "the last two dissolve together"
+  ivan.askedWhileTalking = true
+  doAssert ivan.modeAllows(say),
+    "say still counts if the group dissolved while the ask was in flight"
+  ivan.askedWhileTalking = false
+  doAssert not ivan.modeAllows(say)
+
+echo "Testing a mid-ask bye does not reject the other gnome's say"
+block:
+  var sim = initSimServer(1)
+  doAssert sim.addPlayer("alice", 0) == 0
+  doAssert sim.addPlayer("bob", 1) == 1
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let client = newScriptedBedrockClient()
+  let brains = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, 1)
+  brains.attachSoul(0, soul)
+  brains.attachSoul(1, soul)
+  discard brains.joinOrStartTalk(brains.villagers[0], "Anton")
+  proc observations(): Table[int, Observation] =
+    {0: sim.observe(0), 1: sim.observe(1)}.toTable
+  var now = 2000.0
+  discard brains.advance(observations(), now)
+  var ivanTag, antonTag: string
+  for request in client.started:
+    if request.playerSlot == 0:
+      ivanTag = request.tag
+    else:
+      antonTag = request.tag
+  doAssert ivanTag.len > 0 and antonTag.len > 0
+  doAssert brains.villagers[0].askedWhileTalking
+  client.scriptReply(BedrockReply(
+    tag: antonTag, statusCode: 200,
+    text: """{"action": "bye", "message": "later"}"""
+  ))
+  client.scriptReply(BedrockReply(
+    tag: ivanTag, statusCode: 200,
+    text: """{"action": "say", "message": "wait I had more"}"""
+  ))
+  now += 0.1
+  let frame = brains.advance(observations(), now)
+  doAssert not frame.paused, "both replies are usable even if bye lands first"
+  doAssert brains.phase == MovePhase
+  var chats: seq[string]
+  for item in frame.outputs:
+    if item.output.chat.len > 0:
+      chats.add(item.output.chat)
+  doAssert "later" in chats
+  doAssert "wait I had more" in chats
+
+echo "Testing leapfrog turns"
+block:
+  var sim = initSimServer(7)
+  doAssert sim.addPlayer("alice", 0) == 0
+  doAssert sim.addPlayer("bob", 1) == 1
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let client = newScriptedBedrockClient()
+  let brains = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, 1)
+  brains.attachSoul(0, soul)
+  brains.attachSoul(1, soul)
+  proc observations(): Table[int, Observation] =
+    {0: sim.observe(0), 1: sim.observe(1)}.toTable
+  var now = 1000.0
+  var answered = 0
+  proc answer(text: string) =
+    client.scriptReply(BedrockReply(
+      tag: client.started[answered].tag, statusCode: 200, text: text
+    ))
+    inc answered
+  var frame = brains.advance(observations(), now)
+  doAssert frame.paused, "the village waits until every gnome replies"
+  doAssert brains.phase == LlmPhase
+  doAssert client.started.len == 2
+  answer("""{"action": "wait"}""")
+  now += 0.1
+  frame = brains.advance(observations(), now)
+  doAssert frame.paused, "one reply is not enough to start movement"
+  doAssert brains.phase == LlmPhase
+  answer("""{"action": "wait"}""")
+  now += 0.1
+  var moveTicks = 0
+  while true:
+    frame = brains.advance(observations(), now)
+    if frame.paused:
+      break
+    var inputs = newSeq[InputState](2)
+    for item in frame.outputs:
+      inputs[item.houseIndex] = decodeInputMask(item.output.mask)
+    sim.step(inputs)
+    inc moveTicks
+    now += 0.05
+    doAssert moveTicks <= MovementTurnTicks + 1
+  doAssert moveTicks == MovementTurnTicks,
+    "a movement slice is one game hour of 24-tick seconds"
+  doAssert brains.phase == LlmPhase
+  doAssert frame.paused, "the next LLM phase waits again"
+
+echo "Testing parse failures stay in the LLM phase"
+block:
+  var sim = initSimServer(7)
+  doAssert sim.addPlayer("alice", 0) == 0
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let client = newScriptedBedrockClient()
+  let brains = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, 1)
+  brains.attachSoul(0, soul)
+  proc observations(): Table[int, Observation] =
+    {0: sim.observe(0)}.toTable
+  var now = 4000.0
+  discard brains.advance(observations(), now)
+  doAssert client.started.len == 1
+  client.scriptReply(BedrockReply(
+    tag: client.started[0].tag, statusCode: 200, text: "not json"
+  ))
+  now += 0.1
+  var frame = brains.advance(observations(), now)
+  let villager = brains.villagers[0]
+  doAssert frame.paused, "a parse failure keeps the village paused"
+  doAssert brains.phase == LlmPhase
+  doAssert not villager.turnReady
+  doAssert villager.failures == 1
+  doAssert villager.retryPending
+  now = villager.retryAt + 0.01
+  discard brains.advance(observations(), now)
+  doAssert client.started.len == 2, "retries stay in the same LLM phase"
+  doAssert brains.phase == LlmPhase
+  client.scriptReply(BedrockReply(
+    tag: client.started[1].tag, statusCode: 200,
+    text: """{"action": "wait"}"""
+  ))
+  now += 0.1
+  frame = brains.advance(observations(), now)
+  doAssert not frame.paused
+  doAssert brains.phase == MovePhase
+  doAssert villager.hasDecision, "a usable reply starts movement"
+
+echo "Testing a bad choice waits instead of retrying"
+block:
+  var sim = initSimServer(7)
+  doAssert sim.addPlayer("alice", 0) == 0
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let client = newScriptedBedrockClient()
+  let brains = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, 1)
+  brains.attachSoul(0, soul)
+  proc observations(): Table[int, Observation] =
+    {0: sim.observe(0)}.toTable
+  var now = 5000.0
+  discard brains.advance(observations(), now)
+  client.scriptReply(BedrockReply(
+    tag: client.started[0].tag, statusCode: 200,
+    text: """{"action": "say", "message": "hi"}"""
+  ))
+  now += 0.1
+  var frame = brains.advance(observations(), now)
+  let villager = brains.villagers[0]
+  doAssert not frame.paused, "a bad choice does not hold the village"
+  doAssert brains.phase == MovePhase
+  doAssert villager.turnReady
+  doAssert villager.failures == 0
+  doAssert not villager.retryPending
+  doAssert villager.decision.action == Wait, "say outside talk becomes wait"
+  doAssert villager.lastError.len > 0
+  var sawIgnore = false
+  for line in villager.history:
+    if line.content.startsWith("(Your action was ignored:"):
+      sawIgnore = true
+      doAssert "Talking: no" in line.content
+  doAssert sawIgnore, "the gnome is told the action was ignored and why"
+
+echo "Testing wait in conversation is silence, not a retry"
+block:
+  var sim = initSimServer(1)
+  doAssert sim.addPlayer("alice", 0) == 0
+  doAssert sim.addPlayer("bob", 1) == 1
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let client = newScriptedBedrockClient()
+  let brains = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, 1)
+  brains.attachSoul(0, soul)
+  brains.attachSoul(1, soul)
+  discard brains.joinOrStartTalk(brains.villagers[0], "Anton")
+  proc observations(): Table[int, Observation] =
+    {0: sim.observe(0), 1: sim.observe(1)}.toTable
+  var now = 6000.0
+  discard brains.advance(observations(), now)
+  var ivanTag, antonTag: string
+  for request in client.started:
+    if request.playerSlot == 0:
+      ivanTag = request.tag
+    else:
+      antonTag = request.tag
+  client.scriptReply(BedrockReply(
+    tag: ivanTag, statusCode: 200, text: """{"action": "wait"}"""
+  ))
+  client.scriptReply(BedrockReply(
+    tag: antonTag, statusCode: 200,
+    text: """{"action": "say", "message": "hello"}"""
+  ))
+  now += 0.1
+  let frame = brains.advance(observations(), now)
+  doAssert not frame.paused
+  doAssert brains.phase == MovePhase
+  doAssert brains.villagers[0].talking, "wait does not leave the group"
+  doAssert brains.villagers[1].talking
+  doAssert brains.villagers[0].decision.action == Wait
+  doAssert brains.villagers[0].failures == 0
+  var sawIgnore = false
+  for line in brains.villagers[0].history:
+    if line.content.startsWith("(Your action was ignored:"):
+      sawIgnore = true
+  doAssert sawIgnore, "wait in conversation is ignored with a reason"
 
 echo "Testing a brain-driven village"
 block:
@@ -580,11 +918,11 @@ block:
     "each model request carries its Coworld player slot"
   for request in client.started:
     doAssert request.messages[^1].role == "user"
-    doAssert "until dinner" in request.messages[^1].content,
+    doAssert "Where:" in request.messages[^1].content,
       "each ask ends with a live state report"
   for villager in brains.villagers.values:
     for line in villager.history:
-      doAssert "until dinner" notin line.content,
+      doAssert "Where:" notin line.content,
         "state reports are not kept in history"
   var answered = 0
   proc answer(text: string) =
@@ -592,12 +930,17 @@ block:
       tag: client.started[answered].tag, statusCode: 200, text: text
     ))
     inc answered
-  answer("""{"action": "go_to_party", "houseIndex": 2, "commitParty": true}""")
-  now += 0.1
-  frame = brains.advance(observations(), now)
-  doAssert not frame.paused, "one decided villager keeps the clock running"
-  doAssert frame.blockedNames == @["Anton"], "the other one still waits"
-  doAssert brains.villagers[0].committedPartyHouse == 1
+  proc answerPending() =
+    while answered < client.started.len:
+      let house = client.started[answered].tag.split(':')[0]
+      if house == "0" and sim.playerMapIndex(0) == 2:
+        answer("""{"action": "talk_to", "targetName": "Anton", "message": "hello there"}""")
+      elif house == "0":
+        answer("""{"action": "go_to_house", "targetName": "Anton"}""")
+      elif sim.playerMapIndex(0) == 2:
+        answer("""{"action": "say", "message": "ok"}""")
+      else:
+        answer("""{"action": "wait"}""")
   var ticks = 0
   var chatsSeen: seq[string]
   proc runTicks(untilDone: proc(): bool, limit: int) =
@@ -605,14 +948,7 @@ block:
     while steps < limit and not untilDone():
       now += 0.05
       frame = brains.advance(observations(), now)
-      while answered < client.started.len:
-        let house = client.started[answered].tag.split(':')[0]
-        if house == "0" and sim.playerMapIndex(0) == 2:
-          answer("""{"action": "say_to_person", "targetName": "Anton", "message": "hello there"}""")
-        elif house == "0":
-          answer("""{"action": "go_to_party", "houseIndex": 2, "commitParty": true}""")
-        else:
-          answer("""{"action": "stay_inside"}""")
+      answerPending()
       if frame.paused:
         inc steps
         continue
@@ -625,13 +961,59 @@ block:
       sim.step(inputs)
       inc ticks
       inc steps
-  runTicks(proc(): bool = sim.playerMapIndex(0) == 2, 2400)
+  runTicks(proc(): bool = sim.playerMapIndex(0) == 2, 8000)
   doAssert sim.playerMapIndex(0) == 2,
     "alice should walk out of her house and into Anton's"
   doAssert sim.playerMapIndex(1) == 2, "bob stays home"
+  runTicks(proc(): bool = "hello there" in chatsSeen, 4000)
+  doAssert "hello there" in chatsSeen, "alice greets Anton once next to him"
+  doAssert "hello there" in brains.villagers[0].saidToday
+  doAssert "Anton" in brains.villagers[0].greetedToday
+  let beforeHello = chatsSeen.count("hello there")
+  runTicks(proc(): bool = false, 120)
+  doAssert chatsSeen.count("hello there") == beforeHello,
+    "the same line is never said twice a day"
+  var history: seq[string]
+  for line in brains.villagers[0].history:
+    history.add(line.content)
+  doAssert "(Day 1 begins.)" in history
+  doAssert "(You see Anton for the first time today.)" in history
+  doAssert history.anyIt("hello there" in it and it.startsWith("{")),
+    "own chat lives in the JSON message field"
+  doAssert not history.anyIt("Where:" in it),
+    "state reports are live-only, not kept in history"
+  doAssert not history.anyIt(it == "hello there"),
+    "spoken lines are not a second assistant turn"
+  doAssert not history.anyIt("walkMinutesToHouse" in it),
+    "the state report is only the changing facts"
+  doAssert history.anyIt(it.startsWith("{\"action\"")),
+    "the raw model reply is an assistant turn"
+  let logged = brains.villagers[0].logEntries
+  doAssert logged.len >= history.len + 1, "every turn is logged, plus the prompt"
+  doAssert parseJson(logged[0])["role"].getStr() == "system"
+  doAssert parseJson(logged[0])["gnome"].getStr() == "Ivan"
+  for i, entry in logged:
+    let node = parseJson(entry)
+    doAssert node["game"].getInt() == 1 and node["sequence"].getInt() == i,
+      "log records carry the game and a dense sequence"
+    let role = node["role"].getStr()
+    doAssert role == "system" or role == "user" or role == "assistant",
+      "the player log is only the conversation"
+  var turns = 0
+  for entry in logged:
+    let node = parseJson(entry)
+    if node["index"].getInt() >= 0:
+      doAssert node["text"].getStr() == history[node["index"].getInt()],
+        "log entries mirror the history exactly"
+      inc turns
+  doAssert turns == history.len, "the log holds the whole history"
+  let prefix = history
+  runTicks(proc(): bool = false, 60)
+  doAssert brains.villagers[0].history.len >= prefix.len
+  for i, content in prefix:
+    doAssert brains.villagers[0].history[i].content == content,
+      "the history is never rewritten"
   block:
-    # Curfew: run the clock to 9pm with alice still at Anton's. She loses
-    # 3 points, bob at home loses nothing, and alice's transcript says so.
     var ended = 0
     while not sim.scoreScreenActive() and ended < 5000:
       sim.step(newSeq[InputState](2))
@@ -649,221 +1031,6 @@ block:
     doAssert curfewLines == 1, "alice hears about the penalty once"
     for line in brains.villagers[1].history:
       doAssert not line.content.startsWith("(Curfew:"), "bob hears nothing"
-  runTicks(proc(): bool = chatsSeen.len > 0, 600)
-  doAssert chatsSeen == @["hello there"], "alice greets Anton once next to him"
-  doAssert "hello there" in brains.villagers[0].saidToday
-  doAssert "Anton" in brains.villagers[0].greetedToday
-  let before = chatsSeen.len
-  runTicks(proc(): bool = false, 120)
-  doAssert chatsSeen.len == before, "the same line is never said twice a day"
-  var history: seq[string]
-  for line in brains.villagers[0].history:
-    history.add(line.content)
-  doAssert "(Day 1 begins.)" in history
-  doAssert "(You see Anton for the first time today.)" in history
-  doAssert history.anyIt("hello there" in it and it.startsWith("{")),
-    "own chat lives in the JSON message field"
-  doAssert not history.anyIt("until dinner" in it),
-    "state reports are live-only, not kept in history"
-  doAssert not history.anyIt(it == "hello there"),
-    "spoken lines are not a second assistant turn"
-  doAssert not history.anyIt("walkMinutesToHouse" in it),
-    "the state report is only the changing facts"
-  doAssert history.anyIt(it.startsWith("{\"action\"")),
-    "the raw model reply is an assistant turn"
-  let logged = brains.villagers[0].logEntries
-  doAssert logged.len >= history.len + 1, "every turn is logged, plus the prompt"
-  doAssert parseJson(logged[0])["role"].getStr() == "system"
-  doAssert parseJson(logged[0])["gnome"].getStr() == "Ivan"
-  for i, entry in logged:
-    let node = parseJson(entry)
-    doAssert node["game"].getInt() == 1 and node["sequence"].getInt() == i,
-      "log records carry the game and a dense sequence"
-  var turns = 0
-  for entry in logged:
-    let node = parseJson(entry)
-    if node["index"].getInt() >= 0:
-      doAssert node["text"].getStr() == history[node["index"].getInt()],
-        "log entries mirror the history exactly"
-      inc turns
-  doAssert turns == history.len, "the log holds the whole history"
-  # Append-only: what was sent stays sent.
-  let prefix = history
-  runTicks(proc(): bool = false, 60)
-  doAssert brains.villagers[0].history.len >= prefix.len
-  for i, content in prefix:
-    doAssert brains.villagers[0].history[i].content == content,
-      "the history is never rewritten"
-
-echo "Testing the implicit door promise"
-block:
-  var sim = initSimServer(99)
-  doAssert sim.addPlayer("carol", 2) == 0
-  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
-  let villager = newVillager(2, soul, sim.worldLayoutFor().gardens.len)
-  let navigation = sim.navigationFor()
-  let layout = sim.worldLayoutFor()
-  var observation = sim.observe(0)
-  # Waiting at Anton's door (house 2) with no promise, at 5:30pm.
-  villager.applyDecision(observation, layout,
-    Decision(valid: true, action: StandAtHouseGarden, houseIndex: 1,
-      untilMinutes: -1), fromModel = true)
-  observation.minutes = 17 * 60 + 30
-  observation.scene = Outdoors
-  observation.currentHouse = -1
-  let due = villager.dueCommitment(observation, navigation, layout)
-  doAssert due.valid and due.action == GoToParty and due.houseIndex == 1,
-    "a gnome at a door when it is time to go in goes in there"
-  doAssert villager.committedPartyHouse == 1, "and that becomes the promise"
-  doAssert villager.decisionHouse(Decision(valid: true, action: GoToParty,
-    houseIndex: 0, targetName: "Maxim")) == 4,
-    "a named host beats a misremembered house number"
-  doAssert villager.decisionHouse(Decision(valid: true, action: SayToPerson,
-    houseIndex: 0, targetName: "Maxim")) == 0,
-    "an invitation keeps the house it names"
-  # A host that says "my house" has promised to be home for dinner.
-  let host = newVillager(4, soul, layout.gardens.len)
-  host.applyDecision(observation, layout,
-    Decision(valid: true, action: SayToPerson, targetName: "Anton",
-      houseIndex: UnknownHouse, untilMinutes: -1,
-      message: "Dinner at my house at 6, I have lettuce!"), fromModel = true)
-  doAssert host.committedPartyHouse < 0, "an invitation is not yet a promise"
-  doAssert host.invitedToday, "but it is remembered"
-  var late = observation
-  late.minutes = 17 * 60 + 30
-  late.scene = Outdoors
-  late.currentHouse = -1
-  let hostDue = host.dueCommitment(late, navigation, layout)
-  doAssert hostDue.valid and hostDue.action == GoHome,
-    "at departure time a host that invited and promised nowhere else goes home"
-  # With a thin pantry and an invitation heard, visiting beats hosting
-  # alone; a full pantry hosts. Fresh villagers, since a due choice is
-  # kept as the promise from then on.
-  let thinHost = newVillager(4, soul, layout.gardens.len)
-  thinHost.invitedToday = true
-  thinHost.lastInviterHouse = 6
-  late.inventoryTotal = 3
-  let thin = thinHost.dueCommitment(late, navigation, layout)
-  doAssert thin.valid and thin.action == GoToParty and thin.houseIndex == 6,
-    "a thin pantry goes to the gnome that invited it"
-  let fullHost = newVillager(4, soul, layout.gardens.len)
-  fullHost.invitedToday = true
-  fullHost.lastInviterHouse = 6
-  late.inventoryTotal = HostPantryMinimum
-  doAssert fullHost.dueCommitment(late, navigation, layout).action == GoHome,
-    "a full pantry hosts"
-  let quiet = newVillager(4, soul, layout.gardens.len)
-  quiet.lastInviterHouse = 6
-  late.inventoryTotal = 9
-  doAssert quiet.dueCommitment(late, navigation, layout).houseIndex == 6,
-    "a gnome that never invited anyone visits the one who did"
-  let visitorHost = newVillager(4, soul, layout.gardens.len)
-  visitorHost.invitedToday = true
-  var morningObs = observation
-  morningObs.minutes = DayStartMinutes
-  visitorHost.applyDecision(morningObs, layout,
-    Decision(valid: true, action: GoToParty, houseIndex: 1, commitParty: true,
-      untilMinutes: -1), fromModel = true)
-  doAssert visitorHost.dueCommitment(late, navigation, layout).houseIndex == 1,
-    "an explicit promise elsewhere still wins"
-  # 4pm: start for dinner even when the walk is short, and lock the table
-  # so a later reply cannot send them to another house.
-  var four = late
-  four.minutes = DinnerDepartMinutes
-  let earlyHost = newVillager(4, soul, layout.gardens.len)
-  earlyHost.invitedToday = true
-  earlyHost.modelUnavailable = false
-  earlyHost.applyDecision(four, layout,
-    Decision(valid: true, action: KeepGatheringPlants, untilMinutes: -1),
-    fromModel = true)
-  doAssert earlyHost.dueCommitment(four, navigation, layout).action ==
-    GoHome, "at 4pm a host that invited starts home even with a short walk"
-  earlyHost.keepPromise(four, navigation, layout)
-  doAssert earlyHost.decision.action == GoHome,
-    "the 4pm promise is kept while the model is still answering"
-  earlyHost.applyDecision(four, layout,
-    Decision(valid: true, action: GoToParty, houseIndex: 1, commitParty: true,
-      untilMinutes: -1), fromModel = true)
-  doAssert earlyHost.committedPartyHouse == 4,
-    "after 4pm a new commit cannot switch tables"
-  var three = four
-  three.minutes = 15 * 60
-  let morningHost = newVillager(2, soul, layout.gardens.len)
-  morningHost.invitedToday = true
-  doAssert not morningHost.dueCommitment(three, navigation, layout).valid,
-    "a short walk is not due before 4pm"
-  # Dinner over: the promise is spent and stay_inside outdoors means home.
-  var after = late
-  after.minutes = 19 * 60
-  after.dinnerDone = true
-  host.maybeRecordDinner(after)
-  doAssert host.committedPartyHouse < 0, "dinner clears the party promise"
-  # Evening: a stay_inside at the host's house no longer shields a guest
-  # from the curfew promise; at home it does.
-  let lingerer = newVillager(5, soul, layout.gardens.len)
-  var evening = after
-  evening.minutes = 20 * 60 + 30
-  evening.scene = Indoors
-  evening.currentHouse = 1
-  lingerer.applyDecision(evening, layout,
-    Decision(valid: true, action: StayInside, houseIndex: UnknownHouse,
-      untilMinutes: -1), fromModel = true)
-  lingerer.modelUnavailable = true
-  lingerer.keepPromise(evening, navigation, layout)
-  doAssert lingerer.decision.action == GoHome,
-    "a guest lingering after dinner is sent home when the model cannot answer"
-  let homebody = newVillager(5, soul, layout.gardens.len)
-  evening.currentHouse = 5
-  homebody.applyDecision(evening, layout,
-    Decision(valid: true, action: StayInside, houseIndex: UnknownHouse,
-      untilMinutes: -1), fromModel = true)
-  homebody.modelUnavailable = true
-  homebody.keepPromise(evening, navigation, layout)
-  doAssert homebody.decision.action == StayInside, "staying home stands"
-  # stay_inside answered while outside after dinner heads home, not to
-  # the party house.
-  let wanderer = newVillager(5, soul, layout.gardens.len)
-  wanderer.committedPartyHouse = 8
-  var outsideLate = evening
-  outsideLate.scene = Outdoors
-  outsideLate.currentHouse = -1
-  outsideLate.dinnerDone = true
-  wanderer.applyDecision(outsideLate, layout,
-    Decision(valid: true, action: StayInside, houseIndex: UnknownHouse,
-      untilMinutes: -1), fromModel = true)
-  discard wanderer.villagerTick(outsideLate, navigation, layout)
-  doAssert wanderer.goal.kind == EnterHouse and wanderer.goal.houseIndex == 5,
-    "after dinner stay_inside from outside walks home"
-  let guest = newVillager(5, soul, layout.gardens.len)
-  guest.applyDecision(observation, layout,
-    Decision(valid: true, action: SayToPerson, targetName: "Anton",
-      houseIndex: UnknownHouse, untilMinutes: -1,
-      message: "See you at your table at 6!"), fromModel = true)
-  doAssert guest.committedPartyHouse < 0, "talk about their table promises nothing"
-  # Curfew promise: after dinner, away from home, late enough -> go home.
-  villager.applyDecision(observation, layout,
-    Decision(valid: true, action: StayInside, houseIndex: UnknownHouse,
-      untilMinutes: -1), fromModel = true)
-  observation.minutes = 20 * 60 + 30
-  observation.scene = Indoors
-  observation.currentHouse = 1
-  let night = villager.dueCommitment(observation, navigation, layout)
-  doAssert night.valid and night.action == GoHome,
-    "a guest still at the host's house is sent home before 9pm"
-  observation.currentHouse = 2
-  doAssert not villager.dueCommitment(observation, navigation, layout).valid,
-    "already home: nothing to do"
-  observation.scene = Outdoors
-  observation.currentHouse = -1
-  villager.leaveTimeNoted = false
-  villager.maybeNoteLeaveTime(observation, navigation, layout)
-  doAssert villager.interruptRequested, "the night departure note interrupts"
-  villager.interruptRequested = false
-  villager.leaveTimeNoted = false
-  observation.scene = Indoors
-  observation.currentHouse = 1
-  villager.maybeNoteLeaveTime(observation, navigation, layout)
-  doAssert villager.interruptRequested, "and it reaches a guest still indoors"
 
 echo "Testing llm lifecycle logs"
 block:
@@ -876,8 +1043,9 @@ block:
   let now = 1000.0
   discard brains.advance({0: sim.observe(0)}.toTable, now)
   let villager = brains.villagers[0]
+  doAssert villager.gameLog == brains.gameLog, "seats share one game log"
   var kinds: seq[string]
-  for entry in villager.logEntries:
+  for entry in villager.gameLog.entries:
     let node = parseJson(entry)
     doAssert node.hasKey("day") and node.hasKey("minutes")
     doAssert node.hasKey("now")
@@ -889,8 +1057,9 @@ block:
         doAssert "llm request" in node["text"].getStr()
         doAssert node["now"].getFloat() == now
   doAssert "request" in kinds, "starting a call is logged"
+  doAssert "turn" in kinds, "the first LLM turn is stamped"
   var sawClock = false
-  for entry in villager.logEntries:
+  for entry in villager.gameLog.entries:
     let node = parseJson(entry)
     if node["role"].getStr() == "clock":
       sawClock = true
@@ -904,50 +1073,24 @@ block:
   )]
   villager.scanSeenGnomes(observation)
   var sawSighting = false
-  for entry in villager.logEntries:
-    let node = parseJson(entry)
-    if node["role"].getStr() == "llm" and
-        node["kind"].getStr() == "interrupt":
+  for line in villager.history:
+    if "You see Anton" in line.content:
       sawSighting = true
-      doAssert "sighting" in node["text"].getStr()
-      doAssert "Anton" in node["text"].getStr()
-  doAssert sawSighting, "a first sighting while waiting is logged"
+  doAssert sawSighting, "a first sighting is recorded"
   client.scriptReply(BedrockReply(
     tag: client.started[0].tag,
     statusCode: 200,
-    text: """{"action": "stay_inside"}"""
+    text: """{"action": "wait"}"""
   ))
   discard brains.advance({0: sim.observe(0)}.toTable, now + 1.0)
   var sawReply = false
-  for entry in villager.logEntries:
+  for entry in villager.gameLog.entries:
     let node = parseJson(entry)
     if node["role"].getStr() == "llm" and node["kind"].getStr() == "reply":
       sawReply = true
       doAssert "outcome=usable" in node["text"].getStr()
   doAssert sawReply, "the reply is logged"
-  villager.requestInFlight = true
-  villager.decisionStartedTick = 0
-  observation = sim.observe(0)
-  observation.tick = DecisionRetryTicks + 10
-  observation.inventoryTotal = 9
-  villager.requestFoodBand = 0
-  villager.decisionFoodBand = 0
-  villager.maybeLogHeldInterrupt(observation, sim.worldLayoutFor())
-  var sawFood = false
-  for entry in villager.logEntries:
-    let node = parseJson(entry)
-    if node["role"].getStr() == "llm" and
-        "reason=food" in node["text"].getStr():
-      sawFood = true
-  doAssert sawFood, "a food-band interrupt while waiting is logged"
-  villager.maybeLogHeldInterrupt(observation, sim.worldLayoutFor())
-  var foodLogs = 0
-  for entry in villager.logEntries:
-    let node = parseJson(entry)
-    if node["role"].getStr() == "llm" and
-        "reason=food" in node["text"].getStr():
-      inc foodLogs
-  doAssert foodLogs == 1, "a sticky interrupt is logged once"
+  doAssert villager.turnReady
 
 echo "Testing veggies picked log"
 block:
@@ -962,15 +1105,15 @@ block:
   villager.maybeRecordVeggies(observation)
   doAssert villager.veggiesLogged
   var found = false
-  for entry in villager.logEntries:
+  for entry in villager.gameLog.entries:
     let node = parseJson(entry)
     if node["role"].getStr() == "veggies":
       found = true
       doAssert "veggies" in node["text"].getStr()
   doAssert found, "empty gardens are logged once"
-  let before = villager.logEntries.len
+  let before = villager.gameLog.entries.len
   villager.maybeRecordVeggies(observation)
-  doAssert villager.logEntries.len == before, "the empty log is once a day"
+  doAssert villager.gameLog.entries.len == before, "the empty log is once a day"
 
 echo "Testing house enter and exit logs"
 block:
@@ -994,7 +1137,7 @@ block:
   villager.maybeRecordHouse(observation)
   var enters, exits: int
   var sawOther = false
-  for entry in villager.logEntries:
+  for entry in villager.gameLog.entries:
     let node = parseJson(entry)
     if node["role"].getStr() != "house":
       continue
@@ -1007,128 +1150,11 @@ block:
   doAssert enters == 2 and exits == 1
   doAssert sawOther, "a visit to another house is logged"
 
-echo "Testing dummy hour interrupts"
-block:
-  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
-  var villager = newVillager(0, soul, 1)
-  villager.now = 1000.0
-  var observation = Observation(minutes: DayStartMinutes)
-  villager.maybeRecordClock(observation)
-  doAssert not villager.interruptRequested, "9am is the morning call"
-  observation.minutes = 10 * 60
-  villager.maybeRecordClock(observation)
-  doAssert villager.interruptRequested, "10am requests a call"
-  var hourLogs = 0
-  for entry in villager.logEntries:
-    let node = parseJson(entry)
-    if node{"kind"}.getStr() == "interrupt" and
-        "reason=hour" in node{"text"}.getStr():
-      inc hourLogs
-  doAssert hourLogs == 1, "10am logs an interrupt even when idle"
-  villager.interruptRequested = false
-  observation.minutes = 20 * 60
-  villager.maybeRecordClock(observation)
-  doAssert villager.interruptRequested, "8pm requests a call"
-  villager.interruptRequested = false
-  observation.minutes = DayEndMinutes
-  villager.maybeRecordClock(observation)
-  doAssert not villager.interruptRequested, "9pm is sleep, not a dummy"
-
-echo "Testing in-flight interrupts share one follow-up"
-block:
-  var sim = initSimServer(7)
-  doAssert sim.addPlayer("alice", 0) == 0
-  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
-  let client = newScriptedBedrockClient()
-  let brains = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, 1)
-  brains.attachSoul(0, soul)
-  proc observations(): Table[int, Observation] =
-    {0: sim.observe(0)}.toTable
-  var now = 5000.0
-  discard brains.advance(observations(), now)
-  doAssert client.started.len == 1
-  let villager = brains.villagers[0]
-  var observation = sim.observe(0)
-  observation.visiblePlayers = @[VisiblePlayer(
-    name: "Anton", houseIndex: 1, foot: Point(x: 10, y: 10),
-    distanceSquared: 100, says: "hi"
-  )]
-  villager.scanSeenGnomes(observation)
-  villager.requestChatSignature = ""
-  villager.requestFoodBand = 0
-  observation.inventoryTotal = 9
-  villager.maybeLogHeldInterrupt(observation, sim.worldLayoutFor())
-  observation.minutes = 10 * 60
-  villager.maybeRecordClock(observation)
-  doAssert villager.interruptRequested
-  client.scriptReply(BedrockReply(
-    tag: client.started[0].tag, statusCode: 200,
-    text: """{"action": "stay_inside"}"""
-  ))
-  now += 0.1
-  discard brains.advance(observations(), now)
-  doAssert client.started.len == 1, "the follow-up waits for min spacing"
-  doAssert villager.interruptRequested, "the reply keeps the pending flag"
-  now += brains.budget.villagerMinSeconds + 0.05
-  discard brains.advance(observations(), now)
-  doAssert client.started.len == 2,
-    "three in-flight interrupts start one follow-up"
-  client.scriptReply(BedrockReply(
-    tag: client.started[1].tag, statusCode: 200,
-    text: """{"action": "stay_inside"}"""
-  ))
-  now += 0.1
-  discard brains.advance(observations(), now)
-  now += brains.budget.villagerMinSeconds + 0.05
-  discard brains.advance(observations(), now)
-  doAssert client.started.len == 2, "no extra call without a new interrupt"
-
-echo "Testing parse failures retry after backoff"
-block:
-  var sim = initSimServer(7)
-  doAssert sim.addPlayer("alice", 0) == 0
-  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
-  let client = newScriptedBedrockClient()
-  let brains = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, 1)
-  brains.attachSoul(0, soul)
-  proc observations(): Table[int, Observation] =
-    {0: sim.observe(0)}.toTable
-  var now = 4000.0
-  discard brains.advance(observations(), now)
-  doAssert client.started.len == 1
-  client.scriptReply(BedrockReply(
-    tag: client.started[0].tag, statusCode: 200,
-    text: """{"action": "stay_inside"}"""
-  ))
-  now += 0.1
-  discard brains.advance(observations(), now)
-  let villager = brains.villagers[0]
-  doAssert villager.hasDecision and villager.failures == 0
-  for _ in 0 ..< DecisionRetryTicks + 2:
-    sim.step(@[InputState()])
-    now += 0.05
-    discard brains.advance(observations(), now)
-  doAssert client.started.len == 1, "stay_inside does not re-ask"
-  villager.interruptRequested = true
-  now += brains.budget.villagerMinSeconds + 0.05
-  discard brains.advance(observations(), now)
-  doAssert client.started.len == 2, "an interrupt starts a second call"
-  client.scriptReply(BedrockReply(
-    tag: client.started[1].tag, statusCode: 200, text: "not json"
-  ))
-  now += 0.1
-  discard brains.advance(observations(), now)
-  doAssert villager.failures == 1
-  doAssert villager.retryPending
-  doAssert villager.hasDecision, "the last usable action stays"
-  doAssert client.started.len == 2, "backoff has not elapsed"
-  now = villager.retryAt + 0.01
-  discard brains.advance(observations(), now)
-  doAssert client.started.len == 3,
-    "a parse failure retries after backoff even with a live action"
-
 echo "Testing the llm call chart"
 block:
+  doAssert 45.0.formatWallSpan() == "45s"
+  doAssert 180.0.formatWallSpan() == "3 min"
+  doAssert 610.0.formatWallSpan() == "10 min 10s"
   let text = """
 {"game":1,"sequence":0,"seat":0,"gnome":"Ivan","index":-1,"role":"clock","kind":"clock","day":1,"minutes":540,"tick":0,"now":1000.0,"text":"clock day=1 minutes=540 now=1000.000 clock=9:00am"}
 {"game":1,"sequence":1,"seat":0,"gnome":"Ivan","index":-1,"role":"clock","kind":"clock","day":1,"minutes":600,"tick":60,"now":1015.0,"text":"clock day=1 minutes=600 now=1015.000 clock=10:00am"}
@@ -1143,7 +1169,7 @@ block:
 Yura: llm request day=1 minutes=555 tick=20 now=1004.000 clock=9:15am tag=2:1 (9:15am)
 Yura: llm interrupt day=1 minutes=600 tick=50 now=1016.000 clock=10:00am reason=sighting who=Ivan (10:00am)
 Yura: llm interrupt day=1 minutes=645 tick=90 now=1030.000 clock=10:45am reason=leave (10:45am)
-Yura: llm reply day=1 minutes=690 tick=140 now=1050.000 clock=11:30am tag=2:1 outcome=usable took=4.0s (11:30am)
+Yura: llm reply day=1 minutes=690 tick=140 now=1050.000 clock=11:30am tag=2:1 outcome=usable took=4.0s ignored=wait (11:30am)
 Dima: llm request day=1 minutes=570 tick=30 now=1008.000 clock=9:30am tag=7:1 (9:30am)
 Dima: llm reply day=1 minutes=750 tick=200 now=1065.000 clock=12:30pm tag=7:1 outcome=parse took=8.0s (12:30pm)
 Egor: llm interrupt day=1 minutes=720 tick=180 now=1060.000 clock=12:00pm reason=hour (12:00pm)
@@ -1196,6 +1222,7 @@ Egor: llm interrupt day=1 minutes=720 tick=180 now=1060.000 clock=12:00pm reason
   doAssert ivan.interrupts.len == 1 and ivan.interrupts[0].reason == "chat"
   doAssert yura.interrupts.len == 2
   doAssert not ivan.pending and ivan.outcome == "usable"
+  doAssert yura.outcome == "ignored"
   doAssert ivan.tokens == 100000, "reply in/cache/out tokens are summed"
   doAssert dima.outcome == "parse"
   doAssert dima.tokens == 0, "a reply without usage has no tokens"
@@ -1208,6 +1235,7 @@ Egor: llm interrupt day=1 minutes=720 tick=180 now=1060.000 clock=12:00pm reason
   let svg = calls.renderLlmChart(clocks, veggies, houses, ticks)
   doAssert "Day 1" in svg
   doAssert "Ivan" in svg and "Yura" in svg and "Dima" in svg
+  doAssert "9am" in svg
   doAssert "noon" in svg
   doAssert "10am" in svg
   doAssert "wakeup" in svg
@@ -1222,9 +1250,13 @@ Egor: llm interrupt day=1 minutes=720 tick=180 now=1060.000 clock=12:00pm reason
   doAssert "Egor interrupt hour" in svg
   doAssert "#f03b20" in svg, "held interrupts use tufte red"
   doAssert "#c8c8c0" in svg, "failed calls fill gray"
+  doAssert "stroke-dasharray=\"1 2\"" in svg,
+    "invalid replies use a dotted border"
   doAssert "<rect" in svg
   doAssert "y1=\"343" in svg, "10am sits 15s below 9am"
   doAssert "y1=\"793" in svg, "11am sits 30s below 10am"
+  doAssert "#b0b0a8" in svg, "hourly lines are faint gray"
+  doAssert "#e9ecef" notin svg, "the old paper-on-paper hour color is gone"
   let page = calls.renderLlmPage(clocks, veggies, houses, ticks)
   doAssert "<h1>Heartleaf LLM Calls</h1>" in page
   doAssert "Interrupts held" in page
@@ -1239,6 +1271,100 @@ Egor: llm interrupt day=1 minutes=720 tick=180 now=1060.000 clock=12:00pm reason
   doAssert "38.0" in page, "Ivan's one call lasted 38s"
   doAssert "52.0" in page, "Ivan was idle for the rest of the span"
   doAssert "real time" in page
+  doAssert "1 min 30s" in page, "the first chart fixture spans 90s"
+  doAssert "dotted" in page
+
+
+echo "Testing the leapfrog chart"
+block:
+  let text = """
+{"game":1,"sequence":0,"seat":0,"gnome":"Ivan","index":-1,"role":"clock","kind":"clock","day":1,"minutes":540,"tick":0,"now":1000.0,"text":"clock day=1 minutes=540 now=1000.000 clock=9:00am"}
+{"game":1,"sequence":1,"seat":0,"gnome":"Ivan","index":-1,"role":"veggies","kind":"veggies","day":1,"minutes":630,"tick":80,"now":1030.0,"text":"veggies day=1 minutes=630 now=1030.000 clock=10:30am"}
+Ivan: llm turn kind=llm index=0 now=1000.000 clock=9:00am
+Ivan: llm request day=1 minutes=540 tick=0 now=1001.000 clock=9:00am tag=0:1
+Ivan: llm reply day=1 minutes=540 tick=0 now=1002.000 clock=9:00am tag=0:1 outcome=usable
+Anton: llm turn kind=llm index=0 now=1000.000 clock=9:00am
+Ivan: llm turn kind=move index=1 now=1003.000 clock=9:00am
+Anton: llm turn kind=move index=1 now=1003.000 clock=9:00am
+Ivan: conversation enter id=1 members=Anton,Ivan turn=1 now=1003.000
+Anton: conversation enter id=1 members=Anton,Ivan turn=1 now=1003.000
+Ivan: llm turn kind=llm index=2 now=1009.000 clock=9:00am
+Anton: llm turn kind=llm index=2 now=1009.000 clock=9:00am
+Ivan: conversation exit id=1 turn=2 now=1009.000
+Anton: conversation exit id=1 turn=2 now=1009.000
+Ivan: llm request day=1 minutes=540 tick=0 now=1010.000 clock=9:00am tag=0:2
+Ivan: llm reply day=1 minutes=540 tick=0 now=1012.000 clock=9:00am tag=0:2 outcome=parse
+Ivan: llm request day=1 minutes=540 tick=0 now=1013.000 clock=9:00am tag=0:3
+Ivan: llm reply day=1 minutes=540 tick=0 now=1016.000 clock=9:00am tag=0:3 outcome=usable
+Ivan: llm turn kind=move index=3 now=1017.000 clock=9:00am
+Anton: llm turn kind=move index=3 now=1017.000 clock=9:00am
+"""
+  var events = text.parseLlmText("")
+  let turns = events.collectTurns(0)
+  let talks = events.collectTalks(0)
+  let calls = events.pairLlmCalls(0)
+  let clocks = events.collectClockMarks(0)
+  let veggies = events.collectVeggieMarks(0)
+  doAssert turns.len == 4, "llm and move rows both parse"
+  doAssert turns[0].kind == "llm" and turns[0].index == 0
+  doAssert turns[1].kind == "move" and turns[1].index == 1
+  doAssert talks.len == 2
+  doAssert calls.len == 3, "a retry is a second call, not a stacked cell"
+  var parseCalls, usableCalls: int
+  var parseEnd, retryStart: float
+  for call in calls:
+    if call.gnome != "Ivan":
+      continue
+    if call.outcome == "parse":
+      inc parseCalls
+      parseEnd = call.endNow
+    elif call.outcome == "usable":
+      inc usableCalls
+      if call.startNow > 1010:
+        retryStart = call.startNow
+  doAssert parseCalls == 1 and usableCalls == 2
+  doAssert retryStart >= parseEnd, "the retry starts after the failed call"
+  let svg = calls.renderLlmChart(
+    clocks, veggies, turns = turns, talks = talks
+  )
+  doAssert "#e8e8e4" in svg, "movement slices fill gray"
+  doAssert "#ffe8e6" in svg, "conversation fills light red"
+  doAssert "conversation" in svg
+  doAssert "0 llm" notin svg
+  doAssert "Day 1" in svg
+  doAssert "9am" in svg
+  doAssert "wakeup" in svg
+  doAssert "veggies picked" in svg
+  doAssert "parse" in svg
+  doAssert "#c8c8c0" in svg, "the failed retry fills gray"
+  doAssert "stroke-dasharray=\"1 2\"" in svg,
+    "a parse failure uses a dotted border"
+  let page = calls.renderLlmPage(
+    clocks, veggies, turns = turns, talks = talks
+  )
+  doAssert "leapfrog" in page
+  doAssert "light red" in page
+  doAssert "real time" in page
+  doAssert "retry" in page
+
+echo "Testing the chart prefers game.log"
+block:
+  let dir = getTempDir() / "heartleaf-chart-game-log"
+  createDir(dir)
+  writeFile(
+    dir / "game.log",
+    """{"game":1,"gnome":"Ivan","role":"llm","kind":"request","day":1,"minutes":540,"now":1.0,"text":"llm request"}""" &
+      "\n"
+  )
+  writeFile(
+    dir / "chatty_villager-Ivan.log",
+    """{"game":1,"gnome":"Ivan","role":"llm","kind":"reply","day":1,"minutes":540,"now":2.0,"text":"llm reply"}""" &
+      "\n"
+  )
+  let events = loadLlmEvents(@[dir])
+  doAssert events.len == 1, "player logs are skipped when game.log exists"
+  doAssert events[0].kind == LlmRequest
+  removeDir(dir)
 
 echo "Testing a mock-driven replay round trip"
 block:

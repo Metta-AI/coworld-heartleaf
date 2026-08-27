@@ -149,6 +149,17 @@ proc main() =
     "a restarted sink resumes from the file's last record"
   doAssert restarted.readyText() == "log-cursor game=2 sequence=0"
   doAssert LogSink(sequence: -1).readyText() == "log-ready"
+
+  echo "Testing a fresh sink replaces an old audit file"
+  var fresh = LogSink(name: "tester", dir: dir, sequence: -1, fresh: true)
+  fresh.record(frame(1, 0))
+  let replaced = readFile(dir / "tester-Ivan.log")
+  doAssert replaced.count("=== user #") == 1,
+    "a fresh play must not keep the previous game"
+  doAssert "line 0" in replaced
+  doAssert "line 4" notin replaced
+  doAssert fresh.readyText() == "log-cursor game=1 sequence=0"
+
   removeDir(dir)
   echo "Integration tests passed"
 

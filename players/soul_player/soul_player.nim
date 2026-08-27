@@ -33,8 +33,11 @@ type
     connectTimeoutSeconds: float
     once: bool
     logDir: string
-      ## Where the model log is also written as a readable file, one per
-      ## gnome, named <name>-<Gnome>.log.
+      ## Where the conversation log is also written as a readable file,
+      ## one per gnome, named <name>-<Gnome>.log.
+    freshLog: bool
+      ## Truncate the audit file and stream from sequence 0. Play uses
+      ## this so a new game is not spliced onto the previous one.
 
 proc queryEscape(text: string): string =
   ## Escapes one URL query value.
@@ -71,11 +74,14 @@ proc usage(): string =
                      build the url for a local game instead of --url
   --connect-timeout-seconds:N   give up connecting after N seconds (120)
   --once             exit right after the soul is accepted
-  --log-dir:DIR      also write the model log to DIR/<name>-<Gnome>.log
+  --log-dir:DIR      also write the conversation to DIR/<name>-<Gnome>.log
                      (env HEARTLEAF_LOG_DIR)
+  --fresh-log        replace that file instead of resuming after its last
+                     record. Use this for a new play so two games do not
+                     share one log.
 
-While connected the game streams the gnome's model log: one JSON line per
-frame with seat, gnome, index, role (system, user, assistant, note), and
+While connected the game streams the gnome's conversation: one JSON line
+per frame with seat, gnome, index, role (system, user, assistant), and
 text. Each line is printed to stdout as it arrives.
 """
 
@@ -109,6 +115,7 @@ proc parseOptions(): PlayerOptions =
         result.connectTimeoutSeconds = parseFloat(value)
       of "once": result.once = true
       of "log-dir": result.logDir = value
+      of "fresh-log": result.freshLog = true
       of "help", "h":
         echo usage()
         quit(0)
@@ -160,6 +167,8 @@ type
     path*: string
     game*: int
     sequence*: int
+    fresh*: bool
+      ## Open the audit file for write and do not send a resume cursor.
 
 proc readableEntry*(line: string): string =
   ## One log frame as a readable block for the audit file. The header
@@ -209,15 +218,22 @@ proc readyText*(sink: LogSink): string =
     "log-ready"
 
 proc openFile(sink: LogSink, gnome: string) =
-  ## Opens (or resumes) the audit file for this gnome.
+  ## Opens the audit file for this gnome. A fresh sink replaces the file
+  ## and starts from sequence 0; otherwise the last cursor is resumed.
   createDir(sink.dir)
   let stem = if sink.name.len > 0: sink.name else: "player"
   sink.path = sink.dir / (stem & (if gnome.len > 0: "-" & gnome else: "") & ".log")
-  sink.loadCursor(sink.path)
-  sink.file = open(sink.path, fmAppend)
-  echo "soul_player writing model log to ", sink.path,
-    (if sink.sequence >= 0: " (resuming after game " & $sink.game &
-      " seq " & $sink.sequence & ")" else: "")
+  if sink.fresh:
+    sink.game = 0
+    sink.sequence = -1
+    sink.file = open(sink.path, fmWrite)
+    echo "soul_player writing model log to ", sink.path
+  else:
+    sink.loadCursor(sink.path)
+    sink.file = open(sink.path, fmAppend)
+    echo "soul_player writing model log to ", sink.path,
+      (if sink.sequence >= 0: " (resuming after game " & $sink.game &
+        " seq " & $sink.sequence & ")" else: "")
 
 proc record*(sink: LogSink, line: string) =
   ## Prints one log frame and appends it to the audit file, skipping
@@ -270,7 +286,10 @@ proc run(options: PlayerOptions, soul: Soul) =
     else:
       options.playerUrl()
   let startedAt = epochTime()
-  let sink = LogSink(name: options.name, dir: options.logDir)
+  let sink = LogSink(
+    name: options.name, dir: options.logDir, sequence: -1,
+    fresh: options.freshLog
+  )
   var
     accepted = false
     disconnectedAt = 0.0

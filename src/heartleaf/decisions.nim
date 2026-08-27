@@ -17,27 +17,25 @@ type
 
   Action* = enum
     Invalid
-    KeepGatheringPlants
-    FindPerson
-    FindHouse
+    GatherPlants
+    TalkTo
+    Say
+    Bye
+    Follow
     GoHome
-    StandAtHouseGarden
-    StandNextToPerson
-    SayToPerson
-    GoToParty
-    StayInside
+    GoToHouse
+    GoToGarden
+    Wait
+    Wander
 
   Decision* = object
     valid*: bool
+    malformed*: bool
+      ## True when the reply is not a JSON object worth acting on.
     action*: Action
     targetName*: string
     houseIndex*: int
     message*: string
-    commitParty*: bool
-    ## Optional clock (day minutes) until which the action keeps going,
-    ## e.g. wait at the door until 5:15pm; -1 when the action just runs
-    ## to completion.
-    untilMinutes*: int
     reason*: string
     error*: string
 
@@ -104,46 +102,50 @@ proc actionName*(action: Action): string =
   case action
   of Invalid:
     "invalid"
-  of KeepGatheringPlants:
-    "keep_gathering_plants"
-  of FindPerson:
-    "find_person"
-  of FindHouse:
-    "find_house"
+  of GatherPlants:
+    "gather_plants"
+  of TalkTo:
+    "talk_to"
+  of Say:
+    "say"
+  of Bye:
+    "bye"
+  of Follow:
+    "follow"
   of GoHome:
     "go_home"
-  of StandAtHouseGarden:
-    "stand_at_house_garden"
-  of StandNextToPerson:
-    "stand_next_to_person"
-  of SayToPerson:
-    "say_to_person"
-  of GoToParty:
-    "go_to_party"
-  of StayInside:
-    "stay_inside"
+  of GoToHouse:
+    "go_to_house"
+  of GoToGarden:
+    "go_to_garden"
+  of Wait:
+    "wait"
+  of Wander:
+    "wander"
 
 proc parseAction*(text: string): Action =
   ## Parses one strict JSON action name.
   case text.strip().toLowerAscii()
-  of "keep_gathering_plants":
-    KeepGatheringPlants
-  of "find_person":
-    FindPerson
-  of "find_house":
-    FindHouse
+  of "gather_plants", "keep_gathering_plants":
+    GatherPlants
+  of "talk_to":
+    TalkTo
+  of "say":
+    Say
+  of "bye":
+    Bye
+  of "follow":
+    Follow
   of "go_home":
     GoHome
-  of "stand_at_house_garden":
-    StandAtHouseGarden
-  of "stand_next_to_person":
-    StandNextToPerson
-  of "say_to_person":
-    SayToPerson
-  of "go_to_party":
-    GoToParty
-  of "stay_inside", "stay", "stay_here", "wait_inside":
-    StayInside
+  of "go_to_house":
+    GoToHouse
+  of "go_to_garden":
+    GoToGarden
+  of "wait":
+    Wait
+  of "wander":
+    Wander
   else:
     Invalid
 
@@ -191,12 +193,6 @@ proc stringField(node: JsonNode, name: string): string =
     return ""
   node[name].getStr().strip()
 
-proc boolField(node: JsonNode, name: string): bool =
-  ## Reads one optional boolean field.
-  if not node.hasKey(name) or node[name].kind != JBool:
-    return false
-  node[name].getBool()
-
 proc houseField(node: JsonNode, name: string): int =
   ## Reads one optional one-based house index as a zero-based index.
   result = UnknownHouse
@@ -216,45 +212,6 @@ proc houseField(node: JsonNode, name: string): int =
   if value >= 1 and value <= HouseCount:
     result = value - 1
 
-proc parseUntilMinutes*(node: JsonNode): int =
-  ## Reads the optional untilTime field as day minutes: a clock string
-  ## like "5:15pm" or "17:15", or an integer of minutes after midnight.
-  ## Returns -1 when absent or unreadable.
-  result = -1
-  if not node.hasKey("untilTime"):
-    return
-  let value = node["untilTime"]
-  case value.kind
-  of JInt:
-    let minutes = value.getInt()
-    if minutes >= 0 and minutes < 24 * 60:
-      result = minutes
-  of JString:
-    let text = value.getStr().strip().toLowerAscii()
-    if text.len == 0:
-      return
-    let clock = text.parseClockMinutes()
-    if clock >= 0:
-      return clock
-    let parts = text.split(':')
-    if parts.len == 2:
-      try:
-        let hour = parseInt(parts[0].strip())
-        let minute = parseInt(parts[1].strip())
-        if hour in 0 .. 23 and minute in 0 .. 59:
-          result = hour * 60 + minute
-      except ValueError:
-        discard
-    else:
-      try:
-        let minutes = parseInt(text)
-        if minutes >= 0 and minutes < 24 * 60:
-          result = minutes
-      except ValueError:
-        discard
-  else:
-    discard
-
 proc parseDecision*(
   text: string,
   selfNames: openArray[string] = []
@@ -265,37 +222,45 @@ proc parseDecision*(
   result = Decision(
     valid: false,
     action: Invalid,
-    houseIndex: UnknownHouse,
-    untilMinutes: -1
+    houseIndex: UnknownHouse
   )
   let body = text.jsonText()
   if body.len == 0:
     result.error = "Decision did not contain a JSON object."
+    result.malformed = true
     return
   var node: JsonNode
   try:
     node = parseJson(body)
   except JsonParsingError as e:
     result.error = "Decision JSON could not parse: " & e.msg
+    result.malformed = true
     return
   if node.kind != JObject:
     result.error = "Decision JSON must be an object."
+    result.malformed = true
     return
-
   let action = node.stringField("action").parseAction()
   if action == Invalid:
     result.error = "Decision action is missing or unknown."
     return
-
   result.valid = true
   result.action = action
   result.targetName = node.stringField("targetName")
   result.houseIndex = node.houseField("houseIndex")
   result.message = node.stringField("message")
     .stripSelfPrefix(selfNames).cleanDecisionText()
-  result.commitParty = node.boolField("commitParty")
-  result.untilMinutes = node.parseUntilMinutes()
   result.reason = node.stringField("reason")
+  if result.houseIndex < 0 and result.targetName.len > 0:
+    result.houseIndex = result.targetName.houseIndexForPlayerName()
+
+proc waitDecision*(): Decision =
+  ## A silent stand-still when the model picked an illegal action.
+  Decision(
+    valid: true,
+    action: Wait,
+    houseIndex: UnknownHouse
+  )
 
 proc foodNamesIn*(text: string): seq[string] =
   ## Returns the food names in "Carrot x2, Beet" style text.

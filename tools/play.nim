@@ -5,7 +5,7 @@
 ## the game ends or on Ctrl-C.
 ##
 ##   nim r tools/play.nim [--port:8080] [--days:7] [--seed:N] [--mock]
-##                        [--log-dir:logs] [--no-browser] [--no-build]
+##                        [--log-dir:tmp/logs] [--no-browser] [--no-build]
 ##
 ## The game calls the models named in the souls, so Bedrock credentials
 ## must be in the environment (BEDROCK_KEY or AWS keys); --mock plays every
@@ -17,7 +17,7 @@ import std/[algorithm, browsers, json, os, osproc, parseopt, random, sequtils, s
 const
   DefaultPort = 8080
   DefaultDays = 7
-  DefaultLogDir = "logs"
+  DefaultLogDir = "tmp" / "logs"
   ServerExe = "out" / "heartleaf"
   PlayerExe = "out" / "soul_player"
   PlayerStartDelayMs = 300
@@ -108,9 +108,20 @@ proc waitForHealth(port: int): bool =
     sleep(100)
   false
 
+proc clearGnomeLogs(dir: string) =
+  ## Removes leftover gnome logs so a new play does not splice onto the
+  ## previous game.
+  if not dirExists(dir):
+    return
+  for kind, path in walkDir(dir):
+    if kind == pcFile and path.splitFile().ext == ".log":
+      removeFile(path)
+
 proc main() =
   let options = parseOptions()
   setCurrentDir(repoRoot())
+  createDir(options.logDir)
+  clearGnomeLogs(options.logDir)
   let souls = personaSouls()
   if souls.len == 0:
     echo "play: no players/*/soul.md found"
@@ -133,6 +144,8 @@ proc main() =
   }
   if options.seed >= 0:
     config["seed"] = %options.seed
+  config["logDir"] = %options.logDir
+  config["replayPath"] = %(options.logDir / "heartleaf.bitreplay")
   if options.mock:
     config["mockReply"] = %"""{"action": "keep_gathering_plants"}"""
 
@@ -161,14 +174,15 @@ proc main() =
       PlayerExe,
       args = [
         "--url:" & url, "--soul:" & soul.path, "--name:" & soul.name,
-        "--log-dir:" & options.logDir
+        "--log-dir:" & options.logDir, "--fresh-log"
       ],
       options = {poParentStreams}
     ))
     sleep(PlayerStartDelayMs)
 
   let viewer = "http://localhost:" & $options.port & "/client/global"
-  echo "play: watch at ", viewer, "; model logs in ", options.logDir, "/"
+  echo "play: watch at ", viewer, "; logs and replay in ",
+    options.logDir, "/"
   if options.browser:
     openDefaultBrowser(viewer)
 

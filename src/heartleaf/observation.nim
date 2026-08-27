@@ -46,6 +46,8 @@ type
       ## The marker is on screen and the garden still has food.
     gardensWithFood*: int
       ## Gardens in the village that still have food, not just on screen.
+    houseOnScreen*: array[HouseCount, bool]
+      ## Each house door rect is inside this gnome's viewport.
     dinner*: DinnerOutcome
     dinnerDone*: bool
     curfewMissed*: bool

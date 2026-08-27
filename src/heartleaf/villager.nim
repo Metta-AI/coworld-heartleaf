@@ -4,7 +4,7 @@
 ## simulation directly.
 
 import
-  std/[algorithm, json, sets, strutils, tables],
+  std/[algorithm, json, os, sets, strutils, tables],
   heartleaf/[common, protocol, decisions, observation, souls]
 
 const
@@ -38,6 +38,13 @@ type
       ## Where the followed gnome stood when a StandByPerson spot was
       ## chosen; the spot is kept until they move away from it.
 
+  GameLog* = ref object
+    entries*: seq[string]
+      ## Village-wide LLM and world stamps, one JSON line each.
+    path*: string
+    file: File
+    writing: bool
+
   Villager* = ref object
     houseIndex*: int
     name*: string
@@ -48,8 +55,10 @@ type
     ## also sends a live state report that is logged but not kept.
     history*: seq[ConversationMessage]
     logEntries*: seq[string]
-      ## History turns plus notes and live state reports, one JSON line
-      ## each, in order; streamed to the seat's player as it grows.
+      ## Conversation the model sees: system, user, and assistant
+      ## turns, one JSON line each, streamed to the seat's player.
+    gameLog*: GameLog
+      ## Shared village log for LLM lifecycle and world stamps.
     gameNumber*: int
       ## Which game of this process the villager belongs to; every log
       ## record carries it with its sequence so a collector can resume.
@@ -64,13 +73,6 @@ type
     seenToday*: HashSet[string]
     greetedToday*: HashSet[string]
     saidToday*: seq[string]
-    committedPartyHouse*: int
-    invitedToday*: bool
-      ## Said "come to my house" today: the fallback table when no promise
-      ## was made anywhere else.
-    lastInviterHouse*: int
-      ## House of the gnome most recently heard inviting people to its
-      ## own table today, -1 when nobody did.
     gardenChecked*: seq[bool]
     currentGarden*: int
     lastCarryText*: string
@@ -83,15 +85,24 @@ type
     insideHouse*: int
       ## 0-based house when last logged indoors, else UnknownHouse.
     curfewRecorded*: bool
-    leaveTimeNoted*: bool
-    leaveTimeNotedMinutes*: int
     interruptRequested*: bool
-      ## True when something happened that still needs a model call:
-      ## a sighting, a dummy hour, or a change while a reply was pending.
-      ## Several interrupts collapse into one follow-up call.
+      ## Unused leftover; leapfrog asks on a clock, not interrupts.
     ## The current decision and the world it was made against.
     decision*: Decision
     hasDecision*: bool
+    turnReady*: bool
+      ## True when this gnome has a usable action for the current LLM turn.
+    encounterId*: int
+      ## Shared conversation id, 0 when not talking.
+    askedWhileTalking*: bool
+      ## True when the in-flight request started inside a conversation,
+      ## so say/bye still count if the group dissolves before the reply.
+    wanderedDoors*: array[HouseCount, bool]
+    wanderHouse*: int
+    pendingSpeech*: string
+    pendingTalkName*: string
+    pendingTalkMessage*: string
+    followLastHouse*: int
     decisionChatSent*: bool
     decisionStartedTick*: int
     decisionFoodBand*: int
@@ -143,27 +154,50 @@ proc idleGoal*(scene: Scene): Goal =
   ## A goal that stands still.
   Goal(kind: StandStill, scene: scene, houseIndex: UnknownHouse, gardenIndex: -1)
 
+proc newGameLog*(): GameLog =
+  ## An in-memory game log, optionally later opened as a file.
+  GameLog()
+
+proc add*(log: GameLog, line: string) =
+  ## Appends one JSON line in memory and, when open, to the file.
+  log.entries.add(line)
+  if log.writing:
+    log.file.writeLine(line)
+    log.file.flushFile()
+
+proc startWriting*(log: GameLog, path: string) =
+  ## Starts writing this log to a file, replacing any previous file.
+  let dir = path.parentDir
+  if dir.len > 0:
+    createDir(dir)
+  log.path = path
+  log.file = open(path, fmWrite)
+  log.writing = true
+
 proc newVillager*(houseIndex: int, soul: Soul, gardenCount: int): Villager =
   ## A villager for one seat, ready for its first observation.
   result = Villager(
     houseIndex: houseIndex,
     name: houseIndex.playerNameForHouse(),
     soul: soul,
+    gameLog: newGameLog(),
+    dayNumber: 1,
     minutes: DayStartMinutes,
     lastClockHour: -1,
-    committedPartyHouse: UnknownHouse,
-    lastInviterHouse: UnknownHouse,
     gardenChecked: newSeq[bool](gardenCount),
     currentGarden: -1,
     dinnerHouse: UnknownHouse,
     insideHouse: UnknownHouse,
+    encounterId: 0,
+    wanderHouse: UnknownHouse,
+    followLastHouse: UnknownHouse,
     seenToday: initHashSet[string](),
     greetedToday: initHashSet[string](),
     decisionVisibleNames: initHashSet[string](),
     lastBubbles: initTable[string, string](),
     goal: idleGoal(Indoors)
   )
-  result.decision = Decision(houseIndex: UnknownHouse, untilMinutes: -1)
+  result.decision = Decision(houseIndex: UnknownHouse)
 
 proc log*(villager: Villager, text: string) =
   ## One activity log line, tagged with the gnome and the game clock.
@@ -173,21 +207,24 @@ proc selfNames*(villager: Villager): seq[string] =
   ## The names this villager goes by, for stripping self labels.
   @[villager.name]
 
+proc talking*(villager: Villager): bool =
+  ## True when this gnome is in a conversation.
+  villager.encounterId > 0
+
 ## History and log
 
-proc logEntry(
+proc stampLine(
   villager: Villager,
+  sequence: int,
   role: string,
   index: int,
   text: string,
   kind = ""
 ): string =
-  ## One JSON log line for the seat's player. game and sequence identify
-  ## the record; index is its place in the history (-1 for notes). LLM
-  ## lifecycle rows also carry kind, and every row stamps the game clock.
+  ## One JSON log line with the game clock stamped on it.
   var node = %*{
     "game": villager.gameNumber,
-    "sequence": villager.logEntries.len,
+    "sequence": sequence,
     "seat": villager.houseIndex,
     "gnome": villager.name,
     "index": index,
@@ -202,8 +239,35 @@ proc logEntry(
     node["kind"] = %kind
   $node
 
+proc logEntry(
+  villager: Villager,
+  role: string,
+  index: int,
+  text: string,
+  kind = ""
+): string =
+  ## One JSON conversation line for the seat's player. game and sequence
+  ## identify the record; index is its place in the history (-1 for a
+  ## live report). Every row stamps the game clock.
+  villager.stampLine(
+    villager.logEntries.len, role, index, text, kind
+  )
+
+proc addGameLog(
+  villager: Villager,
+  role, text: string,
+  kind = ""
+) =
+  ## Appends one stamp to the village game log.
+  if villager.gameLog.isNil:
+    villager.gameLog = newGameLog()
+  let line = villager.stampLine(
+    villager.gameLog.entries.len, role, -1, text, kind
+  )
+  villager.gameLog.add(line)
+
 proc logLlm*(villager: Villager, kind, extra: string) =
-  ## Records one LLM lifecycle event on stdout and in the player log.
+  ## Records one LLM lifecycle event on stdout and in the game log.
   var text = "llm " & kind &
     " day=" & $villager.dayNumber &
     " minutes=" & $villager.minutes &
@@ -213,16 +277,25 @@ proc logLlm*(villager: Villager, kind, extra: string) =
   if extra.len > 0:
     text.add(" " & extra)
   villager.log(text)
-  villager.logEntries.add(villager.logEntry("llm", -1, text, kind))
+  villager.addGameLog("llm", text, kind)
 
-proc noteInterrupt*(villager: Villager, extra: string) =
-  ## Flags one follow-up call and logs the interrupt. The same extra
-  ## while waiting is recorded once; a new extra still shares that call.
-  villager.interruptRequested = true
-  if extra == villager.lastHeldInterrupt:
-    return
-  villager.lastHeldInterrupt = extra
-  villager.logLlm("interrupt", extra)
+proc logTurn*(villager: Villager, kind: string, index: int) =
+  ## Records one leapfrog phase for the chart. Log only, not sent to
+  ## the model.
+  villager.logLlm("turn", "kind=" & kind & " index=" & $index)
+
+proc logConversation*(villager: Villager, kind, extra: string) =
+  ## Records one conversation enter or exit for the chart.
+  var text = "conversation " & kind &
+    " day=" & $villager.dayNumber &
+    " minutes=" & $villager.minutes &
+    " tick=" & $villager.tick &
+    " now=" & formatFloat(villager.now, ffDecimal, 3) &
+    " clock=" & villager.minutes.clockName()
+  if extra.len > 0:
+    text.add(" " & extra)
+  villager.log(text)
+  villager.addGameLog("conversation", text, "convo-" & kind)
 
 proc logClock*(villager: Villager) =
   ## Records one game-hour tick with the wall clock, for the chart axis.
@@ -231,7 +304,7 @@ proc logClock*(villager: Villager) =
     " tick=" & $villager.tick &
     " now=" & formatFloat(villager.now, ffDecimal, 3) &
     " clock=" & villager.minutes.clockName()
-  villager.logEntries.add(villager.logEntry("clock", -1, text, "clock"))
+  villager.addGameLog("clock", text, "clock")
 
 proc logVeggies*(villager: Villager) =
   ## Records the moment the village gardens are empty.
@@ -241,9 +314,7 @@ proc logVeggies*(villager: Villager) =
     " now=" & formatFloat(villager.now, ffDecimal, 3) &
     " clock=" & villager.minutes.clockName()
   villager.log("veggies picked")
-  villager.logEntries.add(villager.logEntry(
-    "veggies", -1, text, "veggies"
-  ))
+  villager.addGameLog("veggies", text, "veggies")
 
 proc maybeRecordVeggies*(
   villager: Villager,
@@ -270,7 +341,7 @@ proc logHouse*(villager: Villager, kind: string, houseIndex: int) =
     " house=" & $(houseIndex + 1) &
     " own=" & (if own: "yes" else: "no")
   villager.log(text)
-  villager.logEntries.add(villager.logEntry("house", -1, text, kind))
+  villager.addGameLog("house", text, kind)
 
 proc maybeRecordHouse*(
   villager: Villager,
@@ -297,9 +368,8 @@ proc appendHistory*(villager: Villager, role, text: string) =
   villager.logEntries.add(villager.logEntry(role, villager.history.high, text))
 
 proc noteLog*(villager: Villager, text: string) =
-  ## Logs something the player should know that the model never sees:
-  ## errors, retries, the prompt itself.
-  villager.logEntries.add(villager.logEntry("note", -1, text))
+  ## Logs something the model never sees: errors, retries, shrinks.
+  villager.addGameLog("note", text)
 
 proc logLiveReport*(villager: Villager, text: string) =
   ## Logs the live state report sent this call. It is not a history
@@ -315,6 +385,15 @@ proc recordHeardLine*(villager: Villager, speaker, text: string) =
   ## One chat line heard from another gnome.
   villager.appendHistory("user", speaker & ": " & text)
 
+proc recordTalkLine*(villager: Villager, speaker, message: string) =
+  ## One spoken encounter line as its own user turn, once.
+  if message.len == 0:
+    return
+  if speaker == villager.name:
+    villager.appendHistory("user", "You: " & message)
+  else:
+    villager.appendHistory("user", speaker & ": " & message)
+
 proc recordEvent*(villager: Villager, text: string) =
   ## One world event the villager noticed, as a parenthesized user line.
   villager.appendHistory("user", "(" & text & ")")
@@ -325,8 +404,8 @@ proc dayBeginsLine(day: int): string =
 
 proc shrinkHistory*(villager: Villager) =
   ## Emergency only: the model rejected the prompt as too long, so the
-  ## oldest day is dropped. The log keeps a note so a watcher knows the
-  ## prefix the model sees no longer starts at the beginning.
+  ## oldest day is dropped. The game log keeps a note so a watcher knows
+  ## the prefix the model sees no longer starts at the beginning.
   var cut = -1
   for i in 1 ..< villager.history.len:
     let content = villager.history[i].content
@@ -403,10 +482,17 @@ proc startNewDay*(villager: Villager, dayNumber: int) =
     villager.gardenChecked[i] = false
   villager.currentGarden = -1
   villager.hasDecision = false
+  villager.turnReady = false
   villager.decisionChatSent = false
-  villager.committedPartyHouse = UnknownHouse
-  villager.invitedToday = false
-  villager.lastInviterHouse = UnknownHouse
+  villager.encounterId = 0
+  villager.askedWhileTalking = false
+  villager.pendingSpeech = ""
+  villager.pendingTalkName = ""
+  villager.pendingTalkMessage = ""
+  villager.wanderHouse = UnknownHouse
+  villager.followLastHouse = UnknownHouse
+  for i in 0 ..< HouseCount:
+    villager.wanderedDoors[i] = false
   villager.seenToday.clear()
   villager.greetedToday.clear()
   villager.interruptRequested = false
@@ -419,7 +505,6 @@ proc startNewDay*(villager: Villager, dayNumber: int) =
   villager.veggiesLogged = false
   villager.insideHouse = UnknownHouse
   villager.curfewRecorded = false
-  villager.leaveTimeNoted = false
   villager.saidToday.setLen(0)
   villager.lastClockHour = -1
   villager.lastBubbles.clear()
@@ -429,7 +514,7 @@ proc startNewDay*(villager: Villager, dayNumber: int) =
 
 proc maybeRecordClock*(villager: Villager, observation: Observation) =
   ## Records one clock line every game hour, after the day marker on the
-  ## first hour of each day. Hours 10am through 8pm also request a call.
+  ## first hour of each day.
   villager.minutes = observation.minutes
   let hour = observation.minutes div 60
   if hour == villager.lastClockHour:
@@ -439,8 +524,6 @@ proc maybeRecordClock*(villager: Villager, observation: Observation) =
   villager.lastClockHour = hour
   villager.appendHistory("user", "Clock: " & villager.clockAnnouncement())
   villager.logClock()
-  if hour >= 10 and hour <= 20:
-    villager.noteInterrupt("reason=hour hour=" & $hour)
   if observation.minutes >= DayEndMinutes:
     villager.recordDayEnd()
 
@@ -463,10 +546,8 @@ proc scanHeardChats*(villager: Villager, observation: Observation) =
     if player.says == previous:
       continue
     villager.lastBubbles[player.name] = player.says
-    if player.says.len > 0:
+    if player.says.len > 0 and villager.encounterId == 0:
       villager.recordHeardLine(player.name, player.says)
-      if player.says.invitesToOwnHouse() and player.houseIndex >= 0:
-        villager.lastInviterHouse = player.houseIndex
   var gone: seq[string]
   for name in villager.lastBubbles.keys:
     if name notin seen:
@@ -485,7 +566,6 @@ proc scanSeenGnomes*(villager: Villager, observation: Observation) =
     villager.seenToday.incl(player.name)
     villager.recordEvent("You see " & player.name & " for the first time today.")
     villager.log("first sighting " & player.name)
-    villager.noteInterrupt("reason=sighting who=" & player.name)
 
 proc maybeRecordCarry*(villager: Villager, observation: Observation) =
   ## Records what the villager carries whenever the set of foods changes.
@@ -541,9 +621,6 @@ proc maybeRecordDinner*(villager: Villager, observation: Observation) =
     villager.dinnerHouse = observation.currentHouse
     return
   villager.dinnerRecorded = true
-  # Dinner is over: the promise to be at a table is fulfilled or missed,
-  # and the only place left to be tonight is home.
-  villager.committedPartyHouse = UnknownHouse
   if observation.dinner.present:
     let summary = villager.dinnerSummary(observation)
     villager.recordEvent(summary)

@@ -1,10 +1,9 @@
-## Reads Heartleaf model logs and writes an HTML+SVG chart of every
-## gnome's LLM calls against wall-clock time. Time runs down the page;
-## each of the nine gnomes is a column. A box is a call in flight, sized
-## by how long it actually took. Game-hour ticks are placed where those
-## hours occurred, so a paused sim stretches that hour. A tufte-red tick
-## is an interrupt that did not start a new call because a reply was
-## already pending.
+## Reads Heartleaf game.log (or older per-gnome logs) and writes an
+## HTML+SVG chart of every gnome's LLM calls. Y is wall-clock time, so a
+## slow reply is a taller box and a retry is another box just below the
+## failed one. Gray bands are leapfrog movement slices. Light red marks a
+## gnome in conversation. Game hours, wakeup, dinner, sleep, and veggies
+## picked sit on that same real-time axis.
 ##
 ##   nim r tools/llm_chart.nim <log-dir-or-files> [--out:llm_calls.html]
 ##                            [--game:N] [--tufte-dir:DIR]
@@ -22,9 +21,12 @@ const
   Paper = "#fffff8"
   Ink = "#111111"
   Muted = "#666666"
-  Grid = "#e9ecef"
+  HourLine = "#b0b0a8"
+    ## Fainter than wakeup/dinner/veggies, still visible on gray walk bands.
   Failed = "#c8c8c0"
   TufteRed = "#f03b20"
+  WalkBand = "#e8e8e4"
+  ConversationBg = "#ffe8e6"
   Serif = "ETBembo, Palatino Linotype, Palatino, serif"
   ChartLeft = 88
   ChartTop = 118
@@ -34,6 +36,8 @@ const
   BarWidth = 22
   PixelsPerSecond = 15.0
   MinBarHeight = 3
+  MinWalkHeight = 1
+    ## A zipped movement slice is often under a pixel; keep a 1px band.
   InterruptPad = 3
   HousePad = 4
   DayStroke = 1.25
@@ -51,6 +55,9 @@ type
     LlmVeggies
     LlmEnter
     LlmExit
+    LlmTurn
+    LlmConvoEnter
+    LlmConvoExit
 
   LlmEvent* = object
     kind*: LlmKind
@@ -66,6 +73,9 @@ type
     house*: int
     own*: bool
     tokens*: int
+    turnKind*: string
+    turnIndex*: int
+    members*: string
 
   LlmInterruptMark* = object
     day*: int
@@ -107,7 +117,20 @@ type
     outcome*: string
     pending*: bool
     tokens*: int
+    turnIndex*: int
     interrupts*: seq[LlmInterruptMark]
+
+  TurnMark* = object
+    index*: int
+    kind*: string
+    now*: float
+
+  TalkSpan* = object
+    gnome*: string
+    startTurn*: int
+    endTurn*: int
+    startNow*: float
+    endNow*: float
 
 proc fail(message: string) =
   ## Prints one error and stops.
@@ -178,6 +201,16 @@ proc parseKind(text: string): string =
     let houseAt = body.find(": house ")
     if houseAt >= 0:
       body = body[houseAt + 2 .. ^1]
+    else:
+      let convAt = body.find(": conversation ")
+      if convAt >= 0:
+        body = body[convAt + 2 .. ^1]
+  if body.startsWith("llm turn"):
+    return "turn"
+  if body.startsWith("conversation enter"):
+    return "convo-enter"
+  if body.startsWith("conversation exit"):
+    return "convo-exit"
   if body.startsWith("clock "):
     return "clock"
   if body.startsWith("llm request"):
@@ -208,6 +241,9 @@ proc kindFromName(name: string): LlmKind =
   of "veggies": LlmVeggies
   of "enter": LlmEnter
   of "exit": LlmExit
+  of "turn": LlmTurn
+  of "convo-enter": LlmConvoEnter
+  of "convo-exit": LlmConvoExit
   else: LlmInterrupt
 
 proc gnomeFromPath(path: string): string =
@@ -220,7 +256,7 @@ proc gnomeFromPath(path: string): string =
 
 proc gnomeFromLine(text: string): string =
   ## The gnome prefix of a server stdout line, if any.
-  for needle in [": llm ", ": house "]:
+  for needle in [": llm ", ": house ", ": conversation "]:
     let at = text.find(needle)
     if at <= 0:
       continue
@@ -254,8 +290,13 @@ proc eventFromBody(
     tag: body.fieldValue("tag"),
     house: body.parseIntField("house"),
     own: body.fieldValue("own") == "yes",
-    tokens: body.usageTokens()
+    tokens: body.usageTokens(),
+    turnKind: body.fieldValue("kind"),
+    turnIndex: body.parseIntField("index", body.parseIntField("turn")),
+    members: body.fieldValue("members")
   )
+  if body.fieldValue("ignored").len > 0:
+    result.outcome = "ignored"
   if result.day <= 0:
     result.day = 1
 
@@ -273,7 +314,7 @@ proc parseLlmLine*(line, gnomeHint: string): LlmEvent =
       if kindName.len == 0:
         kindName = text.parseKind()
       if role == "llm" or role == "clock" or role == "veggies" or
-          role == "house" or kindName.len > 0:
+          role == "house" or role == "conversation" or kindName.len > 0:
         if kindName.len == 0:
           return
         var gnome = node{"gnome"}.getStr()
@@ -312,12 +353,17 @@ proc parseLlmText*(text, gnomeHint: string): seq[LlmEvent] =
       result.add(event)
 
 proc collectLogFiles(paths: seq[string]): seq[string] =
-  ## Expands directories into log files.
+  ## Expands directories into log files. A dir with game.log is read as
+  ## the village log; otherwise every *.log is used, for older plays.
   for path in paths:
     if dirExists(path):
-      for kind, file in walkDir(path):
-        if kind == pcFile and file.endsWith(".log"):
-          result.add(file)
+      let gameLog = path / "game.log"
+      if fileExists(gameLog):
+        result.add(gameLog)
+      else:
+        for kind, file in walkDir(path):
+          if kind == pcFile and file.endsWith(".log"):
+            result.add(file)
     elif fileExists(path):
       result.add(path)
     else:
@@ -375,6 +421,7 @@ proc pairLlmCalls*(events: seq[LlmEvent], game: int): seq[LlmCall] =
   ## Turns a stream of events into one bar per in-flight request.
   var open: Table[string, LlmCall]
   var lastAt: Table[string, tuple[day, minutes: int, now: float]]
+  var lastTurn: Table[string, int]
   for event in events:
     if game > 0 and event.game != game:
       continue
@@ -384,8 +431,10 @@ proc pairLlmCalls*(events: seq[LlmEvent], game: int): seq[LlmCall] =
     if event.kind != LlmClock and event.kind != LlmVeggies:
       lastAt[event.gnome] = (event.day, event.minutes, at)
     case event.kind
-    of LlmClock, LlmVeggies, LlmEnter, LlmExit:
-      discard
+    of LlmClock, LlmVeggies, LlmEnter, LlmExit, LlmTurn,
+        LlmConvoEnter, LlmConvoExit:
+      if event.kind == LlmTurn:
+        lastTurn[event.gnome] = event.turnIndex
     of LlmRequest:
       if event.gnome in open:
         var previous = open[event.gnome]
@@ -403,7 +452,8 @@ proc pairLlmCalls*(events: seq[LlmEvent], game: int): seq[LlmCall] =
         endDay: event.day,
         endMinutes: event.minutes,
         endNow: at,
-        pending: true
+        pending: true,
+        turnIndex: lastTurn.getOrDefault(event.gnome, event.turnIndex)
       )
     of LlmReply, LlmAbandon:
       if event.gnome in open:
@@ -523,6 +573,62 @@ proc collectInterruptMarks*(
     if result == 0:
       result = cmp(a.gnome, b.gnome))
 
+proc collectTurns*(events: seq[LlmEvent], game: int): seq[TurnMark] =
+  ## Wall-clock start of each leapfrog phase, from llm turn stamps.
+  var seen: Table[int, TurnMark]
+  for event in events:
+    if game > 0 and event.game != game:
+      continue
+    if event.kind != LlmTurn:
+      continue
+    if event.turnIndex notin seen:
+      seen[event.turnIndex] = TurnMark(
+        index: event.turnIndex,
+        kind: event.turnKind,
+        now: event.eventNow()
+      )
+  for mark in seen.values:
+    result.add(mark)
+  result.sort(proc(a, b: TurnMark): int =
+    cmp(a.index, b.index))
+
+proc collectTalks*(events: seq[LlmEvent], game: int): seq[TalkSpan] =
+  ## Conversation spans in wall time, for the light red column fill.
+  var open: Table[string, tuple[turn: int, now: float]]
+  var lastTurn = 0
+  var lastNow = 0.0
+  for event in events:
+    if game > 0 and event.game != game:
+      continue
+    let at = event.eventNow()
+    if at > lastNow:
+      lastNow = at
+    if event.kind == LlmTurn:
+      lastTurn = max(lastTurn, event.turnIndex)
+    elif event.kind == LlmConvoEnter:
+      if event.gnome.len > 0 and event.gnome notin open:
+        open[event.gnome] = (event.turnIndex, at)
+    elif event.kind == LlmConvoExit:
+      if event.gnome.len == 0:
+        continue
+      let start = open.getOrDefault(event.gnome, (event.turnIndex, at))
+      result.add(TalkSpan(
+        gnome: event.gnome,
+        startTurn: start.turn,
+        endTurn: event.turnIndex,
+        startNow: start.now,
+        endNow: at
+      ))
+      open.del(event.gnome)
+  for gnome, start in open.pairs:
+    result.add(TalkSpan(
+      gnome: gnome,
+      startTurn: start.turn,
+      endTurn: lastTurn,
+      startNow: start.now,
+      endNow: lastNow
+    ))
+
 proc pairHouseStays*(events: seq[LlmEvent], game: int): seq[HouseStay] =
   ## Turns enter/exit events into one dashed stay per visit.
   var open: Table[string, HouseStay]
@@ -583,6 +689,33 @@ proc selectedGame*(events: seq[LlmEvent], requested: int): int =
   if result <= 0:
     result = 1
 
+proc latestRunStart*(events: seq[LlmEvent], game: int): float =
+  ## Wall time of the last day-1 9:00am cluster when logs were appended
+  ## from another play of the same game. Zero when there is only one run.
+  var starts: seq[float]
+  for event in events:
+    if game > 0 and event.game != game:
+      continue
+    if event.kind == LlmClock and event.day == 1 and
+        event.minutes == DayStartMinutes and event.now > 0:
+      starts.add(event.now)
+  starts.sort()
+  var clusters: seq[float]
+  for t in starts:
+    if clusters.len == 0 or t - clusters[^1] > 60.0:
+      clusters.add(t)
+  if clusters.len <= 1:
+    return 0
+  clusters[^1]
+
+proc eventsFrom*(events: seq[LlmEvent], startNow: float): seq[LlmEvent] =
+  ## Drops an older appended play that started before startNow.
+  if startNow <= 0:
+    return events
+  for event in events:
+    if event.now >= startNow - 2.0:
+      result.add(event)
+
 proc chartDays*(calls: seq[LlmCall]): int =
   ## How many days the chart must cover.
   result = 1
@@ -623,7 +756,12 @@ proc yAt(now, origin: float): float =
 
 proc callFailed(call: LlmCall): bool =
   ## True when the reply was not a usable decision.
-  call.outcome.len > 0 and call.outcome != "usable"
+  call.outcome.len > 0 and call.outcome != "usable" and
+    call.outcome != "ignored"
+
+proc callInvalid(call: LlmCall): bool =
+  ## True when the model sent illegal JSON or an illegal action.
+  call.outcome == "ignored" or call.outcome == "parse"
 
 proc colCenter(index: int): float =
   ## Column center x for one house.
@@ -633,31 +771,37 @@ proc timeBounds(
   calls: seq[LlmCall],
   clocks: seq[ClockMark],
   houses: seq[HouseStay] = @[],
-  ticks: seq[ChartInterrupt] = @[]
+  ticks: seq[ChartInterrupt] = @[],
+  veggies: seq[ClockMark] = @[],
+  turns: seq[TurnMark] = @[],
+  talks: seq[TalkSpan] = @[]
 ): (float, float) =
   ## The wall-clock span of the chart.
   var
     lo = 1.0e300
     hi = -1.0e300
+  template note(at: float) =
+    lo = min(lo, at)
+    hi = max(hi, at)
   for call in calls:
-    lo = min(lo, call.startNow)
-    lo = min(lo, call.endNow)
-    hi = max(hi, call.startNow)
-    hi = max(hi, call.endNow)
+    note(call.startNow)
+    note(call.endNow)
     for mark in call.interrupts:
-      lo = min(lo, mark.now)
-      hi = max(hi, mark.now)
+      note(mark.now)
   for mark in clocks:
-    lo = min(lo, mark.now)
-    hi = max(hi, mark.now)
+    note(mark.now)
   for stay in houses:
-    lo = min(lo, stay.startNow)
-    lo = min(lo, stay.endNow)
-    hi = max(hi, stay.startNow)
-    hi = max(hi, stay.endNow)
+    note(stay.startNow)
+    note(stay.endNow)
   for mark in ticks:
-    lo = min(lo, mark.now)
-    hi = max(hi, mark.now)
+    note(mark.now)
+  for mark in veggies:
+    note(mark.now)
+  for mark in turns:
+    note(mark.now)
+  for span in talks:
+    note(span.startNow)
+    note(span.endNow)
   if hi < lo:
     (0.0, 1.0)
   else:
@@ -694,68 +838,70 @@ proc interruptTickSvg(
   result.add (gnome & " interrupt " & reason).xmlEscape()
   result.add "</title></line>\n"
 
+proc moveWindows(turns: seq[TurnMark]): seq[tuple[a, b: float]] =
+  ## Wall-clock span of each movement phase.
+  for i, mark in turns:
+    if mark.kind != "move" or mark.now <= 0:
+      continue
+    let b =
+      if i + 1 < turns.len and turns[i + 1].now > mark.now:
+        turns[i + 1].now
+      else:
+        mark.now + 0.01
+    result.add((mark.now, b))
+
 proc renderLlmChart*(
   calls: seq[LlmCall],
   clocks: seq[ClockMark],
   veggies: seq[ClockMark] = @[],
   houses: seq[HouseStay] = @[],
-  ticks: seq[ChartInterrupt] = @[]
+  ticks: seq[ChartInterrupt] = @[],
+  turns: seq[TurnMark] = @[],
+  talks: seq[TalkSpan] = @[]
 ): string =
-  ## One vertical Gantt SVG: gnomes across, wall-clock time down.
+  ## One vertical Gantt: gnomes across, wall-clock time down.
   let
-    (origin, last) = calls.timeBounds(clocks, houses, ticks)
+    (origin, last) = calls.timeBounds(
+      clocks, houses, ticks, veggies, turns, talks
+    )
     plotHeight = max(HourStroke, (last - origin) * PixelsPerSecond)
     width = ChartLeft + PlayerNames.len * ColWidth + ChartRight
     height = int(ChartTop.float + plotHeight + ChartBottom.float + 0.5)
     plotRight = ChartLeft + PlayerNames.len * ColWidth
+    plotWidth = PlayerNames.len * ColWidth
   result.add "<svg class=\"llm-chart-svg\" width=\"" & $width
   result.add "\" height=\"" & $height & "\" viewBox=\"0 0 "
   result.add $width & " " & $height
   result.add "\" role=\"img\" aria-label=\"Heartleaf LLM calls\">\n"
   result.add "<rect x=\"0\" y=\"0\" width=\"" & $width
   result.add "\" height=\"" & $height & "\" fill=\"" & Paper & "\"/>\n"
-  for mark in clocks:
-    let y = yAt(mark.now, origin)
-    let dayStart = mark.minutes == DayStartMinutes
-    let dayEnd = mark.minutes == DayEndMinutes
-    let stroke =
-      if dayStart or dayEnd:
-        Ink
-      else:
-        Grid
-    let weight =
-      if dayStart or dayEnd:
-        $DayStroke
-      else:
-        $HourStroke
-    result.add "<line x1=\"" & $ChartLeft & "\" y1=\"" & $y
-    result.add "\" x2=\"" & $plotRight & "\" y2=\"" & $y
-    result.add "\" stroke=\"" & stroke & "\" stroke-width=\""
-    result.add weight & "\"/>\n"
-    if dayStart:
-      result.add "<text x=\"" & $(ChartLeft - 10) & "\" y=\"" & $(y + 4)
-      result.add "\" text-anchor=\"end\" fill=\"" & Ink
-      result.add "\" font-family=\"" & Serif
-      result.add "\" font-size=\"16\">Day " & $mark.day & "</text>\n"
-    else:
-      result.add "<text x=\"" & $(ChartLeft - 10) & "\" y=\"" & $(y + 4)
-      result.add "\" text-anchor=\"end\" fill=\"" & Muted
-      result.add "\" font-family=\"" & Serif
-      result.add "\" font-size=\"13\">"
-      result.add hourLabel(mark.minutes).xmlEscape()
-      result.add "</text>\n"
-    let side = mark.minutes.hourSideLabel()
-    if side.len > 0:
-      result.add sideLabelSvg(plotRight.float + 8.0, y, side)
-  for mark in veggies:
-    let y = yAt(mark.now, origin)
-    result.add "<line x1=\"" & $ChartLeft & "\" y1=\"" & $y
-    result.add "\" x2=\"" & $plotRight & "\" y2=\"" & $y
-    result.add "\" stroke=\"" & Muted & "\" stroke-width=\"1\""
-    result.add " stroke-dasharray=\"4 3\"/>\n"
-    result.add sideLabelSvg(
-      plotRight.float + 8.0, y, "veggies picked"
-    )
+  for window in turns.moveWindows():
+    var y1 = yAt(window.a, origin)
+    var y2 = yAt(window.b, origin)
+    if y2 < y1:
+      swap(y1, y2)
+    if y2 - y1 < MinWalkHeight.float:
+      y2 = y1 + MinWalkHeight.float
+    result.add "<rect x=\"" & $ChartLeft & "\" y=\"" & $y1
+    result.add "\" width=\"" & $plotWidth & "\" height=\""
+    result.add $(y2 - y1) & "\" fill=\"" & WalkBand & "\"/>\n"
+  for span in talks:
+    let house = span.gnome.houseIndexForPlayerName()
+    if house < 0:
+      continue
+    var y1 = yAt(span.startNow, origin)
+    var y2 = yAt(span.endNow, origin)
+    if y2 < y1:
+      swap(y1, y2)
+    if y2 - y1 < MinBarHeight.float:
+      y2 = y1 + MinBarHeight.float
+    let x = colCenter(house) - BarWidth.float / 2.0
+    result.add "<rect x=\"" & $x & "\" y=\"" & $y1
+    result.add "\" width=\"" & $BarWidth & "\" height=\""
+    result.add $(y2 - y1) & "\" fill=\"" & ConversationBg
+    result.add "\"><title>"
+    result.add (span.gnome & " conversation").xmlEscape()
+    result.add "</title></rect>\n"
   for i, name in PlayerNames:
     let x = colCenter(i)
     let y = ChartTop.float - 10.0
@@ -780,6 +926,8 @@ proc renderLlmChart*(
     var dash = ""
     if call.pending:
       dash = " stroke-dasharray=\"3 2\""
+    elif call.callInvalid:
+      dash = " stroke-dasharray=\"1 2\""
     let took = max(0.0, call.endNow - call.startNow)
     let title = call.gnome & " " &
       call.startMinutes.clockName() & "–" &
@@ -836,6 +984,47 @@ proc renderLlmChart*(
     result.add "<title>"
     result.add title.xmlEscape()
     result.add "</title></rect>\n"
+  for mark in clocks:
+    let y = yAt(mark.now, origin)
+    let dayStart = mark.minutes == DayStartMinutes
+    let dayEnd = mark.minutes == DayEndMinutes
+    let stroke =
+      if dayStart or dayEnd:
+        Ink
+      else:
+        HourLine
+    let weight =
+      if dayStart or dayEnd:
+        $DayStroke
+      else:
+        $HourStroke
+    result.add "<line x1=\"" & $ChartLeft & "\" y1=\"" & $y
+    result.add "\" x2=\"" & $plotRight & "\" y2=\"" & $y
+    result.add "\" stroke=\"" & stroke & "\" stroke-width=\""
+    result.add weight & "\"/>\n"
+    if dayStart:
+      result.add "<text x=\"" & $(ChartLeft - 10) & "\" y=\"" & $(y - 10)
+      result.add "\" text-anchor=\"end\" fill=\"" & Ink
+      result.add "\" font-family=\"" & Serif
+      result.add "\" font-size=\"16\">Day " & $mark.day & "</text>\n"
+    result.add "<text x=\"" & $(ChartLeft - 10) & "\" y=\"" & $(y + 4)
+    result.add "\" text-anchor=\"end\" fill=\"" & Muted
+    result.add "\" font-family=\"" & Serif
+    result.add "\" font-size=\"13\">"
+    result.add hourLabel(mark.minutes).xmlEscape()
+    result.add "</text>\n"
+    let side = mark.minutes.hourSideLabel()
+    if side.len > 0:
+      result.add sideLabelSvg(plotRight.float + 8.0, y, side)
+  for mark in veggies:
+    let y = yAt(mark.now, origin)
+    result.add "<line x1=\"" & $ChartLeft & "\" y1=\"" & $y
+    result.add "\" x2=\"" & $plotRight & "\" y2=\"" & $y
+    result.add "\" stroke=\"" & Muted & "\" stroke-width=\"1\""
+    result.add " stroke-dasharray=\"4 3\"/>\n"
+    result.add sideLabelSvg(
+      plotRight.float + 8.0, y, "veggies picked"
+    )
   result.add "</svg>\n"
 
 proc tokenCost(tokens: int): string =
@@ -944,6 +1133,39 @@ proc renderSummary(
   )
   result.add "</tfoot></table>\n"
 
+proc formatWallSpan*(seconds: float): string =
+  ## A short real-time length: 45s, 3 min, 5 min 10s, 1 hr 2 min.
+  let total = max(0, seconds.int)
+  let hours = total div 3600
+  let mins = (total mod 3600) div 60
+  let secs = total mod 60
+  if hours > 0:
+    if mins == 0:
+      return $hours & " hr"
+    return $hours & " hr " & $mins & " min"
+  if mins > 0:
+    if secs == 0:
+      return $mins & " min"
+    return $mins & " min " & $secs & "s"
+  $secs & "s"
+
+proc wallSpanLine(
+  calls: seq[LlmCall],
+  clocks: seq[ClockMark],
+  veggies: seq[ClockMark] = @[],
+  houses: seq[HouseStay] = @[],
+  ticks: seq[ChartInterrupt] = @[],
+  turns: seq[TurnMark] = @[],
+  talks: seq[TalkSpan] = @[]
+): string =
+  ## One sentence for how long the chart is in real time.
+  let (origin, last) = calls.timeBounds(
+    clocks, houses, ticks, veggies, turns, talks
+  )
+  let span = max(0.0, last - origin)
+  "This run took " & span.formatWallSpan() &
+    " of real time, top to bottom."
+
 proc extraCss(): string =
   ## Chart-specific rules on top of tufte.css.
   "    main { max-width: 960px; }\n" &
@@ -957,7 +1179,9 @@ proc renderLlmPage*(
   veggies: seq[ClockMark] = @[],
   houses: seq[HouseStay] = @[],
   ticks: seq[ChartInterrupt] = @[],
-  cssHref = "tufte.css"
+  cssHref = "tufte.css",
+  turns: seq[TurnMark] = @[],
+  talks: seq[TalkSpan] = @[]
 ): string =
   ## A full Tufte HTML page around the LLM chart.
   result.add "<!doctype html>\n<html lang=\"en\">\n<head>\n"
@@ -977,25 +1201,37 @@ proc renderLlmPage*(
   result.add "  <h1>Heartleaf LLM Calls</h1>\n"
   result.add "  <p>Each column is one gnome. The vertical axis is real "
   result.add "time, top to bottom. A box is an LLM call, stretched by "
-  result.add "how long the reply actually took. Game hours are ticks at "
-  result.add "the wall times they occurred, so a pause waiting on the "
+  result.add "how long the reply actually took. A gray box failed; a "
+  result.add "retry is another box just below it. Game hours are ticks "
+  result.add "at the wall times they occurred, so a pause waiting on the "
   result.add "model stretches that hour. Empty space is when that gnome "
-  result.add "was not waiting on a reply. A white box succeeded. A gray "
-  result.add "box failed. A <mark>red tick</mark> is an interrupt: "
-  result.add "an hour, a sighting, chat, or other change. Several "
-  result.add "ticks share one follow-up call.</p>\n"
+  result.add "was not waiting on a reply. A gray band is a leapfrog "
+  result.add "movement slice. A light red fill is a gnome in a "
+  result.add "conversation. A <mark>red tick</mark> is an interrupt: "
+  result.add "an hour, a sighting, chat, or other change. A dotted "
+  result.add "border is an illegal reply that was ignored or could "
+  result.add "not parse.</p>\n"
   result.add "  <figure class=\"wide llm-chart\">\n"
-  result.add renderLlmChart(calls, clocks, veggies, houses, ticks)
+  result.add renderLlmChart(
+    calls, clocks, veggies, houses, ticks, turns, talks
+  )
   result.add "    <figcaption>Day and hour labels follow the game clock. "
   result.add "Their spacing follows wall time. Wakeup, dinner, and sleep "
   result.add "sit on those hours. A dashed line marks when the gardens "
   result.add "were empty. A red tick is an interrupt, including the "
   result.add "hourly dummy, even when no call was in flight. A dashed "
   result.add "outline is time inside a house: red for home, black for "
-  result.add "someone else's. Gray boxes failed. "
+  result.add "someone else's. Gray boxes failed. A dotted border is "
+  result.add "an illegal action that was ignored, or JSON that could "
+  result.add "not parse. "
   result.add "Dashed boxes are calls that had not finished when the log "
   result.add "ended.</figcaption>\n"
   result.add "  </figure>\n"
+  result.add "  <p>"
+  result.add wallSpanLine(
+    calls, clocks, veggies, houses, ticks, turns, talks
+  ).xmlEscape()
+  result.add "</p>\n"
   result.add renderSummary(calls, clocks)
   result.add "</main>\n</body>\n</html>\n"
 when isMainModule:
@@ -1053,20 +1289,27 @@ when isMainModule:
   proc main() =
     ## Reads logs and writes the HTML chart.
     let options = parseOptions()
-    let events = options.inputs.loadLlmEvents()
+    var events = options.inputs.loadLlmEvents()
     let game = events.selectedGame(options.game)
+    events = events.eventsFrom(events.latestRunStart(game))
     let calls = events.pairLlmCalls(game)
     let clocks = events.collectClockMarks(game)
     let veggies = events.collectVeggieMarks(game)
     let houses = events.pairHouseStays(game)
     let ticks = events.collectInterruptMarks(game)
+    let turns = events.collectTurns(game)
+    let talks = events.collectTalks(game)
     var outPath = options.outPath
     if dirExists(outPath) or outPath.endsWith("/"):
       outPath = outPath / DefaultOutName
     let outDir = outPath.parentDir()
     let dest = if outDir.len == 0: getCurrentDir() else: outDir
     dest.copyAssets(options.tufteDir)
-    writeFile(outPath, calls.renderLlmPage(clocks, veggies, houses, ticks))
+    writeFile(
+      outPath,
+      calls.renderLlmPage(clocks, veggies, houses, ticks, turns = turns,
+        talks = talks)
+    )
     echo "wrote ", outPath, " (" & $calls.len & " calls, game " & $game & ")"
 
   main()

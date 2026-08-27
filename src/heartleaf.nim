@@ -400,6 +400,10 @@ type
     mockReply: string
       ## Offline stand-in for the model, for certification and smoke runs
       ## only; empty in every hosted variant.
+    logDir: string
+      ## When set, LLM lifecycle and world stamps go to logDir/game.log.
+    replayPath: string
+      ## When set, the first game is recorded to this replay file.
 
 when not defined(emscripten):
   type
@@ -3475,6 +3479,13 @@ proc observe*(sim: SimServer, playerIndex: int): Observation =
       )
       result.gardenMarkerVisible[i] =
         result.gardenMarkerOnScreen[i] and garden.hasFood()
+    for i, house in sim.houses:
+      if house.valid:
+        result.houseOnScreen[i] = rectVisible(
+          house.rect.x - cameraX, house.rect.y - cameraY,
+          house.rect.w, house.rect.h,
+          ViewportWidth, ViewportHeight
+        )
 
 proc captureChatFeed(sim: SimServer) =
   ## Queues freshly spoken chats with their audience for the delay chat.
@@ -4433,7 +4444,9 @@ when not defined(emscripten):
     args.server[].serve(Port(args.port), args.address)
 
   proc runFrameLimiter(previousTick: var MonoTime) =
-    ## Sleeps until the next simulation frame should run.
+    ## Sleeps until the next 24fps frame while waiting on LLM replies.
+    ## Movement, overlay, and score ticks skip this and run as fast as
+    ## the CPU can. Replays keep their own 24fps loop.
     let frameDuration = initDuration(milliseconds = int(1000.0 / TargetFps))
     let elapsed = getMonoTime() - previousTick
     if elapsed < frameDuration:
@@ -4460,6 +4473,7 @@ when not defined(emscripten):
     soulTimeoutSeconds = DefaultSoulTimeoutSeconds,
     soulConnectionRequired = false,
     mockReply = "",
+    logDir = "",
     saveReplayPath = "",
     runtimeConfig = RuntimeConfig()
   ) =
@@ -4515,6 +4529,9 @@ when not defined(emscripten):
     )
     brains.onSeatFailure = proc(seat: int, message: string) =
       declarePlayerFailure(seat, message)
+    if logDir.len > 0:
+      brains.openGameLog(logDir)
+      echo "game log: ", logDir / "game.log"
     # Load assets before healthz so /global can send on the first tick.
     let httpServer = newServer(
       httpHandler,
@@ -4535,11 +4552,40 @@ when not defined(emscripten):
     if not simStarted:
       echo "waiting for ", tokens.len, " souls (", soulTimeoutSeconds, "s)"
 
+    proc applyUnpausedFrame(frame: BrainFrame) =
+      ## Applies one unpaused brain frame and steps the sim.
+      var stepInputs = newSeq[InputState](sim.players.len)
+      for item in frame.outputs:
+        let playerIndex = seatPlayers[item.houseIndex]
+        if playerIndex < 0 or playerIndex >= stepInputs.len:
+          continue
+        stepInputs[playerIndex] = decodeInputMask(item.output.mask)
+        replayWriter.writeInputMaskChange(
+          tickTime(sim.tickCount),
+          playerIndex,
+          item.output.mask
+        )
+        let chatText = item.output.chat.cleanChatMessage()
+        if chatText.len > 0:
+          sim.applyPlayerChat(playerIndex, chatText)
+          replayWriter.writeChat(
+            tickTime(sim.tickCount),
+            playerIndex,
+            chatText
+          )
+      let wasScoring = sim.scoreTicks > 0
+      sim.step(stepInputs)
+      sim.advanceChatFeed()
+      replayWriter.writeHash(uint32(sim.tickCount), sim.gameHash())
+      if not wasScoring and sim.scoreTicks > 0:
+        sim.writeArtifacts(runtimeConfig)
+        lastWrittenDay = sim.dayNumber
+      inc runTicks
+
     while true:
       var
         globalSockets: seq[WebSocket] = @[]
         globalStates: seq[PlayerViewerState] = @[]
-        inputs: seq[InputState]
         waitingSeats: seq[int] = @[]
 
       {.gcsafe.}:
@@ -4599,7 +4645,7 @@ when not defined(emscripten):
       for seat in 0 ..< HouseCount:
         if seatPlayers[seat] >= 0:
           observations[seat] = sim.observe(seatPlayers[seat])
-      let frame = brains.advance(observations, epochTime())
+      var frame = brains.advance(observations, epochTime())
       let paused = not simStarted or frame.paused
       if paused:
         if pausedSince == 0.0:
@@ -4612,38 +4658,25 @@ when not defined(emscripten):
           echo "sim resumed after ",
             formatFloat(epochTime() - pausedSince, ffDecimal, 1), "s"
           pausedSince = 0.0
-        inputs = newSeq[InputState](sim.players.len)
-        for item in frame.outputs:
-          let playerIndex = seatPlayers[item.houseIndex]
-          if playerIndex < 0 or playerIndex >= inputs.len:
-            continue
-          inputs[playerIndex] = decodeInputMask(item.output.mask)
-          replayWriter.writeInputMaskChange(
-            tickTime(sim.tickCount),
-            playerIndex,
-            item.output.mask
-          )
-          let chatText = item.output.chat.cleanChatMessage()
-          if chatText.len > 0:
-            sim.applyPlayerChat(playerIndex, chatText)
-            replayWriter.writeChat(
-              tickTime(sim.tickCount),
-              playerIndex,
-              chatText
-            )
-        let wasScoring = sim.scoreTicks > 0
-        sim.step(inputs)
-        sim.advanceChatFeed()
-        replayWriter.writeHash(uint32(sim.tickCount), sim.gameHash())
-        if not wasScoring and sim.scoreTicks > 0:
-          sim.writeArtifacts(runtimeConfig)
-          lastWrittenDay = sim.dayNumber
-        inc runTicks
+        applyUnpausedFrame(frame)
+        # Zip every sim tick until the village is waiting on an LLM
+        # reply: movement, dinner overlay, and the score screen.
+        while true:
+          if totalTicks > 0 and runTicks >= totalTicks:
+            break
+          observations = initTable[int, Observation]()
+          for seat in 0 ..< HouseCount:
+            if seatPlayers[seat] >= 0:
+              observations[seat] = sim.observe(seatPlayers[seat])
+          frame = brains.advance(observations, epochTime())
+          if frame.paused:
+            break
+          applyUnpausedFrame(frame)
 
-      # Stream each seat's model log to the player that sent its soul and
-      # said it is ready: every turn appended to the history, plus notes,
-      # exactly once. Batches are gathered under the lock and sent after
-      # it is released so a slow socket never stalls the simulation.
+      # Stream each seat's conversation to the player that sent its soul
+      # and said it is ready: system, user, and assistant turns, exactly
+      # once. Batches are gathered under the lock and sent after it is
+      # released so a slow socket never stalls the simulation.
       var deliveries: seq[tuple[websocket: WebSocket, batch: seq[string]]]
       {.gcsafe.}:
         withLock appState.lock:
@@ -4708,7 +4741,10 @@ when not defined(emscripten):
             appState.gameNumber = brains.gameNumber
             resetConnectedPlayers()
 
-      runFrameLimiter(lastTick)
+      if paused:
+        runFrameLimiter(lastTick)
+      else:
+        lastTick = getMonoTime()
 
 proc readConfigString(node: JsonNode, name: string, value: var string) =
   ## Reads one optional string config field.
@@ -4843,6 +4879,8 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("soulTimeoutSeconds", config.soulTimeoutSeconds)
   node.readConfigBool("soulConnectionRequired", config.soulConnectionRequired)
   node.readConfigString("mockReply", config.mockReply)
+  node.readConfigString("logDir", config.logDir)
+  node.readConfigString("replayPath", config.replayPath)
   node.readConfigStrings("tokens", config.tokens)
   # Seat i spawns in house i, so more tokens than houses can never all
   # join. Fewer tokens is fine: the remaining houses simply stay empty.
@@ -4875,7 +4913,9 @@ proc echoStartupConfig(config: RunConfig) =
     " daySeconds=", config.daySeconds,
     " soulTimeoutSeconds=", config.soulTimeoutSeconds,
     " soulConnectionRequired=", config.soulConnectionRequired,
-    " mockReply=", (if config.mockReply.len > 0: "yes" else: "no")
+    " mockReply=", (if config.mockReply.len > 0: "yes" else: "no"),
+    " logDir=", (if config.logDir.len > 0: config.logDir else: "off"),
+    " replayPath=", (if config.replayPath.len > 0: config.replayPath else: "off")
 
 proc replayRunConfigFor(data: ReplayData): RunConfig =
   ## Reads the recorded simulation config from a replay header.
@@ -5180,7 +5220,9 @@ when isMainModule and not defined(emscripten):
     runReplayServerLoop(config.address, config.port, runtimeConfig)
     quit(0)
   let localReplayPath =
-    if runtimeConfig.replayUri.len > 0:
+    if config.replayPath.len > 0:
+      config.replayPath
+    elif runtimeConfig.replayUri.len > 0:
       getTempDir() / ("heartleaf-replay-" & $getCurrentProcessId() &
         ".bitreplay")
     else:
@@ -5198,6 +5240,7 @@ when isMainModule and not defined(emscripten):
     soulTimeoutSeconds = config.soulTimeoutSeconds,
     soulConnectionRequired = config.soulConnectionRequired,
     mockReply = config.mockReply,
+    logDir = config.logDir,
     saveReplayPath = localReplayPath,
     runtimeConfig = runtimeConfig
   )

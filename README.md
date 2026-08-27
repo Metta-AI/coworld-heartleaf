@@ -82,7 +82,7 @@ the league channel before using it.
 The quickest way to watch a game is the launcher, which plays one game the
 way the league does: it builds the server and the soul player, seats the
 nine example souls with a week of seven days, opens the global viewer in
-your browser, and writes each gnome's model log to `logs/`:
+your browser, and writes each gnome's model log to `tmp/logs/`:
 
 ```sh
 BEDROCK_KEY=... nim r tools/play.nim
