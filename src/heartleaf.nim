@@ -174,7 +174,9 @@ const
   TrailMaxPoints = 5
   ChatBannerSpriteId = 8700
   ChatBannerObjectId = 25_000
-  ChatFeedShowFrames = 96
+  ChatFeedShowSeconds* = 4.0
+    ## Wall-clock hold for one delay-chat banner line, independent of
+    ## sim speed and of whether the viewer runs at 24 or 60 fps.
   ChatFeedMaxItems = 400
   ChatBannerMaxHearers = 3
   ChatBannerNameGap = 10
@@ -344,7 +346,8 @@ type
     portraits: seq[RgbaSprite]
     chatFeed: seq[ChatFeedItem]   ## viewer-only delay chat, never hashed
     chatFeedIndex: int
-    chatFeedFrames: int
+    chatFeedShownAt: float
+      ## epochTime when the current delay-chat line first appeared.
 
   KeyframeState = object
     ## Dynamic simulation state stored in one replay keyframe. Static
@@ -3513,20 +3516,33 @@ proc captureChatFeed(sim: SimServer) =
     sim.chatFeed.delete(0)
     dec sim.chatFeedIndex
 
-proc advanceChatFeed*(sim: SimServer) =
-  ## Advances the paced delay-chat cursor by one render frame. Queued
-  ## messages each stay up long enough to be read, however fast the
-  ## simulation is running.
+proc delayChatMessage*(sim: SimServer): string =
+  ## The delay-chat banner line currently on screen, or empty.
+  if sim.chatFeedIndex < 0 or sim.chatFeedIndex >= sim.chatFeed.len:
+    return ""
+  sim.chatFeed[sim.chatFeedIndex].message
+
+proc queueDelayChat*(sim: SimServer, speaker, message: string) =
+  ## Appends one delay-chat banner line. Viewer-only; not hashed.
+  sim.chatFeed.add(ChatFeedItem(
+    speaker: ChatFeedPerson(name: speaker, gnomeIndex: 0),
+    message: message
+  ))
+
+proc advanceChatFeed*(sim: SimServer, now = epochTime()) =
+  ## Advances the delay-chat cursor by wall clock, not sim ticks or
+  ## render frames. Each queued line stays up ChatFeedShowSeconds so it
+  ## can be read while the sim zips or the viewer runs at 60fps.
   if sim.chatFeedIndex < 0:
     if sim.chatFeed.len > 0:
       sim.chatFeedIndex = 0
-      sim.chatFeedFrames = 0
+      sim.chatFeedShownAt = now
     return
-  inc sim.chatFeedFrames
-  if sim.chatFeedFrames >= ChatFeedShowFrames and
-      sim.chatFeedIndex + 1 < sim.chatFeed.len:
+  if now - sim.chatFeedShownAt < ChatFeedShowSeconds:
+    return
+  if sim.chatFeedIndex + 1 < sim.chatFeed.len:
     inc sim.chatFeedIndex
-    sim.chatFeedFrames = 0
+    sim.chatFeedShownAt = now
 
 proc step*(sim: SimServer, inputs: openArray[InputState]) =
   ## Advances the Heartleaf simulation by one tick.
@@ -3760,7 +3776,7 @@ proc seekReplay*(replay: var ReplayPlayer, sim: SimServer, tick: int) =
   sim.trails.setLen(0)
   sim.chatFeed.setLen(0)
   sim.chatFeedIndex = -1
-  sim.chatFeedFrames = 0
+  sim.chatFeedShownAt = 0.0
   while sim.tickCount < tick and replay.hashIndex < replay.data.hashes.len:
     replay.stepReplay(sim)
 

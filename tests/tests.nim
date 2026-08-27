@@ -380,6 +380,25 @@ block:
       "seek to tick " & $target & " should match the linear hash"
   removeFile(replayPath)
 
+echo "Testing delay chat holds four wall-clock seconds"
+block:
+  doAssert ChatFeedShowSeconds == 4.0, "delay chat is four real seconds"
+  var sim = initSimServer(1)
+  sim.queueDelayChat("Ivan", "hello")
+  sim.queueDelayChat("Egor", "hi")
+  sim.advanceChatFeed(1.0)
+  doAssert sim.delayChatMessage() == "hello", "the first line should show"
+  sim.advanceChatFeed(4.9)
+  doAssert sim.delayChatMessage() == "hello",
+    "the first line should hold until four seconds"
+  sim.advanceChatFeed(5.0)
+  doAssert sim.delayChatMessage() == "hi",
+    "the queued line should show after four seconds"
+  for i in 0 ..< 200:
+    sim.advanceChatFeed(5.0)
+  doAssert sim.delayChatMessage() == "hi",
+    "zipping sim ticks should not skip the hold"
+
 echo "Testing the game clock fits the hosted deadline"
 doAssert DayTotalMinutes == 12 * 60, "a day is twelve hours"
 doAssert DayTicks == 180 * TicksPerSecond, "three-minute days"
