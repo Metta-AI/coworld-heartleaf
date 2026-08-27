@@ -612,7 +612,8 @@ proc decisionGoal(
   layout: WorldLayout
 ): Goal =
   ## Converts the current decision into a navigation goal.
-  if villager.encounterId > 0 and villager.decision.action != TalkTo:
+  ## Talking gnomes stand still. A walker has left the conversation.
+  if villager.encounterId > 0:
     return idleGoal(observation.scene)
   let decision = villager.decision
   case decision.action

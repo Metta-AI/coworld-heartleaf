@@ -616,6 +616,38 @@ proc advance*(
       villager.turnReady = false
     brains.logPhase("llm")
 
+proc dropWalkers*(
+  brains: Brains,
+  outdoorFeet,
+  stillFeet: Table[int, Point]
+) =
+  ## A talking gnome who is outdoors but walking has left the huddle.
+  ## One gnome left dissolves the conversation.
+  var leavers: seq[int]
+  for houseIndex, villager in brains.villagers.pairs:
+    if not villager.talking:
+      continue
+    if houseIndex in outdoorFeet and houseIndex notin stillFeet:
+      leavers.add(houseIndex)
+  for houseIndex in leavers:
+    brains.leaveEncounter(brains.villagers[houseIndex])
+
+proc encounterCircles*(
+  brains: Brains,
+  feet: Table[int, Point]
+): seq[tuple[x, y, radius: int]] =
+  ## Sparkle-ring geometry for outdoor conversations this frame.
+  brains.book.encounterCircles(feet)
+
+proc syncConversationCircles*(
+  brains: Brains,
+  outdoorFeet,
+  stillFeet: Table[int, Point]
+): seq[tuple[x, y, radius: int]] =
+  ## Drops walkers from chat mode, then returns frozen outdoor rings.
+  brains.dropWalkers(outdoorFeet, stillFeet)
+  brains.encounterCircles(stillFeet)
+
 proc allFailed*(brains: Brains): bool =
   ## True when no villager can play any more.
   for villager in brains.villagers.values:

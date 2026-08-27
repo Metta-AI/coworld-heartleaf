@@ -11,6 +11,12 @@ const
   FoodVeggieSlots* = 24
   HouseCount* = 9
   InteractionRadius* = 40
+  ConversationExitRadius* = 72
+    ## How far a gnome can drift from the huddle before the sparkle
+    ## ring no longer counts them.
+  ConversationRingRadius* = ConversationExitRadius div 2
+    ## One sparkle-ring size for every huddle. Gnomes may stand a
+    ## little outside it.
   PlayerBoxWidth* = 14
   PlayerBoxHeight* = 8
   PlayerBoxOffsetX* = 9
@@ -109,6 +115,29 @@ proc distanceSquared*(ax, ay, bx, by: int): int =
     dx = ax - bx
     dy = ay - by
   dx * dx + dy * dy
+
+proc integerDistance*(ax, ay, bx, by: int): int =
+  ## Integer length of the line from (ax, ay) to (bx, by).
+  let squared = distanceSquared(ax, ay, bx, by)
+  result = 0
+  while result * result < squared:
+    inc result
+
+proc conversationCircle*(feet: seq[Point]): tuple[x, y, radius: int] =
+  ## Centroid of the feet and a fixed ring radius. Returns (0, 0, 0)
+  ## when there are fewer than two feet. Gnomes may stand a little
+  ## outside the ring.
+  if feet.len < 2:
+    return
+  var
+    sumX = 0
+    sumY = 0
+  for foot in feet:
+    sumX += foot.x
+    sumY += foot.y
+  result.x = sumX div feet.len
+  result.y = sumY div feet.len
+  result.radius = ConversationRingRadius
 
 proc rectDistanceSquared*(a, b: Rect): int =
   ## Returns the squared distance between two rectangles.

@@ -1,10 +1,10 @@
 import
-  std/[json, os, random, strutils, tables, times],
+  std/[json, math, os, random, strutils, tables, times],
   flatty, jsony, pixie,
   bitworld/aseprite, bitworld/pixelfonts, bitworld/spriteprotocol,
   bitworld/resources, bitworld/sprites,
   heartleaf/common, heartleaf/protocol, heartleaf/souls,
-  heartleaf/observation, heartleaf/navigation,
+  heartleaf/observation, heartleaf/navigation, heartleaf/encounters,
   replays
 
 when not defined(emscripten):
@@ -169,11 +169,37 @@ const
   InsetChatZ = 31_601
   OutlinePad = 1
   TrailObjectBase = 24_000
+  ConversationRingSpriteBase = 8900
+  ConversationRingObjectBase = 26_000
+  ConversationRingZ = 55
+    ## Above the walk trails (50), below every gnome (their z starts at
+    ## world y + 100): the ring reads as a mark on the ground.
+  ConversationRingPhases = 16
+    ## Animation frames for the one shared ring sprite. Playback
+    ## cycles these in order; every huddle reuses the same frames.
+  ConversationRingTicksPerPhase = 2
+    ## Global ticks per animation frame.
+  ConversationSparkles = 18
+    ## Sparkles around one ring.
+  ConversationRingPad = 8
+    ## Extra pixels so sparkle arms are not clipped at the edge.
   TrailZ = 50
   TrailSampleTicks = 6
   TrailMaxPoints = 5
   ChatBannerSpriteId = 8700
+  PortraitSpriteBase = 8701
+  PortraitFlipSpriteBase = 8710
+  ChatBannerGlyphSpriteBase = 8720
   ChatBannerObjectId = 25_000
+  ChatBannerPortraitObjectBase = 25_001
+  ChatBannerGlyphObjectBase = 25_010
+  ChatBannerMaxGlyphs = 160
+  ChatBannerBgZ = 0
+  ChatBannerPortraitZ = 1
+  ChatBannerGlyphZ = 2
+  ChatBannerInkR = 0x94'u8
+  ChatBannerInkG = 0x5C'u8
+  ChatBannerInkB = 0x29'u8
   ChatFeedShowSeconds* = 4.0
     ## Wall-clock hold for one delay-chat banner line, independent of
     ## sim speed and of whether the viewer runs at 24 or 60 fps.
@@ -263,10 +289,10 @@ type
     message: string
 
   ChatBannerHearer = object
-    portrait: RgbaSprite
-    tag: RgbaSprite
+    gnomeIndex: int
+    name: string
     portraitX: int
-    tagX: int
+    nameX: int
 
   House = object
     rect: Rect
@@ -342,6 +368,12 @@ type
     dinnerDone: bool
     playerInitPacket: seq[uint8]
     trails: seq[seq[TrailPoint]]  ## viewer-only history, never hashed
+    conversationCircles*: seq[tuple[x, y, radius: int]]
+      ## Viewer-only sparkle rings. Never hashed.
+    conversationTimeline: ConversationTimeline
+      ## Replay chat-mode objects from game.log. Empty in live play.
+    conversationAnchors: Table[int, ConversationAnchor]
+      ## Frozen ring positions keyed by encounter id. Viewer-only.
     chatBanner: RgbaSprite
     portraits: seq[RgbaSprite]
     chatFeed: seq[ChatFeedItem]   ## viewer-only delay chat, never hashed
@@ -448,6 +480,8 @@ proc addSpriteProtocolInit(
   viewportHeight: int,
   globalPanel = false
 )
+proc flippedHorizontal(sprite: RgbaSprite): RgbaSprite
+proc conversationRingSprite(phase: int): RgbaSprite
 
 proc dataDir(): string =
   ## Returns the Heartleaf data directory.
@@ -711,6 +745,7 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   result.textFont = readPixelFont(tiny5Path)
   result.chatBanner = loadChatBanner(dataRoot / "chatbanner.aseprite")
   result.portraits = loadPortraits(dataRoot)
+  result.conversationAnchors = initTable[int, ConversationAnchor]()
   result.chatFeedIndex = -1
   result.players = @[]
   result.dayNumber = 1
@@ -1245,6 +1280,38 @@ proc clockGlyphSpriteId(ch: char): int =
   ## Returns the sprite id for one clock glyph.
   ClockGlyphSpriteBase + ch.clockGlyphIndex()
 
+proc bannerGlyphSpriteId(ch: char): int =
+  ## Returns the init-packet sprite id for one banner glyph.
+  var index = ord(ch) - FirstPrintableAscii
+  if index < 0 or index >= PrintableAsciiCount:
+    index = ord('?') - FirstPrintableAscii
+  ChatBannerGlyphSpriteBase + index
+
+proc bannerGlyphSprite(sim: SimServer, ch: char): RgbaSprite =
+  ## Builds one Tiny5 glyph in banner ink on a transparent background.
+  let
+    glyph = sim.textFont.glyphAt(ch)
+    width = max(1, glyph.width)
+    height = max(1, glyph.height)
+    ink = rgba(ChatBannerInkR, ChatBannerInkG, ChatBannerInkB, 255)
+  result = newRgbaSprite(width, height)
+  for gy in 0 ..< glyph.height:
+    for gx in 0 ..< glyph.width:
+      if glyph.glyphPixel(gx, gy):
+        result.putPixel(gx, gy, ink)
+
+proc portraitSpriteId(gnomeIndex: int, flipped: bool): int =
+  ## Returns the init-packet sprite id for one gnome portrait.
+  let slot =
+    if gnomeIndex < 0:
+      0
+    else:
+      gnomeIndex mod HouseCount
+  if flipped:
+    PortraitFlipSpriteBase + slot
+  else:
+    PortraitSpriteBase + slot
+
 proc dailyResultsJson*(sim: SimServer): string =
   ## Returns one daily player score result as JSON.
   var
@@ -1409,6 +1476,36 @@ proc addSpriteProtocolInit(
         gnome.frames[direction],
         GnomeLabelPrefix & $gnomeIndex & " " & direction.directionLabel()
       )
+  if sim.chatBanner.width > 0:
+    packet.addRgbaSprite(
+      ChatBannerSpriteId,
+      sim.chatBanner,
+      "chat banner"
+    )
+  for i, portrait in sim.portraits:
+    packet.addRgbaSprite(
+      PortraitSpriteBase + i,
+      portrait,
+      "portrait " & $i
+    )
+    packet.addRgbaSprite(
+      PortraitFlipSpriteBase + i,
+      portrait.flippedHorizontal(),
+      "portrait flip " & $i
+    )
+  for code in FirstPrintableAscii .. LastPrintableAscii:
+    let ch = char(code)
+    packet.addRgbaSprite(
+      ch.bannerGlyphSpriteId(),
+      sim.bannerGlyphSprite(ch),
+      "banner glyph " & $ch
+    )
+  for phase in 0 ..< ConversationRingPhases:
+    packet.addRgbaSprite(
+      ConversationRingSpriteBase + phase,
+      conversationRingSprite(phase),
+      "conversation ring " & $phase
+    )
 
 proc worldClampPixel(value, maxValue: int): int =
   ## Clamps one pixel coordinate into a non-negative world range.
@@ -1421,6 +1518,34 @@ proc playerFootX(player: Player): int =
 proc playerFootY(player: Player): int =
   ## Returns the foot-center y coordinate for one player.
   player.y.footYAt()
+
+proc playerIsWalking(player: Player): bool =
+  ## True when this gnome is moving. Conversation members stand still.
+  abs(player.velX) >= StopThreshold or
+    abs(player.velY) >= StopThreshold or
+    player.inputX != 0 or
+    player.inputY != 0
+
+proc outdoorConversationFeet*(
+  sim: SimServer,
+  seatPlayers: openArray[int],
+  stillOnly = false
+): Table[int, Point] =
+  ## Outdoor foot positions keyed by house seat, for sparkle rings.
+  ## stillOnly skips walkers: a moving gnome has left the huddle.
+  for seat in 0 ..< min(seatPlayers.len, HouseCount):
+    let playerIndex = seatPlayers[seat]
+    if playerIndex < 0 or playerIndex >= sim.players.len:
+      continue
+    let player = sim.players[playerIndex]
+    if player.mapIndex != MainMapIndex:
+      continue
+    if stillOnly and player.playerIsWalking():
+      continue
+    result[seat] = Point(
+      x: player.playerFootX(),
+      y: player.playerFootY()
+    )
 
 proc isWalkable(world: WorldMap, x, y: int): bool =
   ## Returns true when one world pixel is walkable.
@@ -1938,6 +2063,177 @@ proc addTrailObjects(
         spriteId
       )
 
+proc putSparklePixel(sprite: var RgbaSprite, x, y: int, color: ColorRGBA) =
+  ## One sparkle pixel, ignoring anything off the sprite.
+  if x >= 0 and x < sprite.width and y >= 0 and y < sprite.height:
+    sprite.putPixel(x, y, color)
+
+proc drawSparkle(sprite: var RgbaSprite, x, y, twinkle: int) =
+  ## One four-pointed glint. The twinkle variant cycles a sparkle from a
+  ## small star through a full star with diagonal rays and back, so the
+  ## ring shimmers.
+  let
+    core = rgba(255, 253, 240, 255)
+    glow = rgba(255, 214, 110, 240)
+    haze = rgba(255, 228, 160, 170)
+  sprite.putSparklePixel(x, y, core)
+  case twinkle mod 4
+  of 0:
+    sprite.putSparklePixel(x - 1, y, haze)
+    sprite.putSparklePixel(x + 1, y, haze)
+    sprite.putSparklePixel(x, y - 1, haze)
+    sprite.putSparklePixel(x, y + 1, haze)
+  of 1, 3:
+    for arm in 1 .. 2:
+      sprite.putSparklePixel(x - arm, y, glow)
+      sprite.putSparklePixel(x + arm, y, glow)
+      sprite.putSparklePixel(x, y - arm, glow)
+      sprite.putSparklePixel(x, y + arm, glow)
+  else:
+    sprite.putSparklePixel(x - 1, y, core)
+    sprite.putSparklePixel(x + 1, y, core)
+    sprite.putSparklePixel(x, y - 1, core)
+    sprite.putSparklePixel(x, y + 1, core)
+    for arm in 2 .. 3:
+      sprite.putSparklePixel(x - arm, y, glow)
+      sprite.putSparklePixel(x + arm, y, glow)
+      sprite.putSparklePixel(x, y - arm, glow)
+      sprite.putSparklePixel(x, y + arm, glow)
+    sprite.putSparklePixel(x - 1, y - 1, haze)
+    sprite.putSparklePixel(x + 1, y - 1, haze)
+    sprite.putSparklePixel(x - 1, y + 1, haze)
+    sprite.putSparklePixel(x + 1, y + 1, haze)
+
+proc conversationRingSprite(phase: int): RgbaSprite =
+  ## One animation frame of the shared sparkle ring. Glints crawl a
+  ## fraction of a slot per phase. Built once for the init packet.
+  let
+    size = ConversationRingRadius * 2 + ConversationRingPad
+    center = float(size) / 2.0
+    slot = 2.0 * PI / float(ConversationSparkles)
+  result = newRgbaSprite(size, size)
+  let band = rgba(255, 222, 150, 80)
+  for y in 0 ..< size:
+    for x in 0 ..< size:
+      let
+        dx = float(x) + 0.5 - center
+        dy = float(y) + 0.5 - center
+        dist = sqrt(dx * dx + dy * dy)
+      if abs(dist - float(ConversationRingRadius)) <= 1.2:
+        result.putPixel(x, y, band)
+  for i in 0 ..< ConversationSparkles:
+    let
+      angle = float(i) * slot +
+        float(phase) * slot / float(ConversationRingPhases)
+      x = int(center + cos(angle) * float(ConversationRingRadius))
+      y = int(center + sin(angle) * float(ConversationRingRadius))
+    result.drawSparkle(x, y, i * 3 + phase)
+
+proc addConversationCircles(
+  packet: var seq[uint8],
+  sim: SimServer,
+  cameraX,
+  cameraY,
+  viewportWidth,
+  viewportHeight: int
+) =
+  ## Appends conversation circles as the shared 16-frame sparkle ring.
+  ## Sprite pixels live in the init packet; frames only cycle object
+  ## sprite ids.
+  let
+    phase =
+      (sim.tickCount div ConversationRingTicksPerPhase) mod
+        ConversationRingPhases
+    size = ConversationRingRadius * 2 + ConversationRingPad
+    spriteId = ConversationRingSpriteBase + phase
+  for ci, circle in sim.conversationCircles:
+    let
+      screenX = circle.x - size div 2 - cameraX
+      screenY = circle.y - size div 2 - cameraY
+    if not rectVisible(
+      screenX,
+      screenY,
+      size,
+      size,
+      viewportWidth,
+      viewportHeight
+    ):
+      continue
+    packet.addObject(
+      ConversationRingObjectBase + ci,
+      screenX,
+      screenY,
+      ConversationRingZ,
+      MapLayerId,
+      spriteId
+    )
+
+proc inferConversationCircles*(sim: SimServer) =
+  ## Places one frozen sparkle ring on every open conversation. Replay
+  ## uses the game.log enter/exit timeline. Walkers are treated as
+  ## having left; one gnome left dissolves the ring. A joiner recenters
+  ## the ring once. Live play overwrites this from the encounter book.
+  sim.conversationCircles.setLen(0)
+  if sim.conversationTimeline.events.len == 0:
+    return
+  var liveIds: seq[int]
+  for group in sim.conversationTimeline.encounterGroupsAt(sim.tickCount):
+    var
+      huddle: seq[Point]
+      seats: seq[int]
+    for houseIndex in group.members:
+      var player: Player = nil
+      for candidate in sim.players:
+        if candidate.homeFlag == HomeMapIndexBase + houseIndex:
+          player = candidate
+          break
+      if player == nil or player.mapIndex != MainMapIndex:
+        continue
+      if player.playerIsWalking():
+        continue
+      huddle.add(Point(x: player.playerFootX(), y: player.playerFootY()))
+      seats.add(houseIndex)
+    if huddle.len < 2:
+      sim.conversationAnchors.del(group.id)
+      continue
+    liveIds.add(group.id)
+    let old = sim.conversationAnchors.getOrDefault(group.id)
+    if old.seats.len == 0 or old.seats.seatsHaveJoin(seats):
+      sim.conversationAnchors[group.id] =
+        huddle.placeConversationAnchor(seats)
+    else:
+      var kept = old
+      kept.seats = seats
+      sim.conversationAnchors[group.id] = kept
+    let anchor = sim.conversationAnchors[group.id]
+    sim.conversationCircles.add((
+      anchor.x, anchor.y, ConversationRingRadius
+    ))
+  var gone: seq[int]
+  for id in sim.conversationAnchors.keys:
+    if id notin liveIds:
+      gone.add(id)
+  for id in gone:
+    sim.conversationAnchors.del(id)
+
+proc attachConversationLog*(sim: SimServer, replayPath: string) =
+  ## Loads chat-mode enter/exit events from the game.log next to one
+  ## replay so rings follow conversations, not nearby walkers.
+  sim.conversationTimeline = ConversationTimeline()
+  sim.conversationAnchors.clear()
+  if replayPath.len == 0:
+    return
+  sim.conversationTimeline =
+    loadConversationTimeline(replayPath.parentDir / "game.log")
+
+proc cliLoadReplayPath(): string =
+  ## The --load-replay path from argv, or empty.
+  const Prefix = "--load-replay:"
+  for i in 1 .. paramCount():
+    let arg = paramStr(i)
+    if arg.startsWith(Prefix):
+      return arg[Prefix.len .. ^1]
+
 proc addPlayerObjects(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1950,6 +2246,10 @@ proc addPlayerObjects(
   highlightIndex = -1
 ) =
   ## Appends all player sprite objects for one map.
+  if mapIndex == MainMapIndex:
+    packet.addConversationCircles(
+      sim, cameraX, cameraY, viewportWidth, viewportHeight
+    )
   for i, player in sim.players:
     if player.mapIndex != mapIndex:
       continue
@@ -2646,14 +2946,6 @@ proc flippedHorizontal(sprite: RgbaSprite): RgbaSprite =
     for x in 0 ..< sprite.width:
       result.putPixel(sprite.width - 1 - x, y, sprite.rgbaSpriteAt(x, y))
 
-proc blitSprite(target: var RgbaSprite, source: RgbaSprite, ox, oy: int) =
-  ## Blits non-transparent source pixels into a target sprite.
-  for y in 0 ..< source.height:
-    for x in 0 ..< source.width:
-      let color = source.rgbaSpriteAt(x, y)
-      if color.a > 0:
-        target.putPixel(ox + x, oy + y, color)
-
 proc bannerPortrait(sim: SimServer, gnomeIndex: int): RgbaSprite =
   ## Returns the profile portrait for one gnome index.
   if sim.portraits.len == 0:
@@ -2686,95 +2978,77 @@ proc layoutBannerHearers(
   item: ChatFeedItem,
   bannerWidth: int
 ): seq[ChatBannerHearer] =
-  ## Packs up to three hearers from the right, spaced by name tags.
-  var tagRight = bannerWidth - ChatBannerPortraitMargin
+  ## Packs up to three hearers from the right, spaced by names.
+  var nameRight = bannerWidth - ChatBannerPortraitMargin
   for h in 0 ..< min(item.hearers.len, ChatBannerMaxHearers):
     let
-      portrait = sim.bannerPortrait(item.hearers[h].gnomeIndex)
-      tag = sim.nameTagSprite(item.hearers[h].name)
-    if portrait.width == 0 or tag.width == 0:
+      person = item.hearers[h]
+      portrait = sim.bannerPortrait(person.gnomeIndex)
+      nameWidth = sim.chatTextWidth(person.name)
+    if portrait.width == 0 or nameWidth == 0:
       continue
     let
-      tagX = tagRight - tag.width
-      portraitX = tagX + tag.width div 2 - portrait.width div 2
+      nameX = nameRight - nameWidth
+      portraitX = nameX + nameWidth div 2 - portrait.width div 2
     result.add(ChatBannerHearer(
-      portrait: portrait,
-      tag: tag,
+      gnomeIndex: person.gnomeIndex,
+      name: person.name,
       portraitX: portraitX,
-      tagX: tagX
+      nameX: nameX
     ))
-    tagRight = tagX - ChatBannerNameGap
+    nameRight = nameX - ChatBannerNameGap
 
-proc chatBannerSprite(sim: SimServer, item: ChatFeedItem): RgbaSprite =
-  ## Builds the delay-chat banner: the flipped speaker on the left, the
-  ## message in the middle, up to three hearers on the right, and name
-  ## tags along the bottom. Hearer portraits overlap above the names.
-  result = sim.chatBanner
-  if result.width == 0:
-    return
-  let
-    ink = ColorRGBA(r: 0x94, g: 0x5C, b: 0x29, a: 255)
-    speakerPortrait =
-      sim.bannerPortrait(item.speaker.gnomeIndex).flippedHorizontal()
-    speakerTag = sim.nameTagSprite(item.speaker.name)
-    hearers = sim.layoutBannerHearers(item, result.width)
-    tagY = result.height - speakerTag.height - 2
-  result.blitSprite(
-    speakerPortrait,
-    ChatBannerPortraitMargin,
-    ChatBannerPortraitY
-  )
-  for hearer in hearers:
-    result.blitSprite(
-      hearer.portrait,
-      hearer.portraitX,
-      ChatBannerPortraitY
-    )
-  result.blitSprite(
-    speakerTag,
-    ChatBannerPortraitMargin + speakerPortrait.width div 2 -
-      speakerTag.width div 2,
-    tagY
-  )
-  for hearer in hearers:
-    result.blitSprite(hearer.tag, hearer.tagX, tagY)
-  var huddleLeft = result.width - ChatBannerPortraitMargin
-  for hearer in hearers:
-    huddleLeft = min(huddleLeft, hearer.portraitX)
-    huddleLeft = min(huddleLeft, hearer.tagX)
-  let
-    textLeft =
-      ChatBannerPortraitMargin + speakerPortrait.width + ChatBannerTextGap
-    maxWidth = max(20, huddleLeft - ChatBannerTextGap - textLeft)
-    lines = sim.bannerMessageLines(item.message, maxWidth)
-    lineHeight = sim.textFont.height + 1
-    blockTop = max(
-      ChatBannerPortraitY,
-      (result.height - 8 - lines.len * lineHeight) div 2
-    )
-  for i, line in lines:
-    sim.blitTinyText(
-      result,
-      line,
-      textLeft + (maxWidth - sim.chatTextWidth(line)) div 2,
-      blockTop + i * lineHeight,
-      ink
-    )
+proc glyphHasInk(glyph: PixelGlyph): bool =
+  ## Returns true when a glyph draws at least one foreground pixel.
+  for pixel in glyph.pixels:
+    if pixel:
+      return true
+
+proc addBannerGlyphs(
+  packet: var seq[uint8],
+  sim: SimServer,
+  text: string,
+  x, y: int,
+  glyphSlot: var int
+) =
+  ## Places one banner text run as individual glyph objects.
+  var dx = x
+  for ch in text:
+    if glyphSlot >= ChatBannerMaxGlyphs:
+      return
+    let glyph = sim.textFont.glyphAt(ch)
+    if glyphHasInk(glyph):
+      packet.addObject(
+        ChatBannerGlyphObjectBase + glyphSlot,
+        dx,
+        y,
+        ChatBannerGlyphZ,
+        ReplayCenterBottomLayerId,
+        ch.bannerGlyphSpriteId()
+      )
+      inc glyphSlot
+    dx += sim.textFont.glyphAdvance(ch)
 
 proc addChatBanner(
   packet: var seq[uint8],
   sim: SimServer,
-  cache: var seq[SpriteCacheEntry],
   declareLayer: bool
 ) =
   ## Appends the paced delay-chat banner at the top of the center bar.
-  ## The replay controls declare the shared layer; standalone (live
-  ## global view) callers declare it here instead.
+  ## Background, portraits, and glyphs are init-packet sprites; this
+  ## only places objects. The replay controls declare the shared layer;
+  ## standalone callers declare it here instead.
   if sim.chatFeedIndex < 0 or sim.chatFeedIndex >= sim.chatFeed.len:
     return
-  let banner = sim.chatBannerSprite(sim.chatFeed[sim.chatFeedIndex])
-  if banner.width == 0:
+  if sim.chatBanner.width == 0:
     return
+  let
+    item = sim.chatFeed[sim.chatFeedIndex]
+    banner = sim.chatBanner
+    originX = max(0, (ViewportWidth - banner.width) div 2)
+    speakerPortrait = sim.bannerPortrait(item.speaker.gnomeIndex)
+    hearers = sim.layoutBannerHearers(item, banner.width)
+    nameY = banner.height - sim.textFont.height - 2
   if declareLayer:
     packet.addLayer(
       ReplayCenterBottomLayerId,
@@ -2786,17 +3060,76 @@ proc addChatBanner(
       ViewportWidth,
       ChatBannerAreaHeight
     )
-  packet.addRgbaSpriteCached(cache, ChatBannerSpriteId, banner, "chat banner")
   packet.addObject(
     ChatBannerObjectId,
-    max(0, (ViewportWidth - banner.width) div 2),
+    originX,
     0,
-    0,
+    ChatBannerBgZ,
     ReplayCenterBottomLayerId,
     ChatBannerSpriteId
   )
+  if speakerPortrait.width > 0:
+    packet.addObject(
+      ChatBannerPortraitObjectBase,
+      originX + ChatBannerPortraitMargin,
+      ChatBannerPortraitY,
+      ChatBannerPortraitZ,
+      ReplayCenterBottomLayerId,
+      portraitSpriteId(item.speaker.gnomeIndex, true)
+    )
+  for h, hearer in hearers:
+    packet.addObject(
+      ChatBannerPortraitObjectBase + 1 + h,
+      originX + hearer.portraitX,
+      ChatBannerPortraitY,
+      ChatBannerPortraitZ,
+      ReplayCenterBottomLayerId,
+      portraitSpriteId(hearer.gnomeIndex, false)
+    )
+  var glyphSlot = 0
+  packet.addBannerGlyphs(
+    sim,
+    item.speaker.name,
+    originX + ChatBannerPortraitMargin +
+      speakerPortrait.width div 2 -
+      sim.chatTextWidth(item.speaker.name) div 2,
+    nameY,
+    glyphSlot
+  )
+  for hearer in hearers:
+    packet.addBannerGlyphs(
+      sim,
+      hearer.name,
+      originX + hearer.nameX,
+      nameY,
+      glyphSlot
+    )
+  var huddleLeft = banner.width - ChatBannerPortraitMargin
+  for hearer in hearers:
+    huddleLeft = min(huddleLeft, hearer.portraitX)
+    huddleLeft = min(huddleLeft, hearer.nameX)
+  let
+    textLeft =
+      ChatBannerPortraitMargin + speakerPortrait.width +
+        ChatBannerTextGap
+    maxWidth = max(20, huddleLeft - ChatBannerTextGap - textLeft)
+    lines = sim.bannerMessageLines(item.message, maxWidth)
+    lineHeight = sim.textFont.height + 1
+    blockTop = max(
+      ChatBannerPortraitY,
+      (banner.height - 8 - lines.len * lineHeight) div 2
+    )
+  for i, line in lines:
+    packet.addBannerGlyphs(
+      sim,
+      line,
+      originX + textLeft +
+        (maxWidth - sim.chatTextWidth(line)) div 2,
+      blockTop + i * lineHeight,
+      glyphSlot
+    )
 
-proc buildGlobalPacket(
+proc buildGlobalPacket*(
   sim: SimServer,
   state: PlayerViewerState,
   nextState: var PlayerViewerState,
@@ -2874,7 +3207,7 @@ proc buildGlobalPacket(
       replayLooping,
       replayMismatchTick
     )
-  result.addChatBanner(sim, nextState.spriteCache, declareLayer = not replayControls)
+  result.addChatBanner(sim, declareLayer = not replayControls)
 
 proc updateDirection(player: var Player, input: InputState) =
   ## Updates the player's facing direction from held input.
@@ -3777,6 +4110,8 @@ proc seekReplay*(replay: var ReplayPlayer, sim: SimServer, tick: int) =
   sim.chatFeed.setLen(0)
   sim.chatFeedIndex = -1
   sim.chatFeedShownAt = 0.0
+  sim.conversationCircles.setLen(0)
+  sim.conversationAnchors.clear()
   while sim.tickCount < tick and replay.hashIndex < replay.data.hashes.len:
     replay.stepReplay(sim)
 
@@ -4045,6 +4380,7 @@ proc replayViewerFrame*(
           replay.replayMaxTick() > 0:
         replay.seekReplay(sim, 0)
         replay.playing = true
+  sim.inferConversationCircles()
   sim.advanceChatFeed()
   var nextState: PlayerViewerState
   result = sim.buildGlobalPacket(
@@ -4662,6 +4998,10 @@ when not defined(emscripten):
         if seatPlayers[seat] >= 0:
           observations[seat] = sim.observe(seatPlayers[seat])
       var frame = brains.advance(observations, epochTime())
+      sim.conversationCircles = brains.syncConversationCircles(
+        sim.outdoorConversationFeet(seatPlayers),
+        sim.outdoorConversationFeet(seatPlayers, stillOnly = true)
+      )
       let paused = not simStarted or frame.paused
       if paused:
         if pausedSince == 0.0:
@@ -4685,6 +5025,10 @@ when not defined(emscripten):
             if seatPlayers[seat] >= 0:
               observations[seat] = sim.observe(seatPlayers[seat])
           frame = brains.advance(observations, epochTime())
+          sim.conversationCircles = brains.syncConversationCircles(
+            sim.outdoorConversationFeet(seatPlayers),
+            sim.outdoorConversationFeet(seatPlayers, stillOnly = true)
+          )
           if frame.paused:
             break
           applyUnpausedFrame(frame)
@@ -5092,6 +5436,7 @@ when not defined(emscripten):
           ReplayPlayer()
       lastTick: MonoTime
     if replayLoaded:
+      sim.attachConversationLog(cliLoadReplayPath())
       replay.buildReplayKeyframes(replaySeed, replayDayTicks)
     # Load assets before healthz so replay viewers get frames immediately.
     let httpServer = newServer(
@@ -5134,6 +5479,7 @@ when not defined(emscripten):
           replaySeed = replayConfig.seed
           replayDayTicks = max(1, replayConfig.daySeconds) * TicksPerSecond
           sim = initSimServer(replaySeed, replayDayTicks)
+          sim.attachConversationLog(replayFilePath(pendingReplayUri))
           replay = initReplayPlayer(replayData)
           replay.buildReplayKeyframes(replaySeed, replayDayTicks)
           replayLoaded = true
@@ -5177,6 +5523,7 @@ when not defined(emscripten):
               replay.replayMaxTick() > 0:
             replay.seekReplay(sim, 0)
             replay.playing = true
+      sim.inferConversationCircles()
       sim.advanceChatFeed()
 
       for i in 0 ..< viewerSockets.len:

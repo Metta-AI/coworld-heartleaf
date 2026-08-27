@@ -399,6 +399,51 @@ block:
   doAssert sim.delayChatMessage() == "hi",
     "zipping sim ticks should not skip the hold"
 
+echo "Testing delay chat banner reuses init sprites"
+block:
+  var sim = initSimServer(1)
+  discard sim.addPlayer("alice", 0)
+  sim.queueDelayChat("Ivan", "hello there")
+  sim.advanceChatFeed(1.0)
+  var next: PlayerViewerState
+  let first = sim.buildGlobalPacket(nil, next)
+  var
+    sawBanner = false
+    ringFrames = 0
+    glyphSprites = 0
+    portraitSprites = 0
+  for msg in parseSpritePacket(first):
+    if msg.kind != spkSprite:
+      continue
+    if msg.sprite.label == "chat banner":
+      sawBanner = true
+    elif msg.sprite.label.startsWith("conversation ring"):
+      inc ringFrames
+    elif msg.sprite.label.startsWith("banner glyph"):
+      inc glyphSprites
+    elif msg.sprite.label.startsWith("portrait"):
+      inc portraitSprites
+  doAssert sawBanner, "the banner background is in the init packet"
+  doAssert ringFrames == 16, "sixteen ring frames are in the init packet"
+  doAssert glyphSprites > 50, "banner glyphs are in the init packet"
+  doAssert portraitSprites >= 18, "portraits and flips are in the init packet"
+  var next2: PlayerViewerState
+  let second = sim.buildGlobalPacket(next, next2)
+  var bannerObjects = 0
+  for msg in parseSpritePacket(second):
+    if msg.kind == spkSprite:
+      doAssert msg.sprite.label != "chat banner",
+        "must not resend the banner background"
+      doAssert not msg.sprite.label.startsWith("banner glyph"),
+        "must not resend banner glyphs"
+      doAssert not msg.sprite.label.startsWith("portrait"),
+        "must not resend portraits"
+      doAssert not msg.sprite.label.startsWith("conversation ring"),
+        "must not resend ring frames"
+    elif msg.kind == spkObject:
+      inc bannerObjects
+  doAssert bannerObjects > 0, "later frames still place banner objects"
+
 echo "Testing the game clock fits the hosted deadline"
 doAssert DayTotalMinutes == 12 * 60, "a day is twelve hours"
 doAssert DayTicks == 180 * TicksPerSecond, "three-minute days"
@@ -713,6 +758,81 @@ block:
     "say still counts if the group dissolved while the ask was in flight"
   ivan.askedWhileTalking = false
   doAssert not ivan.modeAllows(say)
+
+echo "Testing conversation circle geometry"
+block:
+  doAssert ConversationExitRadius == 72
+  doAssert ConversationRingRadius == 36
+  doAssert conversationCircle(@[]).radius == 0
+  doAssert conversationCircle(@[Point(x: 10, y: 10)]).radius == 0
+  let pair = conversationCircle(@[
+    Point(x: 100, y: 100),
+    Point(x: 132, y: 100)
+  ])
+  doAssert pair.x == 116 and pair.y == 100
+  doAssert pair.radius == ConversationRingRadius
+  let spread = conversationCircle(@[
+    Point(x: 0, y: 0),
+    Point(x: 200, y: 0)
+  ])
+  doAssert spread.x == 100 and spread.y == 0
+  doAssert spread.radius == ConversationRingRadius,
+    "the ring stays one size when people stand outside it"
+  var book = initEncounterBook()
+  var feet = initTable[int, Point]()
+  doAssert book.encounterCircles(feet).len == 0
+  discard book.startEncounter(0, 1)
+  feet[0] = Point(x: 100, y: 100)
+  doAssert book.encounterCircles(feet).len == 0, "one outdoor member is not a ring"
+  feet[1] = Point(x: 140, y: 100)
+  let rings = book.encounterCircles(feet)
+  doAssert rings.len == 1, "two outdoor members draw a ring"
+  doAssert rings[0].radius == ConversationRingRadius
+  let frozenX = rings[0].x
+  feet[0] = Point(x: 10, y: 10)
+  let dragged = book.encounterCircles(feet)
+  doAssert dragged.len == 1
+  doAssert dragged[0].x == frozenX,
+    "a walker must not drag the ring; they already left it"
+  feet.del(0)
+  doAssert book.encounterCircles(feet).len == 0,
+    "one gnome left dissolves the conversation ring"
+  feet[0] = Point(x: 100, y: 100)
+  discard book.encounterCircles(feet)
+  let encounter = book.encounter(1)
+  encounter.addMember(2)
+  feet[2] = Point(x: 180, y: 100)
+  let joined = book.encounterCircles(feet)
+  doAssert joined.len == 1
+  doAssert joined[0].x != frozenX,
+    "a new joiner recenters the ring once"
+
+echo "Testing conversation rings follow chat-mode objects"
+block:
+  let timeline = parseConversationTimeline(
+    """{"tick":10,"seat":0,"kind":"convo-enter","text":"conversation enter id=1 members=Ivan,Egor turn=0"}
+{"tick":15,"seat":4,"kind":"convo-enter","text":"conversation enter id=1 members=Egor,Ivan,Maxim turn=1"}
+{"tick":20,"seat":0,"kind":"convo-exit","text":"conversation exit id=1 turn=2"}
+{"tick":20,"seat":8,"kind":"convo-exit","text":"conversation exit id=1 turn=2"}
+{"tick":20,"seat":4,"kind":"convo-exit","text":"conversation exit id=1 turn=2"}
+"""
+  )
+  doAssert timeline.encounterMembersAt(9).len == 0
+  let opened = timeline.encounterMembersAt(10)
+  doAssert opened.len == 1
+  doAssert 0 in opened[0] and 8 in opened[0]
+  doAssert 4 notin opened[0]
+  let joined = timeline.encounterMembersAt(15)
+  doAssert joined.len == 1
+  doAssert 0 in joined[0] and 4 in joined[0] and 8 in joined[0]
+  doAssert timeline.encounterMembersAt(20).len == 0
+  var sim = initSimServer(1)
+  discard sim.addPlayer("alice", 0)
+  discard sim.addPlayer("bob", 1)
+  sim.applyPlayerChat(0, "hello")
+  sim.inferConversationCircles()
+  doAssert sim.conversationCircles.len == 0,
+    "speech bubbles without a conversation object must not draw a ring"
 
 echo "Testing a mid-ask bye does not reject the other gnome's say"
 block:

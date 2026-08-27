@@ -92,6 +92,7 @@ proc loadReplayPath(viewer: ReplayViewer, path: string) =
     return
   try:
     viewer.loadReplayBytes(path, readFile(path))
+    viewer.sim.attachConversationLog(path)
   except CatchableError as e:
     viewer.app.setStatus("Could not read replay: " & e.msg)
 
