@@ -441,11 +441,13 @@ proc clockAnnouncement(villager: Villager): string =
   elif minutes < DayEndMinutes:
     let hours = (DayEndMinutes - minutes) div 60
     if hours <= 0:
-      result.add(" Night falls within the hour.")
+      result.add(" The party ends within the hour.")
+    elif hours == 1:
+      result.add(" One hour of party left.")
     else:
-      result.add(" " & $hours & " hours till night.")
+      result.add(" " & $hours & " hours of party left.")
   else:
-    result.add(" It is night.")
+    result.add(" The portal takes you now.")
 
 proc recordDayEnd*(villager: Villager) =
   ## Records the end of the day once and logs the transcript size.

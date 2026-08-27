@@ -592,6 +592,7 @@ block:
   doAssert "reason field is your notes" in text, "reason stays as self memory"
   doAssert "Talking:" in text, "the mechanics lock talk mode"
   doAssert "Dinner bell" in text, "the dinner bell is in the mechanics"
+  doAssert "portal takes you" in text, "night is a portal, not a curfew"
   doAssert "Where line" in text, "location is in the mechanics"
   doAssert "Last JSON was ignored" in text, "ignored actions are told why"
   let bare = systemPrompt(parseSoul("#!m\nJust a soul.\n"), "Ivan")
@@ -1158,16 +1159,14 @@ block:
       sim.step(newSeq[InputState](2))
       inc ended
     doAssert sim.scoreScreenActive(), "the day should end"
-    doAssert sim.playerScore(0) == -CurfewPenalty, "away from home at 9pm costs 3"
+    doAssert sim.playerScore(0) == 0, "away from home at 9pm has no penalty"
     doAssert sim.playerScore(1) == 0, "bob was home"
     now += 0.05
     frame = brains.advance(observations(), now)
     doAssert frame.paused == false, "the score screen keeps stepping"
-    var curfewLines = 0
     for line in brains.villagers[0].history:
-      if line.content.startsWith("(Curfew:"):
-        inc curfewLines
-    doAssert curfewLines == 1, "alice hears about the penalty once"
+      doAssert not line.content.startsWith("(Curfew:"),
+        "nobody hears a curfew penalty"
     for line in brains.villagers[1].history:
       doAssert not line.content.startsWith("(Curfew:"), "bob hears nothing"
 
@@ -1363,6 +1362,8 @@ Egor: llm interrupt day=1 minutes=720 tick=180 now=1060.000 clock=12:00pm reason
   doAssert not ivan.pending and ivan.outcome == "usable"
   doAssert yura.outcome == "ignored"
   doAssert ivan.tokens == 100000, "reply in/cache/out tokens are summed"
+  doAssert ivan.promptTokens == 99000, "prompt is in plus cache"
+  doAssert ivan.cacheTokens == 19000, "cache is read plus write"
   doAssert dima.outcome == "parse"
   doAssert dima.tokens == 0, "a reply without usage has no tokens"
   doAssert ivan.endNow - ivan.startNow == 38.0
@@ -1398,7 +1399,9 @@ Egor: llm interrupt day=1 minutes=720 tick=180 now=1060.000 clock=12:00pm reason
   doAssert "#e9ecef" notin svg, "the old paper-on-paper hour color is gone"
   let page = calls.renderLlmPage(clocks, veggies, houses, ticks)
   doAssert "<h1>Heartleaf LLM Calls</h1>" in page
-  doAssert "Interrupts held" in page
+  doAssert "Interrupts held" notin page
+  doAssert "Cache %" in page
+  doAssert "19.2%" in page, "Ivan's cacheable prefix is 19.2%"
   doAssert "LLM seconds" in page
   doAssert "Avg LLM Seconds" in page
   doAssert "Non-LLM seconds" in page

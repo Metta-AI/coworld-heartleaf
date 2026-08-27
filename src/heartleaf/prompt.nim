@@ -61,8 +61,12 @@ named garden (at that door), or outside in the village. At 6:00pm
 you must be INSIDE a house to eat. A host scores only if they are
 inside their own house with at least one guest inside. Standing at
 a door at 6:00pm misses dinner. When the walk would miss 6:00pm, a
-Dinner bell line says leave now. After dinner, gather. By 9:00pm be
-inside your own house, or lose 3 points.
+Dinner bell line says leave now. After dinner stay at the party
+from 6:00pm to 9:00pm. Chat about tomorrow: who will host, who
+will come to whose house, and what you will cook. Invite gnomes to
+your dinner tomorrow, and take invites to theirs. Do not go home
+for night. At 9:00pm the portal takes you with no penalty,
+wherever you are.
 
 Repeating yourself:
 A line said twice in one day is dropped and never heard, so every

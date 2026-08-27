@@ -3640,17 +3640,14 @@ proc startDay(sim: SimServer) =
     sim.teleportPlayerToOwnHome(i)
 
 proc startScoreScreen(sim: SimServer) =
-  ## Starts the end-of-day scoring screen. Curfew: a gnome that is not
-  ## inside its own house when the day ends loses CurfewPenalty points
-  ## before everyone is sent home.
+  ## Starts the end-of-day scoring screen. The portal takes every gnome
+  ## home with no curfew penalty.
   sim.dayTick = sim.dayTicks
   sim.scoreTicks = ScoreScreenTicks
   for player in sim.players.mitems:
     player.dinnerTicks = 0
     player.dinnerRecord = nil
-    player.curfewMissed = player.mapIndex != player.homeFlag
-    if player.curfewMissed:
-      player.score -= CurfewPenalty
+    player.curfewMissed = false
   for i in 0 ..< sim.players.len:
     sim.teleportPlayerToOwnHome(i)
 

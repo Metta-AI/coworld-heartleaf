@@ -58,11 +58,10 @@ host's served food is removed. Visitors keep their own inventory.
 Hosts gain the food-times-visitors score above, plus whatever they ate.
 Guests gain only their eating score.
 
-## Curfew
+## Night
 
-When the day ends at 9:00 PM, every gnome that is not inside its own
-house loses 3 points. Being inside someone else's house counts as out.
-A score can go below zero.
+When the day ends at 9:00 PM the portal takes every gnome home. There
+is no curfew penalty for being at a party or anywhere else.
 
 ## Souls And Brains
 

@@ -73,6 +73,8 @@ type
     house*: int
     own*: bool
     tokens*: int
+    promptTokens*: int
+    cacheTokens*: int
     turnKind*: string
     turnIndex*: int
     members*: string
@@ -117,6 +119,8 @@ type
     outcome*: string
     pending*: bool
     tokens*: int
+    promptTokens*: int
+    cacheTokens*: int
     turnIndex*: int
     interrupts*: seq[LlmInterruptMark]
 
@@ -265,12 +269,20 @@ proc gnomeFromLine(text: string): string =
       return name
   ""
 
-proc usageTokens(text: string): int =
-  ## Input, cache, and output tokens on one reply line.
+proc usagePromptTokens(text: string): int =
+  ## Uncached input plus cache read and write on one reply.
   text.parseIntField("in") +
     text.parseIntField("cacheRead") +
-    text.parseIntField("cacheWrite") +
-    text.parseIntField("out")
+    text.parseIntField("cacheWrite")
+
+proc usageCacheTokens(text: string): int =
+  ## Tokens in the cacheable prefix: cache hits plus this write.
+  text.parseIntField("cacheRead") +
+    text.parseIntField("cacheWrite")
+
+proc usageTokens(text: string): int =
+  ## Input, cache, and output tokens on one reply line.
+  text.usagePromptTokens() + text.parseIntField("out")
 
 proc eventFromBody(
   kindName, body, gnome: string,
@@ -291,6 +303,8 @@ proc eventFromBody(
     house: body.parseIntField("house"),
     own: body.fieldValue("own") == "yes",
     tokens: body.usageTokens(),
+    promptTokens: body.usagePromptTokens(),
+    cacheTokens: body.usageCacheTokens(),
     turnKind: body.fieldValue("kind"),
     turnIndex: body.parseIntField("index", body.parseIntField("turn")),
     members: body.fieldValue("members")
@@ -467,6 +481,8 @@ proc pairLlmCalls*(events: seq[LlmEvent], game: int): seq[LlmCall] =
         else:
           call.outcome = event.outcome
         call.tokens = event.tokens
+        call.promptTokens = event.promptTokens
+        call.cacheTokens = event.cacheTokens
         result.add(call)
         open.del(event.gnome)
     of LlmInterrupt:
@@ -1040,37 +1056,49 @@ proc avgSeconds(seconds: float, calls: int): string =
   else:
     "-"
 
+proc cachePercent(cacheTokens, promptTokens: int): string =
+  ## Cacheable share of prompt tokens, or a dash with none.
+  if promptTokens <= 0:
+    return "-"
+  formatFloat(
+    100.0 * cacheTokens.float / promptTokens.float,
+    ffDecimal,
+    1
+  ) & "%"
+
 proc callCounts(calls: seq[LlmCall]): seq[
     tuple[
       gnome: string,
-      calls, interrupts, tokens: int,
+      calls, tokens, promptTokens, cacheTokens: int,
       seconds: float
     ]
 ] =
   ## Per-gnome totals for the summary table.
   var byName: Table[string, tuple[
-    calls, interrupts, tokens: int, seconds: float
+    calls, tokens, promptTokens, cacheTokens: int, seconds: float
   ]]
   for name in PlayerNames:
-    byName[name] = (0, 0, 0, 0.0)
+    byName[name] = (0, 0, 0, 0, 0.0)
   for call in calls:
     if call.gnome notin byName:
       continue
     var row = byName[call.gnome]
     inc row.calls
-    row.interrupts += call.interrupts.len
     row.tokens += call.tokens
+    row.promptTokens += call.promptTokens
+    row.cacheTokens += call.cacheTokens
     row.seconds += max(0.0, call.endNow - call.startNow)
     byName[call.gnome] = row
   for name in PlayerNames:
     let row = byName[name]
     result.add((
-      name, row.calls, row.interrupts, row.tokens, row.seconds
+      name, row.calls, row.tokens, row.promptTokens,
+      row.cacheTokens, row.seconds
     ))
 
 proc summaryRow(
   name: string,
-  calls, interrupts, tokens: int,
+  calls, tokens, promptTokens, cacheTokens: int,
   seconds, idle: float
 ): string =
   ## One summary table row.
@@ -1085,7 +1113,7 @@ proc summaryRow(
   result.add "</td><td>"
   result.add formatFloat(idle, ffDecimal, 1)
   result.add "</td><td>"
-  result.add $interrupts
+  result.add cachePercent(cacheTokens, promptTokens)
   result.add "</td><td>"
   result.add $tokens
   result.add "</td><td>"
@@ -1096,39 +1124,44 @@ proc renderSummary(
   calls: seq[LlmCall],
   clocks: seq[ClockMark] = @[]
 ): string =
-  ## A compact table of calls, averages, idle time, tokens, and cost.
+  ## A compact table of calls, averages, idle time, cache, tokens, cost.
   let (origin, last) = calls.timeBounds(clocks)
   let span = max(0.0, last - origin)
   result.add "<table class=\"wide\">\n"
   result.add "<caption>LLM calls by gnome, in wall-clock seconds. "
-  result.add "Non-LLM is time with no call in flight. Cost is $1 per "
-  result.add "million tokens, counting input, cache, and output."
+  result.add "Non-LLM is time with no call in flight. Cache % is the "
+  result.add "cacheable prefix (cache read plus write) over prompt "
+  result.add "tokens. Cost is $1 per million tokens, counting input, "
+  result.add "cache, and output."
   result.add "</caption>\n"
   result.add "<thead><tr><th>Gnome</th><th>Calls</th>"
   result.add "<th>LLM seconds</th><th>Avg LLM Seconds</th>"
-  result.add "<th>Non-LLM seconds</th><th>Interrupts held</th>"
+  result.add "<th>Non-LLM seconds</th><th>Cache %</th>"
   result.add "<th>Tokens</th><th>Cost</th>"
   result.add "</tr></thead>\n"
   result.add "<tbody>\n"
   var
     totalCalls = 0
-    totalInterrupts = 0
     totalTokens = 0
+    totalPrompt = 0
+    totalCache = 0
     totalSeconds = 0.0
     totalIdle = 0.0
   for row in calls.callCounts():
     let idle = max(0.0, span - row.seconds)
     result.add summaryRow(
-      row.gnome, row.calls, row.interrupts, row.tokens, row.seconds, idle
+      row.gnome, row.calls, row.tokens, row.promptTokens,
+      row.cacheTokens, row.seconds, idle
     )
     totalCalls += row.calls
-    totalInterrupts += row.interrupts
     totalTokens += row.tokens
+    totalPrompt += row.promptTokens
+    totalCache += row.cacheTokens
     totalSeconds += row.seconds
     totalIdle += idle
   result.add "</tbody>\n<tfoot>\n"
   result.add summaryRow(
-    "Total", totalCalls, totalInterrupts, totalTokens,
+    "Total", totalCalls, totalTokens, totalPrompt, totalCache,
     totalSeconds, totalIdle
   )
   result.add "</tfoot></table>\n"
