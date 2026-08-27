@@ -1037,6 +1037,93 @@ block:
       sawIgnore = true
   doAssert sawIgnore, "wait in conversation is ignored with a reason"
 
+echo "Testing the conversation clock inside a movement turn"
+block:
+  var sim = initSimServer(1)
+  doAssert sim.addPlayer("alice", 0) == 0
+  doAssert sim.addPlayer("bob", 1) == 1
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let client = newScriptedBedrockClient()
+  let brains = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, 1)
+  brains.attachSoul(0, soul)
+  brains.attachSoul(1, soul)
+  discard brains.joinOrStartTalk(brains.villagers[0], "Anton")
+  proc observations(): Table[int, Observation] =
+    {0: sim.observe(0), 1: sim.observe(1)}.toTable
+  var now = 6000.0
+  discard brains.advance(observations(), now)
+  var answered = 0
+  proc answerAll(text: string) =
+    while answered < client.started.len:
+      client.scriptReply(BedrockReply(
+        tag: client.started[answered].tag, statusCode: 200, text: text
+      ))
+      inc answered
+  answerAll("""{"action": "say", "message": "opening line"}""")
+  now += 0.1
+  var frame = brains.advance(observations(), now)
+  doAssert brains.phase == MovePhase, "both replied, movement begins"
+  # Walk the movement turn until the conversation clock opens a slot.
+  var guard = 0
+  while not frame.paused and guard < 40:
+    now += 0.05
+    frame = brains.advance(observations(), now)
+    inc guard
+  doAssert frame.paused, "a conversation tick holds the world"
+  doAssert brains.conversationTick == 1, "the first conversation tick"
+  doAssert client.started.len == 3, "exactly one member is asked for a line"
+  let slotRequest = client.started[^1]
+  doAssert frame.blockedNames == @[slotRequest.playerName],
+    "the world waits for the speaker alone"
+  let linesBefore = brains.book.encounter(
+    brains.villagers[0].encounterId
+  ).lines.len
+  client.scriptReply(BedrockReply(
+    tag: slotRequest.tag, statusCode: 200,
+    text: """{"action": "say", "message": "a line in the slot"}"""
+  ))
+  inc answered
+  now += 0.1
+  frame = brains.advance(observations(), now)
+  doAssert not frame.paused, "the line landed and the world runs again"
+  doAssert brains.book.encounter(
+    brains.villagers[0].encounterId
+  ).lines.len == linesBefore + 1, "the slot line is in the shared log"
+  var tickRows = 0
+  for line in brains.gameLog.entries:
+    if "convo-tick" in line:
+      inc tickRows
+  doAssert tickRows == 1, "the closed conversation tick is stamped"
+  # The next slot passes to the other member: round-robin.
+  guard = 0
+  while not frame.paused and guard < 40:
+    now += 0.05
+    frame = brains.advance(observations(), now)
+    inc guard
+  doAssert frame.paused and brains.conversationTick == 2
+  doAssert client.started[^1].playerSlot != slotRequest.playerSlot,
+    "speaking turns rotate"
+  # Silence: five quiet conversation ticks dissolve the circle.
+  var dissolvedAt = -1
+  for round in 1 .. 6:
+    now += 4.0
+    frame = brains.advance(observations(), now)
+    doAssert not frame.paused, "an expired slot releases the world"
+    if not brains.villagers[0].talking:
+      dissolvedAt = round
+      break
+    guard = 0
+    while not frame.paused and guard < 40:
+      now += 0.05
+      frame = brains.advance(observations(), now)
+      inc guard
+  # A speaker whose slot expired still has that request in flight, so
+  # their next slot passes silent too - silence can accrue faster than
+  # one tick per round.
+  doAssert dissolvedAt in 3 .. 5,
+    "consecutive silent ticks end the conversation, got " & $dissolvedAt
+  doAssert not brains.villagers[1].talking, "everyone left the circle"
+
 echo "Testing a brain-driven village"
 block:
   var sim = initSimServer(4242)

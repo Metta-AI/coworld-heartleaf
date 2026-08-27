@@ -2231,6 +2231,8 @@ proc attachConversationTimeline*(
   let recorded = data.conversationLogText()
   if recorded.len > 0:
     sim.conversationTimeline = parseConversationTimeline(recorded)
+    echo "Conversation records: ",
+      sim.conversationTimeline.events.len, " events from the replay"
     return
   if replayPath.len == 0:
     return
