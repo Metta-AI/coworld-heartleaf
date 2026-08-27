@@ -26,13 +26,21 @@ type
     playing*: bool
     looping*: bool
     speedIndex*: int
+    frameAccum*: int
+      ## Frames waited toward the next tick at a slow-motion speed.
     hashValidationFailed*: bool
     hashMismatchTick*: int
     keyframes*: seq[ReplayKeyframe]
 
 const
   ReplayFps* = 24
-  PlaybackSpeeds* = [1, 2, 3, 4, 8, 16]
+  PlaybackSpeedTicks* = [1, 1, 1, 2, 3, 4, 8, 16]
+    ## Ticks stepped on a stepping frame at each speed.
+  PlaybackSpeedFrames* = [4, 2, 1, 1, 1, 1, 1, 1]
+    ## Frames per stepping frame: slow-motion speeds step one tick
+    ## every few frames instead of several ticks every frame.
+  DefaultSpeedIndex* = 2
+    ## The 1X entry.
   ReplayKeyframeTicks* = 100
   HeartleafGameName* = "heartleaf"
   HeartleafGameVersion* = "0.1.0"
@@ -120,11 +128,26 @@ proc initReplayPlayer*(data: ReplayData): ReplayPlayer =
   result.masks = @[]
   result.playing = true
   result.looping = true
+  result.speedIndex = DefaultSpeedIndex
   result.hashMismatchTick = -1
 
-proc replaySpeed*(replay: ReplayPlayer): int =
-  ## Returns the current integer replay speed.
-  PlaybackSpeeds[clamp(replay.speedIndex, 0, PlaybackSpeeds.high)]
+proc replaySpeedIndex*(replay: ReplayPlayer): int =
+  ## Returns the current index into the playback speed tables.
+  clamp(replay.speedIndex, 0, PlaybackSpeedTicks.high)
+
+proc replayTicksThisFrame*(replay: var ReplayPlayer): int =
+  ## Returns how many ticks to step this frame at the current speed.
+  ## Slow-motion speeds step one tick every few frames, so this is 0 on
+  ## the frames in between.
+  let index = replay.replaySpeedIndex()
+  if PlaybackSpeedFrames[index] <= 1:
+    replay.frameAccum = 0
+    return PlaybackSpeedTicks[index]
+  inc replay.frameAccum
+  if replay.frameAccum >= PlaybackSpeedFrames[index]:
+    replay.frameAccum = 0
+    return 1
+  0
 
 proc replayMaxTick*(replay: ReplayPlayer): int =
   ## Returns the final tick available in the replay.
