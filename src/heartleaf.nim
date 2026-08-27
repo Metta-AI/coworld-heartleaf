@@ -1262,16 +1262,29 @@ proc addSpeechBubble(
   anchorY,
   z,
   viewportWidth,
-  viewportHeight: int
+  viewportHeight: int,
+  placedBubbles: var seq[tuple[x, y, w, h: int]]
 ) =
-  ## Appends a speech bubble object above one player name.
+  ## Appends a speech bubble object above one player name. A bubble
+  ## that would cover one already placed this frame is lifted above it,
+  ## so gnomes talking in a huddle stay readable.
   if player.message.len == 0 or player.messageTicks <= 0:
     return
   let
     bubble = sim.speechBubbleSprite(player.message)
     x = screenX + GnomeSpriteSize div 2 - bubble.width div 2
-    y = anchorY - bubble.height - ChatGapY
     spriteId = ChatSpriteBase + playerIndex
+  var
+    y = anchorY - bubble.height - ChatGapY
+    lifted = true
+  while lifted:
+    lifted = false
+    for rect in placedBubbles:
+      if x < rect.x + rect.w and rect.x < x + bubble.width and
+          y < rect.y + rect.h and rect.y < y + bubble.height:
+        y = rect.y - bubble.height - ChatGapY
+        lifted = true
+  placedBubbles.add((x: x, y: y, w: bubble.width, h: bubble.height))
   if not rectVisible(
     x,
     y,
@@ -2547,6 +2560,7 @@ proc addPlayerObjects(
     packet.addHeartEmoteObjects(
       sim, cache, mapIndex, cameraX, cameraY, viewportWidth, viewportHeight
     )
+  var bubbleRects: seq[tuple[x, y, w, h: int]]
   for i, player in sim.players:
     if player.mapIndex != mapIndex:
       continue
@@ -2602,7 +2616,8 @@ proc addPlayerObjects(
       nameY,
       ChatZ,
       viewportWidth,
-      viewportHeight
+      viewportHeight,
+      bubbleRects
     )
 
 proc addHouseGnomeObjects(
@@ -2678,6 +2693,7 @@ proc addHouseInsetView(
     MapLayerId,
     homeBottomSpriteId(tintIndex)
   )
+  var bubbleRects: seq[tuple[x, y, w, h: int]]
   for i, player in sim.players:
     if player.mapIndex != mapIndex:
       continue
@@ -2716,7 +2732,8 @@ proc addHouseInsetView(
       nameY,
       InsetChatZ,
       sim.mainMap.width,
-      sim.mainMap.height
+      sim.mainMap.height,
+      bubbleRects
     )
   packet.addObject(
     InsetOverhangObjectId,
