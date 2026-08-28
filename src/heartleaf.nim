@@ -118,6 +118,9 @@ const
   DirectorMinCropHeight = 220
     ## The tightest zoom, as a crop height in world pixels; keeps a
     ## small circle from filling the whole screen with two gnomes.
+  DirectorMinCropWidth = 250
+    ## The tightest zoom is also never narrower than one wrapped
+    ## speech bubble with margin, so spoken lines fit the shot.
   DirectorPaddingPx = 56
     ## World pixels kept visible around the focused circle.
   DirectorTweenRate = 0.10
@@ -1279,11 +1282,17 @@ proc addSpeechBubble(
     return
   let
     bubble = sim.speechBubbleSprite(player.message)
-    x = screenX + GnomeSpriteSize div 2 - bubble.width div 2
     spriteId = ChatSpriteBase + playerIndex
   var
+    x = screenX + GnomeSpriteSize div 2 - bubble.width div 2
     y = anchorY - bubble.height - ChatGapY
     lifted = true
+  # A bubble that would clip at the viewport edge slides back inside;
+  # its pointer stays on the speaker's column.
+  if bubble.width >= viewportWidth:
+    x = (viewportWidth - bubble.width) div 2
+  else:
+    x = clamp(x, 0, viewportWidth - bubble.width)
   while lifted:
     lifted = false
     for rect in placedBubbles:
@@ -3062,6 +3071,9 @@ proc updateDirectorCamera*(sim: SimServer) =
       mapH
     )
     targetW = targetH * mapW / mapH
+    if targetW < float(DirectorMinCropWidth):
+      targetW = min(float(DirectorMinCropWidth), mapW)
+      targetH = targetW * mapH / mapW
     targetX = clamp(float(sim.directorFocusX) - targetW / 2, 0.0, mapW - targetW)
     targetY = clamp(float(sim.directorFocusY) - targetH / 2, 0.0, mapH - targetH)
   sim.directorCamX += (targetX - sim.directorCamX) * DirectorTweenRate
