@@ -3177,30 +3177,36 @@ proc directorCardSprite(
   sim: SimServer,
   player: Player,
   relation: string,
+  connections: int,
   portrait: RgbaSprite
 ): RgbaSprite =
   ## One conversation card for the director cut, framed like the chat
-  ## banner: the speaker's name and points beside their full spoken
-  ## line, with the relation to their listener along the bottom. The
-  ## face is a separate object over the reserved left area, so it can
-  ## hop when the line is new.
+  ## banner: the speaker's name beside their full spoken line, then a
+  ## ruled footer with their points, connections, and the relation to
+  ## their listener. The face is a separate object over the reserved
+  ## left area, so it can hop when the line is new.
   let
     nameInk = rgba(94, 58, 22, 255)
     textInk = rgba(ChatBannerInkR, ChatBannerInkG, ChatBannerInkB, 255)
     relationInk = rgba(158, 116, 66, 255)
+    ruleInk = rgba(178, 138, 90, 255)
     pad = DirectorCardInnerPad
     textX = pad + portrait.width + 4
     textWidth = DirectorCardWidth - textX - pad
     lines = sim.wrapCardLines(player.message, textWidth)
     lineHeight = sim.textFont.height + 1
+    bodyHeight = max(portrait.height, (lines.len + 1) * lineHeight + 2)
     relationHeight =
       if relation.len > 0:
-        lineHeight + 3
+        lineHeight + 1
       else:
         0
-    textHeight = (lines.len + 1) * lineHeight + 2
-    height = max(portrait.height, textHeight) + relationHeight + pad * 2
-    scoreText = $player.score & " pt"
+    footerHeight = 5 + lineHeight + relationHeight
+    height = bodyHeight + footerHeight + pad * 2
+    pointsText = "Points: " & $player.score
+    connectionsText = "Connections: " & $connections
+    ruleY = pad + bodyHeight + 2
+    statsY = ruleY + 3
   if sim.chatBanner.width > 0:
     result = sim.chatBanner.nineSliceSprite(
       DirectorCardWidth, height, DirectorCardSliceInset
@@ -3209,13 +3215,6 @@ proc directorCardSprite(
     result = newRgbaSprite(DirectorCardWidth, height)
     result.fillRect(0, 0, DirectorCardWidth, height, rgba(233, 213, 170, 245))
   sim.blitTinyText(result, player.playerName, textX, pad, nameInk)
-  sim.blitTinyText(
-    result,
-    scoreText,
-    DirectorCardWidth - pad - sim.chatTextWidth(scoreText),
-    pad,
-    relationInk
-  )
   for i, line in lines:
     sim.blitTinyText(
       result,
@@ -3224,14 +3223,17 @@ proc directorCardSprite(
       pad + (i + 1) * lineHeight + 2,
       textInk
     )
+  result.fillRect(pad, ruleY, DirectorCardWidth - pad * 2, 1, ruleInk)
+  sim.blitTinyText(result, pointsText, pad, statsY, textInk)
+  sim.blitTinyText(
+    result,
+    connectionsText,
+    DirectorCardWidth - pad - sim.chatTextWidth(connectionsText),
+    statsY,
+    textInk
+  )
   if relation.len > 0:
-    sim.blitTinyText(
-      result,
-      relation,
-      pad,
-      height - pad - lineHeight + 1,
-      relationInk
-    )
+    sim.blitTinyText(result, relation, pad, statsY + lineHeight + 1, relationInk)
 
 proc addDirectorConversationCards(
   packet: var seq[uint8],
@@ -3282,9 +3284,13 @@ proc addDirectorConversationCards(
         other = j
     if other < 0:
       return ""
-    const moods = ["friend with ", "neutral to ", "warming to "]
+    const moods = ["neutral with ", "friend with ", "best friend with "]
     moods[(i * 7 + other * 13) mod moods.len] &
       sim.players[other].playerName
+  proc mockConnections(i: int): int =
+    ## Mocked for now: stacked on the heart-connections PR this reads
+    ## the speaker's connection total from the connection book.
+    3 + (i * 5) mod 6
   for (column, columnX, topInset) in [
     # The score panel overlays the window's top left, so the left
     # column starts below it.
@@ -3304,7 +3310,9 @@ proc addDirectorConversationCards(
         face = sim.cardPortraitSprite(sim.players[i].gnomeIndex)
       relations.add(relation)
       faces.add(face)
-      let sprite = sim.directorCardSprite(sim.players[i], relation, face)
+      let sprite = sim.directorCardSprite(
+        sim.players[i], relation, mockConnections(i), face
+      )
       sprites.add(sprite)
       totalHeight += sprite.height + DirectorCardGapY
     # The delay-chat banner overlays the window's bottom edge; keep
@@ -3319,7 +3327,8 @@ proc addDirectorConversationCards(
         cache,
         DirectorCardSpriteBase + i,
         sprite,
-        "director card " & $i & " " & relations[slot] & " " &
+        "director card " & $i & " " & $sim.players[i].score & " " &
+          $mockConnections(i) & " " & relations[slot] & " " &
           sim.players[i].message
       )
       packet.addObject(
@@ -5420,13 +5429,14 @@ when not defined(emscripten):
     elif request.path == WebSocketPath and request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
       request.respondPlain(426, "websocket required\n")
-    elif request.path in [GlobalWebSocketPath, DirectorWebSocketPath] and
+    elif request.path in ["/", GlobalWebSocketPath, DirectorWebSocketPath] and
         request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
-      # /director serves the same viewer page; the page connects its
-      # websocket back to its own path, which lands in the upgrade
-      # branch below and flags the viewer as a director watcher.
-      if request.path == DirectorWebSocketPath and
+      # The root and /director serve the same viewer page; the page
+      # connects its websocket back to its own path, which lands in
+      # the upgrade branch below and flags the viewer as a director
+      # watcher. The director cut is the main page.
+      if request.path != GlobalWebSocketPath and
           not request.checkReplayRequest():
         return
       discard bitworldClient.serveClientFile(
@@ -5463,10 +5473,10 @@ when not defined(emscripten):
         withLock appState.lock:
           appState.playerSlots[websocket] = slot
           appState.playerUsernames[websocket] = username
-    elif request.path in [GlobalWebSocketPath, DirectorWebSocketPath] and
+    elif request.path in ["/", GlobalWebSocketPath, DirectorWebSocketPath] and
         request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
-      if request.path == DirectorWebSocketPath and
+      if request.path != GlobalWebSocketPath and
           not request.checkReplayRequest():
         return
       let websocket = request.upgradeToWebSocket()
@@ -5479,7 +5489,7 @@ when not defined(emscripten):
             appState.replayViewerJoined = true
           appState.globalViewers[websocket] = PlayerViewerState(
             selectedPlayerIndex: -1,
-            directorMode: request.path == DirectorWebSocketPath
+            directorMode: request.path != GlobalWebSocketPath
           )
     elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
