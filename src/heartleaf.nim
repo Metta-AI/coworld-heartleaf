@@ -4368,6 +4368,17 @@ proc addBannerGlyphs(
       inc glyphSlot
     dx += sim.textFont.glyphAdvance(ch)
 
+proc chatFeedNowPlaying*(
+  sim: SimServer
+): tuple[index, gnomeIndex, messageLen: int] =
+  ## The chat line the banner shows right now, for viewer sound hooks.
+  ## Index is -1 when no line shows; a change in the tuple means a new
+  ## line started.
+  if sim.chatFeedIndex < 0 or sim.chatFeedIndex >= sim.chatFeed.len:
+    return (-1, -1, 0)
+  let item = sim.chatFeed[sim.chatFeedIndex]
+  (sim.chatFeedIndex, item.speaker.gnomeIndex, item.message.len)
+
 proc addChatBanner(
   packet: var seq[uint8],
   sim: SimServer,

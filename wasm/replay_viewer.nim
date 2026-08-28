@@ -26,6 +26,16 @@ const
   RepoDir = currentSourcePath().parentDir().parentDir()
   BitworldClientDir = RepoDir.parentDir() / "bitworld" / "client"
 
+when defined(emscripten):
+  {.emit: """
+#include <emscripten.h>
+void heartleaf_talk(int seat, int len) {
+  EM_ASM({ if (window.heartleafTalk) window.heartleafTalk($0, $1); },
+    seat, len);
+}
+""".}
+  proc heartleafTalk(seat, length: cint) {.importc: "heartleaf_talk", nodecl.}
+
 type
   ReplayViewer = ref object
     app: GlobalApp
@@ -34,6 +44,8 @@ type
     state: PlayerViewerState
     inputPackets: seq[string]
     loaded: bool
+    lastChat: tuple[index, gnomeIndex, messageLen: int]
+      ## The banner line last sounded, so each line babbles once.
 
 proc addInputPacket(viewer: ReplayViewer, packet: string) =
   ## Queues one local sprite protocol client packet.
@@ -134,10 +146,21 @@ proc drainInput(viewer: ReplayViewer) =
     viewer.state.handleReplayViewerPacket(packet)
   viewer.inputPackets.setLen(0)
 
+proc soundNewChat(viewer: ReplayViewer) =
+  ## Tells the page when the chat banner starts a new line, so it can
+  ## play the speaker's babble. Web builds only; native stays silent.
+  when defined(emscripten):
+    let now = viewer.sim.chatFeedNowPlaying()
+    if now != viewer.lastChat:
+      viewer.lastChat = now
+      if now.index >= 0:
+        heartleafTalk(cint(now.gnomeIndex), cint(now.messageLen))
+
 proc tick(viewer: ReplayViewer) =
   ## Pumps one replay viewer frame.
   viewer.app.handleInput()
   viewer.drainInput()
+  viewer.soundNewChat()
   let packet = replayViewerFrame(
     viewer.sim,
     viewer.replay,

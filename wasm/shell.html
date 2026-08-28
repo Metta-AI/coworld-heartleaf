@@ -12,6 +12,134 @@
   </head>
   <body>
     <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <button id="radio" title="music and gnome voices">&#9834; sound</button>
+    <style>
+      #radio {
+        position:absolute; top:8px; right:8px; z-index:10;
+        font:12px monospace; color:#cfc7a8; background:#2a2620;
+        border:1px solid #4a4436; border-radius:4px; padding:4px 8px;
+        cursor:pointer; opacity:0.8;
+      }
+      #radio.on { color:#ffe9a0; border-color:#8a7c4e; }
+    </style>
+    <script>
+    // The gnome radio: an original procedural village tune and
+    // Animal-Crossing-style babble when a gnome speaks. Everything is
+    // synthesized in WebAudio - no audio files, nothing external.
+    (function() {
+      var ctx = null, master = null, musicGain = null, on = false;
+      var button = document.getElementById("radio");
+
+      function ensureContext() {
+        if (ctx) return;
+        ctx = new (window.AudioContext || window.webkitAudioContext)();
+        master = ctx.createGain();
+        master.gain.value = 0.5;
+        master.connect(ctx.destination);
+        musicGain = ctx.createGain();
+        musicGain.gain.value = 0.16;
+        musicGain.connect(master);
+        startMusic();
+      }
+
+      // --- The village tune -------------------------------------------
+      // A gentle waltz on a pentatonic-ish folk scale: a music-box
+      // melody over two soft drone voices. Phrases are picked from a
+      // small grammar so the tune wanders without repeating exactly.
+      var ROOT = 196; // G3
+      var SCALE = [1, 9/8, 5/4, 3/2, 5/3, 2, 9/4, 5/2]; // G A B D E G' A' B'
+      var BEAT = 0.42; // seconds; a 3/4 waltz bar is 3 beats
+      var nextBar = 0;
+
+      function pluck(freq, when, dur, gain, bright) {
+        var osc = ctx.createOscillator();
+        osc.type = bright ? "triangle" : "sine";
+        osc.frequency.value = freq;
+        var g = ctx.createGain();
+        g.gain.setValueAtTime(0, when);
+        g.gain.linearRampToValueAtTime(gain, when + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, when + dur);
+        osc.connect(g); g.connect(musicGain);
+        osc.start(when); osc.stop(when + dur + 0.05);
+      }
+
+      var PHRASES = [
+        [0, 2, 4, 5], [4, 5, 7, 5], [5, 4, 2, 0], [2, 4, 2, 1],
+        [0, 4, 5, 4], [7, 5, 4, 2], [4, 2, 1, 0], [1, 2, 4, 2]
+      ];
+      var phrase = 0, chord = 0;
+      var CHORDS = [[0, 2], [3, 5], [1, 4], [0, 3]];
+
+      function scheduleBar(when) {
+        // Drone: two low voices holding the bar's chord.
+        var c = CHORDS[chord % CHORDS.length];
+        pluck(ROOT / 2 * SCALE[c[0]], when, BEAT * 3.2, 0.10, false);
+        pluck(ROOT * SCALE[c[1]] / 2, when + BEAT, BEAT * 2.2, 0.06, false);
+        // Melody: one phrase note per beat, music-box register.
+        var notes = PHRASES[phrase % PHRASES.length];
+        for (var b = 0; b < 3; b++) {
+          var step = notes[b + (phrase % 2)];
+          if (b === 2 && Math.random() < 0.3) continue; // breathe
+          pluck(ROOT * 2 * SCALE[step % SCALE.length],
+            when + b * BEAT, BEAT * 1.4, 0.09, true);
+        }
+        if (phrase % 2 === 1) chord++;
+        phrase += (Math.random() < 0.7) ? 1 : 3;
+      }
+
+      function startMusic() {
+        nextBar = ctx.currentTime + 0.1;
+        (function pump() {
+          if (!ctx) return;
+          while (nextBar < ctx.currentTime + 1.2) {
+            scheduleBar(nextBar);
+            nextBar += BEAT * 3;
+          }
+          setTimeout(pump, 250);
+        })();
+      }
+
+      // --- Gnome babble ----------------------------------------------
+      // Each seat speaks at its own pitch. A line of N letters becomes
+      // a short run of syllable blips, wobbling around the seat pitch.
+      window.heartleafTalk = function(seat, len) {
+        if (!on || !ctx) return;
+        var base = 170 * Math.pow(2, ((seat % 9) * 3 % 12) / 12);
+        var syllables = Math.max(2, Math.min(11, Math.round(len / 6)));
+        var t = ctx.currentTime + 0.03;
+        for (var i = 0; i < syllables; i++) {
+          var freq = base * (1 + (Math.random() - 0.5) * 0.22) *
+            (i === syllables - 1 ? 0.9 : 1); // falling cadence
+          var dur = 0.05 + Math.random() * 0.05;
+          var osc = ctx.createOscillator();
+          osc.type = "square";
+          osc.frequency.setValueAtTime(freq * 1.5, t);
+          osc.frequency.exponentialRampToValueAtTime(freq, t + dur);
+          var g = ctx.createGain();
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(0.055, t + 0.012);
+          g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+          var lp = ctx.createBiquadFilter();
+          lp.type = "lowpass"; lp.frequency.value = 1600;
+          osc.connect(g); g.connect(lp); lp.connect(master);
+          osc.start(t); osc.stop(t + dur + 0.02);
+          t += dur + 0.02 + Math.random() * 0.03;
+        }
+      };
+
+      button.addEventListener("click", function() {
+        on = !on;
+        if (on) {
+          ensureContext();
+          if (ctx.state === "suspended") ctx.resume();
+          button.classList.add("on");
+        } else {
+          button.classList.remove("on");
+        }
+        if (ctx) musicGain.gain.value = on ? 0.16 : 0;
+      });
+    })();
+    </script>
     <script>
       var Module = {
         canvas: (function() {
