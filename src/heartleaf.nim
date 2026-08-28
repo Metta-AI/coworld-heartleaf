@@ -134,6 +134,9 @@ const
   HuddleHoldFrames = 96
     ## Viewer frames an inferred ring outlives the last spoken line,
     ## bridging the quiet beats between lines of one conversation.
+  DirectorDinnerHoldFrames = 240
+    ## Viewer frames the director keeps showing a house interior after
+    ## the last line spoken at the table; dinner talk paces slowly.
   ClockPadX = 2
   ClockPadY = 1
   ClockGlyphGap = 1
@@ -419,6 +422,10 @@ type
       ## tracked by proximity so it survives members shuffling.
     directorWideTicks: int
       ## Frames spent back on the wide shot with a conversation waiting.
+    directorDinnerHouse: int
+    directorDinnerTtl: int
+      ## While positive, the director overlays this house's interior:
+      ## a dinner party is talking indoors, where the map shows nothing.
     inferredHuddles: Table[int, tuple[x, y, ttl: int]]
       ## Fallback conversation rings inferred from replay state when no
       ## game.log rides next to the replay (an http replay URI), keyed
@@ -2982,6 +2989,33 @@ proc updateDirectorCamera*(sim: SimServer) =
     sim.directorCamY = 0
     sim.directorCamW = mapW
     sim.directorCamH = mapH
+  # A dinner party happens indoors, where the outdoor map shows
+  # nothing: track the busiest house holding a real gathering so the
+  # view can overlay its interior.
+  var
+    dinnerHouse = -1
+    dinnerCount = 0
+  for houseIndex in 0 ..< HouseCount:
+    if not sim.houses[houseIndex].valid:
+      continue
+    var occupants = 0
+    for player in sim.players:
+      if player.mapIndex == HomeMapIndexBase + houseIndex:
+        inc occupants
+    if occupants >= 3 and occupants > dinnerCount:
+      dinnerCount = occupants
+      dinnerHouse = houseIndex
+  if dinnerHouse >= 0:
+    sim.directorDinnerHouse = dinnerHouse
+    sim.directorDinnerTtl = DirectorDinnerHoldFrames
+  elif sim.directorDinnerTtl > 0:
+    dec sim.directorDinnerTtl
+    var occupants = 0
+    for player in sim.players:
+      if player.mapIndex == HomeMapIndexBase + sim.directorDinnerHouse:
+        inc occupants
+    if occupants < 2:  # the party is over the moment the table empties
+      sim.directorDinnerTtl = 0
   # Keep following the focused ring while its conversation lives; the
   # ring is anchored but replacements land nearby, so it is matched by
   # proximity.
@@ -3078,6 +3112,11 @@ proc addDirectorWorldView(
     MapLayerId,
     mainOverhangSpriteId(tintIndex)
   )
+  # A talking dinner party pulls up its house interior, but only from
+  # the wide shot: an outdoor conversation keeps the camera.
+  if sim.directorDinnerTtl > 0 and not sim.directorFocusActive and
+      sim.directorCamH >= float(sim.mainMap.height) * DirectorWideSnapRatio:
+    packet.addHouseInsetView(sim, cache, sim.directorDinnerHouse)
   packet.addClockObjects(sim)
 
 proc replayCommandAt(layer, x, y: int): char =
@@ -4837,7 +4876,12 @@ proc replayViewerFrame*(
           replay.replayMaxTick() > 0:
         replay.seekReplay(sim, 0)
         replay.playing = true
-  sim.inferConversationCircles()
+  if replay.circlesTimeline.len > 0:
+    # The replay recorded its circles; they beat any re-derivation.
+    sim.conversationCircles =
+      replay.circlesTimeline.circlesAtTick(sim.tickCount)
+  else:
+    sim.inferConversationCircles()
   sim.advanceChatFeed()
   sim.updateDirectorCamera()
   var nextState: PlayerViewerState
@@ -6033,7 +6077,12 @@ when not defined(emscripten):
               replay.replayMaxTick() > 0:
             replay.seekReplay(sim, 0)
             replay.playing = true
-      sim.inferConversationCircles()
+      if replay.circlesTimeline.len > 0:
+        # The replay recorded its circles; they beat any re-derivation.
+        sim.conversationCircles =
+          replay.circlesTimeline.circlesAtTick(sim.tickCount)
+      else:
+        sim.inferConversationCircles()
       sim.advanceChatFeed()
       sim.updateDirectorCamera()
 

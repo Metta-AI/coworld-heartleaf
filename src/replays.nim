@@ -1,8 +1,15 @@
 import
-  std/strutils,
+  std/[json, strutils],
   bitworld/replays as replayCodec
 
 type
+  CirclesTimeline* = seq[
+    tuple[tick: int, circles: seq[tuple[x, y, radius: int]]]
+  ]
+    ## Conversation circles recorded inside the replay itself: the
+    ## hosted 0.1.3 builds write {"tick","circles"} JSON rows on the
+    ## codec's debug-sprite channel.
+
   ReplayKeyframe* = object
     tick*: int
     simBytes*: string
@@ -28,6 +35,9 @@ type
     speedIndex*: int
     frameAccum*: int
       ## Frames waited toward the next tick at a slow-motion speed.
+    circlesTimeline*: CirclesTimeline
+      ## Circle records parsed out of the replay, empty when the
+      ## replay carries none.
     hashValidationFailed*: bool
     hashMismatchTick*: int
     keyframes*: seq[ReplayKeyframe]
@@ -122,6 +132,38 @@ proc conversationLogText*(data: ReplayData): string =
     rows.add(record.conversationRecordText())
   rows.join("\n")
 
+proc replayCirclesTimeline*(data: ReplayData): CirclesTimeline =
+  ## Reads the conversation circles recorded inside one replay. Rows
+  ## that are not circle records (slot rows share the channel) are
+  ## skipped.
+  for record in data.debugSprites:
+    var text = newString(record.packet.len)
+    for i, b in record.packet:
+      text[i] = char(b)
+    try:
+      let node = parseJson(text)
+      if not node.hasKey("circles"):
+        continue
+      var circles: seq[tuple[x, y, radius: int]]
+      for circle in node["circles"]:
+        circles.add((
+          circle[0].getInt(), circle[1].getInt(), circle[2].getInt()
+        ))
+      result.add((node{"tick"}.getInt(), circles))
+    except CatchableError:
+      discard
+
+proc circlesAtTick*(
+  timeline: CirclesTimeline,
+  tick: int
+): seq[tuple[x, y, radius: int]] =
+  ## The circles in effect at one replay tick: the last change at or
+  ## before it. Works under scrubbing in both directions.
+  for entry in timeline:
+    if entry.tick > tick:
+      break
+    result = entry.circles
+
 proc initReplayPlayer*(data: ReplayData): ReplayPlayer =
   ## Builds replay playback state.
   result.data = data
@@ -130,6 +172,7 @@ proc initReplayPlayer*(data: ReplayData): ReplayPlayer =
   result.looping = true
   result.speedIndex = DefaultSpeedIndex
   result.hashMismatchTick = -1
+  result.circlesTimeline = data.replayCirclesTimeline()
 
 proc replaySpeedIndex*(replay: ReplayPlayer): int =
   ## Returns the current index into the playback speed tables.
