@@ -3266,9 +3266,25 @@ proc addDirectorConversationCards(
       right.add(i)
   if speakers.len == 0:
     return
+  # The heart ledger: pair strengths keyed by house seat, folded from
+  # the conversation records in a replay or the live encounter book.
+  let heartPairs =
+    if sim.conversationTimeline.events.len > 0:
+      sim.conversationTimeline.heartLinksAt(sim.tickCount)
+    else:
+      sim.heartLinks
+  proc houseOf(i: int): int =
+    sim.players[i].homeFlag - HomeMapIndexBase
+  proc connectionPoints(i: int): int =
+    ## The speaker's connection points: turns spent together, summed
+    ## across every partner.
+    let house = houseOf(i)
+    for pair in heartPairs:
+      if pair.a == house or pair.b == house:
+        result += pair.links
   proc relationLabel(i: int): string =
-    ## Mocked for now: a stable label toward the nearest other
-    ## speaker. Later this reads the connection book.
+    ## The tier toward the nearest other speaker, from the pair's
+    ## strength in the ledger.
     var
       other = -1
       best = high(int)
@@ -3284,13 +3300,17 @@ proc addDirectorConversationCards(
         other = j
     if other < 0:
       return ""
+    let
+      myHouse = houseOf(i)
+      otherHouse = houseOf(other)
+    var links = 0
+    for pair in heartPairs:
+      if (pair.a == myHouse and pair.b == otherHouse) or
+          (pair.a == otherHouse and pair.b == myHouse):
+        links = pair.links
+        break
     const moods = ["neutral with ", "friend with ", "best friend with "]
-    moods[(i * 7 + other * 13) mod moods.len] &
-      sim.players[other].playerName
-  proc mockConnections(i: int): int =
-    ## Mocked for now: stacked on the heart-connections PR this reads
-    ## the speaker's connection total from the connection book.
-    3 + (i * 5) mod 6
+    moods[heartLinkTier(links)] & sim.players[other].playerName
   for (column, columnX, topInset) in [
     # The score panel overlays the window's top left, so the left
     # column starts below it.
@@ -3311,7 +3331,7 @@ proc addDirectorConversationCards(
       relations.add(relation)
       faces.add(face)
       let sprite = sim.directorCardSprite(
-        sim.players[i], relation, mockConnections(i), face
+        sim.players[i], relation, connectionPoints(i), face
       )
       sprites.add(sprite)
       totalHeight += sprite.height + DirectorCardGapY
@@ -3328,7 +3348,7 @@ proc addDirectorConversationCards(
         DirectorCardSpriteBase + i,
         sprite,
         "director card " & $i & " " & $sim.players[i].score & " " &
-          $mockConnections(i) & " " & relations[slot] & " " &
+          $connectionPoints(i) & " " & relations[slot] & " " &
           sim.players[i].message
       )
       packet.addObject(
