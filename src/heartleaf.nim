@@ -7462,12 +7462,12 @@ when not defined(emscripten):
             sim.restartConversationQueue()
             replay.seekReplay(sim, 0)
             replay.playing = true
-      if replay.circlesTimeline.len > 0:
-        # The replay recorded its circles; they beat any re-derivation.
-        sim.conversationCircles =
-          replay.circlesTimeline.circlesAtTick(sim.tickCount)
-      else:
-        sim.inferConversationCircles()
+      # Rings always come from the production path - the conversation
+      # timeline's frozen anchors, or the huddle fallback - so replays
+      # look exactly like live play. Raw recorded circle rows (the old
+      # 0.1.x format) stay readable for tooling but no longer drive
+      # rendering: they move with the gnomes, which prod rings do not.
+      sim.inferConversationCircles()
       sim.advanceChatFeed()
       sim.publishNowPlaying()
       sim.updateDirectorCamera()
