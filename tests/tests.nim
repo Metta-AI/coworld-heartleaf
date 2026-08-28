@@ -1670,4 +1670,74 @@ block:
     "playback without brains reproduces the game"
   removeFile(replayPath)
 
+echo "Testing heart connections"
+block:
+  # The one rule: a spoken turn connects the speaker with every member
+  # who spoke within the last round of that conversation.
+  var ledger: HeartLedger
+  let members = @[0, 1]
+  ledger.creditTurn(1, 0, members)
+  doAssert ledger.heartPairs().len == 0, "an opener alone earns nothing"
+  ledger.creditTurn(1, 1, members)
+  doAssert ledger.heartPairs() == @[(a: 0, b: 1, links: 1)],
+    "the first reply starts the connection"
+  ledger.creditTurn(1, 0, members)
+  ledger.creditTurn(1, 1, members)
+  doAssert ledger.heartPairs() == @[(a: 0, b: 1, links: 3)],
+    "each answered turn adds one"
+  # A lurker who never speaks earns nothing, even inside the circle.
+  var trio: HeartLedger
+  let three = @[0, 1, 2]
+  trio.creditTurn(2, 0, three)
+  trio.creditTurn(2, 1, three)
+  trio.creditTurn(2, 0, three)
+  var lurker = 0
+  for pair in trio.heartPairs():
+    if pair.a == 2 or pair.b == 2:
+      lurker += pair.links
+  doAssert lurker == 0, "a silent member earns nothing"
+  trio.creditTurn(2, 2, three)
+  var joined = 0
+  for pair in trio.heartPairs():
+    if pair.a == 2 or pair.b == 2:
+      joined += pair.links
+  doAssert joined == 2, "a spoken turn connects with the recent speakers"
+  # After a full quiet round the conversation starts fresh for you.
+  var stale: HeartLedger
+  stale.creditTurn(3, 0, members)
+  for _ in 0 ..< 5:
+    stale.creditTurn(3, 1, members)
+  doAssert stale.heartPairs() == @[(a: 0, b: 1, links: 1)],
+    "a monologue runs out of recent partners"
+  # sqrt scoring: breadth beats farming one partner.
+  var farm: HeartLedger
+  for i in 0 ..< 16:
+    farm.creditTurn(4, i mod 2, members)
+  doAssert farm.connectionScore(0) * farm.connectionScore(0) <= 16.0,
+    "farming one partner is priced by the square root"
+
+echo "Testing heart links from conversation records"
+block:
+  # The replay-side fold: links rebuilt purely from convo rows.
+  proc row(tick: int, kind, text: string, seat: int): string =
+    $(%*{"kind": kind, "tick": tick, "seat": seat, "text": text})
+  let log = @[
+    row(100, "convo-enter", "enter id=1 members=Ivan, Anton", 0),
+    row(110, "convo-tick", "tick id=1 ct=1 speaker=Ivan silent=false", 0),
+    row(140, "convo-tick", "tick id=1 ct=2 speaker=Anton silent=false", 1),
+    row(170, "convo-tick", "tick id=1 ct=3 speaker= silent=true", 0),
+    row(200, "convo-tick", "tick id=1 ct=4 speaker=Ivan silent=false", 0),
+    row(230, "convo-exit", "exit id=1", 1)
+  ].join("\n")
+  let timeline = parseConversationTimeline(log)
+  doAssert timeline.heartLinksAt(90).len == 0, "nothing before the talk"
+  doAssert timeline.heartLinksAt(120).len == 0,
+    "the opener alone mints nothing"
+  doAssert timeline.heartLinksAt(150) == @[(a: 0, b: 1, links: 1)],
+    "the reply mints one"
+  doAssert timeline.heartLinksAt(180) == @[(a: 0, b: 1, links: 1)],
+    "a silent slot mints nothing"
+  doAssert timeline.heartLinksAt(300) == @[(a: 0, b: 1, links: 2)],
+    "the answered turn mints again; scrubbing anywhere reproduces it"
+
 echo "All tests passed"

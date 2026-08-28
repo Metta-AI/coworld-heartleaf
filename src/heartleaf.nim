@@ -169,6 +169,15 @@ const
   InsetChatZ = 31_601
   OutlinePad = 1
   TrailObjectBase = 24_000
+  HeartSpriteBase = 8800        ## emote sprites: 4 tiers x 4 fade stages
+  HeartObjectBase = 27_000
+  HeartLinkZ = 30_010           ## emotes float above heads and name tags
+  HeartLinkMaxDistance = 190    ## px; emotes only show when the pair is near
+  HeartEmotePeriod = 72         ## ticks per emote cycle (3s at 24 ticks/s)
+  HeartEmoteLife = 44           ## ticks one emote lives while rising
+  HeartEmoteStagger = 16        ## ticks between emotes of the same cycle
+  HeartEmoteRise = 26           ## px an emote rises over its life
+  HeartEmoteCount = [1, 1, 2, 3]  ## emotes per cycle, by connection tier
   ConversationRingSpriteBase = 8900
   ConversationRingObjectBase = 26_000
   ConversationRingZ = 55
@@ -374,6 +383,13 @@ type
       ## Replay chat-mode objects from game.log. Empty in live play.
     conversationAnchors: Table[int, ConversationAnchor]
       ## Frozen ring positions keyed by encounter id. Viewer-only.
+    heartLinks*: seq[tuple[a, b, links: int]]
+      ## Connection strengths from the heart ledger (live) or the
+      ## conversation records (replay). Viewer-only, never hashed.
+    heartEmoteBases: array[4, RgbaSprite]
+      ## The four emoji emote sprites, one per connection tier.
+    heartEmoteFaded: Table[int, RgbaSprite]
+      ## Alpha-faded emote variants, cached by tier * 4 + fade.
     chatBanner: RgbaSprite
     portraits: seq[RgbaSprite]
     chatFeed: seq[ChatFeedItem]   ## viewer-only delay chat, never hashed
@@ -671,6 +687,14 @@ proc loadFoodSprites(path: string): FoodSprites =
     FoodSpriteSize
   )
 
+proc loadEmoteSprite(path: string): RgbaSprite =
+  ## Loads one emoji emote PNG (rasterized system emoji) into a sprite.
+  let image = readImage(path)
+  result = newRgbaSprite(image.width, image.height)
+  for y in 0 ..< image.height:
+    for x in 0 ..< image.width:
+      result.putPixel(x, y, image[x, y].rgba())
+
 proc loadChatBanner(path: string): RgbaSprite =
   ## Loads and crops the delay-chat banner art to its solid bounds.
   if not fileExists(path):
@@ -744,6 +768,9 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
     raise newException(HeartleafError, "Gnome sheet has no gnomes.")
   result.textFont = readPixelFont(tiny5Path)
   result.chatBanner = loadChatBanner(dataRoot / "chatbanner.aseprite")
+  for tier in 0 ..< 4:
+    result.heartEmoteBases[tier] =
+      loadEmoteSprite(dataRoot / ("emote_tier" & $tier & ".png"))
   result.portraits = loadPortraits(dataRoot)
   result.conversationAnchors = initTable[int, ConversationAnchor]()
   result.chatFeedIndex = -1
@@ -2247,6 +2274,139 @@ proc cliLoadReplayPath(): string =
     if arg.startsWith(Prefix):
       return arg[Prefix.len .. ^1]
 
+proc heartNoise(a, b, c: int): float =
+  ## Deterministic hash noise in -1.0 .. 1.0, stable across replays.
+  var h = a * 73856093 xor b * 19349663 xor c * 83492791
+  h = h xor (h shr 13)
+  h = h *% 1274126177
+  h = h xor (h shr 16)
+  float((h and 1023) - 512) / 512.0
+
+proc heartLinkTier(links: int): int =
+  ## Maps one pair's conversation history to an emote tier 0..3.
+  clamp((links - 1) div 3, 0, 3)
+
+proc heartEmoteSprite(sim: SimServer, tier, fade: int): RgbaSprite =
+  ## The tier's emoji emote, alpha-faded for one life stage; cached.
+  let key = clamp(tier, 0, 3) * 4 + clamp(fade, 0, 3)
+  if key in sim.heartEmoteFaded:
+    return sim.heartEmoteFaded[key]
+  let
+    base = sim.heartEmoteBases[clamp(tier, 0, 3)]
+    alpha = [255, 210, 150, 80][clamp(fade, 0, 3)]
+  var sprite = newRgbaSprite(base.width, base.height)
+  for y in 0 ..< base.height:
+    for x in 0 ..< base.width:
+      var color = base.rgbaSpriteAt(x, y)
+      color.a = uint8(int(color.a) * alpha div 255)
+      sprite.putPixel(x, y, color)
+  sim.heartEmoteFaded[key] = sprite
+  sprite
+
+proc addHeartEmoteObjects(
+  packet: var seq[uint8],
+  sim: SimServer,
+  cache: var seq[SpriteCacheEntry],
+  mapIndex,
+  cameraX,
+  cameraY,
+  viewportWidth,
+  viewportHeight: int
+) =
+  ## Appends Sims-style emote emojis: each gnome standing near a
+  ## connected partner sends its own emoji drifting up from its head
+  ## and fading. The connection tier picks the face - a plain smile for
+  ## a fresh acquaintance up to heart-eyes for the strongest bonds -
+  ## and how many rise per cycle. In replays the strengths come from a
+  ## pure fold of the conversation records inside the replay file, so
+  ## the animation is identical everywhere.
+  let pairs =
+    if sim.conversationTimeline.events.len > 0:
+      sim.conversationTimeline.heartLinksAt(sim.tickCount)
+    else:
+      sim.heartLinks
+  if pairs.len == 0:
+    return
+  var byHouse: array[HouseCount, int]
+  for h in 0 ..< HouseCount:
+    byHouse[h] = -1
+  for i, player in sim.players:
+    let house = player.homeFlag - HomeMapIndexBase
+    if house >= 0 and house < HouseCount:
+      byHouse[house] = i
+  var bestTier: array[HouseCount, int]
+  for h in 0 ..< HouseCount:
+    bestTier[h] = -1
+  for pair in pairs:
+    if pair.links <= 0:
+      continue
+    if pair.a < 0 or pair.a >= HouseCount or
+        pair.b < 0 or pair.b >= HouseCount:
+      continue
+    if byHouse[pair.a] < 0 or byHouse[pair.b] < 0:
+      continue
+    let
+      a = sim.players[byHouse[pair.a]]
+      b = sim.players[byHouse[pair.b]]
+    if a.mapIndex != mapIndex or b.mapIndex != mapIndex:
+      continue
+    let
+      dxi = b.x - a.x
+      dyi = b.y - a.y
+    if dxi * dxi + dyi * dyi > HeartLinkMaxDistance * HeartLinkMaxDistance:
+      continue
+    let tier = heartLinkTier(pair.links)
+    bestTier[pair.a] = max(bestTier[pair.a], tier)
+    bestTier[pair.b] = max(bestTier[pair.b], tier)
+  for house in 0 ..< HouseCount:
+    if bestTier[house] < 0 or byHouse[house] < 0:
+      continue
+    let
+      player = sim.players[byHouse[house]]
+      tier = bestTier[house]
+    for k in 0 ..< HeartEmoteCount[tier]:
+      let
+        age = (sim.tickCount + house * 13 + k * HeartEmoteStagger) mod
+          HeartEmotePeriod
+      if age >= HeartEmoteLife:
+        continue
+      let
+        progress = age.float / HeartEmoteLife.float
+        fade = clamp(int(progress * 4.0), 0, 3)
+        cycle = (sim.tickCount + house * 13 + k * HeartEmoteStagger) div
+          HeartEmotePeriod
+        sway = heartNoise(house, k, cycle) * 5.0
+        sprite = sim.heartEmoteSprite(tier, fade)
+        spriteId = HeartSpriteBase + clamp(tier, 0, 3) * 4 + fade
+        ex = player.x + GnomeSpriteSize div 2 - sprite.width div 2 +
+          int(sway)
+        ey = player.y - 10 - int(progress * HeartEmoteRise.float)
+        screenX = ex - cameraX
+        screenY = ey - cameraY
+      if not rectVisible(
+        screenX,
+        screenY,
+        sprite.width,
+        sprite.height,
+        viewportWidth,
+        viewportHeight
+      ):
+        continue
+      packet.addRgbaSpriteCached(
+        cache,
+        spriteId,
+        sprite,
+        "heart emote t" & $tier & " f" & $fade
+      )
+      packet.addObject(
+        HeartObjectBase + house * 4 + k,
+        screenX,
+        screenY,
+        HeartLinkZ,
+        MapLayerId,
+        spriteId
+      )
+
 proc addPlayerObjects(
   packet: var seq[uint8],
   sim: SimServer,
@@ -2262,6 +2422,9 @@ proc addPlayerObjects(
   if mapIndex == MainMapIndex:
     packet.addConversationCircles(
       sim, cameraX, cameraY, viewportWidth, viewportHeight
+    )
+    packet.addHeartEmoteObjects(
+      sim, cache, mapIndex, cameraX, cameraY, viewportWidth, viewportHeight
     )
   for i, player in sim.players:
     if player.mapIndex != mapIndex:
@@ -5018,6 +5181,7 @@ when not defined(emscripten):
         if seatPlayers[seat] >= 0:
           observations[seat] = sim.observe(seatPlayers[seat])
       var frame = brains.advance(observations, epochTime())
+      sim.heartLinks = brains.heartPairs()
       sim.conversationCircles = brains.syncConversationCircles(
         sim.outdoorConversationFeet(seatPlayers),
         sim.outdoorConversationFeet(seatPlayers, stillOnly = true)
