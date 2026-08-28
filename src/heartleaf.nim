@@ -169,7 +169,8 @@ const
   InsetChatZ = 31_601
   OutlinePad = 1
   TrailObjectBase = 24_000
-  HeartSpriteBase = 8800        ## emote sprites: 4 tiers x 4 fade stages
+  HeartSpriteBase = 9200        ## emote sprites: 3 tiers x 4 fade stages,
+                                ## clear of the chat-banner glyph ids
   HeartObjectBase = 27_000
   HeartLinkZ = 30_010           ## emotes float above heads and name tags
   HeartLinkMaxDistance = 190    ## px; emotes only show when the pair is near
@@ -177,7 +178,7 @@ const
   HeartEmoteLife = 44           ## ticks one emote lives while rising
   HeartEmoteStagger = 16        ## ticks between emotes of the same cycle
   HeartEmoteRise = 26           ## px an emote rises over its life
-  HeartEmoteCount = [1, 1, 2, 3]  ## emotes per cycle, by connection tier
+  HeartEmoteCount = [1, 2, 3]   ## emotes per cycle, by connection tier
   ConversationRingSpriteBase = 8900
   ConversationRingObjectBase = 26_000
   ConversationRingZ = 55
@@ -386,8 +387,8 @@ type
     heartLinks*: seq[tuple[a, b, links: int]]
       ## Connection strengths from the heart ledger (live) or the
       ## conversation records (replay). Viewer-only, never hashed.
-    heartEmoteBases: array[4, RgbaSprite]
-      ## The four emoji emote sprites, one per connection tier.
+    heartEmoteBases: array[3, RgbaSprite]
+      ## The emote sprites: neutral, smile, star-eyes, by tier.
     heartEmoteFaded: Table[int, RgbaSprite]
       ## Alpha-faded emote variants, cached by tier * 4 + fade.
     chatBanner: RgbaSprite
@@ -768,7 +769,7 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
     raise newException(HeartleafError, "Gnome sheet has no gnomes.")
   result.textFont = readPixelFont(tiny5Path)
   result.chatBanner = loadChatBanner(dataRoot / "chatbanner.aseprite")
-  for tier in 0 ..< 4:
+  for tier in 0 ..< 3:
     result.heartEmoteBases[tier] =
       loadEmoteSprite(dataRoot / ("emote_tier" & $tier & ".png"))
   result.portraits = loadPortraits(dataRoot)
@@ -2283,16 +2284,18 @@ proc heartNoise(a, b, c: int): float =
   float((h and 1023) - 512) / 512.0
 
 proc heartLinkTier(links: int): int =
-  ## Maps one pair's conversation history to an emote tier 0..3.
-  clamp((links - 1) div 3, 0, 3)
+  ## Maps one pair's conversation history to an emote tier: a neutral
+  ## face for a fresh acquaintance, a smile for a friend, star-eyes
+  ## for a strong bond.
+  clamp((links - 1) div 4, 0, 2)
 
 proc heartEmoteSprite(sim: SimServer, tier, fade: int): RgbaSprite =
   ## The tier's emoji emote, alpha-faded for one life stage; cached.
-  let key = clamp(tier, 0, 3) * 4 + clamp(fade, 0, 3)
+  let key = clamp(tier, 0, 2) * 4 + clamp(fade, 0, 3)
   if key in sim.heartEmoteFaded:
     return sim.heartEmoteFaded[key]
   let
-    base = sim.heartEmoteBases[clamp(tier, 0, 3)]
+    base = sim.heartEmoteBases[clamp(tier, 0, 2)]
     alpha = [255, 210, 150, 80][clamp(fade, 0, 3)]
   var sprite = newRgbaSprite(base.width, base.height)
   for y in 0 ..< base.height:
@@ -2377,7 +2380,7 @@ proc addHeartEmoteObjects(
           HeartEmotePeriod
         sway = heartNoise(house, k, cycle) * 5.0
         sprite = sim.heartEmoteSprite(tier, fade)
-        spriteId = HeartSpriteBase + clamp(tier, 0, 3) * 4 + fade
+        spriteId = HeartSpriteBase + clamp(tier, 0, 2) * 4 + fade
         ex = player.x + GnomeSpriteSize div 2 - sprite.width div 2 +
           int(sway)
         ey = player.y - 10 - int(progress * HeartEmoteRise.float)
