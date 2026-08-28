@@ -2434,10 +2434,14 @@ proc attachConversationTimeline*(
   sim.conversationAnchors.clear()
   let recorded = data.conversationLogText()
   if recorded.len > 0:
+    # Older replays share the record channel with circle rows and may
+    # hold no conversation events at all - only records that actually
+    # parse count, or the game.log fallback below still gets its turn.
     sim.conversationTimeline = parseConversationTimeline(recorded)
-    echo "Conversation records: ",
-      sim.conversationTimeline.events.len, " events from the replay"
-    return
+    if sim.conversationTimeline.events.len > 0:
+      echo "Conversation records: ",
+        sim.conversationTimeline.events.len, " events from the replay"
+      return
   if replayPath.len == 0:
     return
   sim.conversationTimeline =
