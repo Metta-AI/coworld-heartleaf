@@ -23,9 +23,11 @@
       #radio.on { color:#ffe9a0; border-color:#8a7c4e; }
     </style>
     <script>
-    // The gnome radio: an original procedural village tune and
-    // Animal-Crossing-style babble when a gnome speaks. Everything is
-    // synthesized in WebAudio - no audio files, nothing external.
+    // The gnome radio: whimsical plucked-string village music and
+    // gnomes that read their lines aloud. The strings are Karplus-
+    // Strong synthesis (a physical model of a plucked string, banjo-
+    // like); the voices are the browser's speech synthesis. No audio
+    // files, nothing external.
     (function() {
       var ctx = null, master = null, musicGain = null, on = false;
       var button = document.getElementById("radio");
@@ -34,57 +36,81 @@
         if (ctx) return;
         ctx = new (window.AudioContext || window.webkitAudioContext)();
         master = ctx.createGain();
-        master.gain.value = 0.5;
+        master.gain.value = 0.6;
         master.connect(ctx.destination);
         musicGain = ctx.createGain();
-        musicGain.gain.value = 0.16;
+        musicGain.gain.value = 0.5;
         musicGain.connect(master);
+        buildStrings();
         startMusic();
       }
 
-      // --- The village tune -------------------------------------------
-      // A gentle waltz on a pentatonic-ish folk scale: a music-box
-      // melody over two soft drone voices. Phrases are picked from a
-      // small grammar so the tune wanders without repeating exactly.
-      var ROOT = 196; // G3
-      var SCALE = [1, 9/8, 5/4, 3/2, 5/3, 2, 9/4, 5/2]; // G A B D E G' A' B'
-      var BEAT = 0.42; // seconds; a 3/4 waltz bar is 3 beats
-      var nextBar = 0;
+      // --- Karplus-Strong plucked strings ----------------------------
+      // One sampled pluck per scale note, computed at startup: a burst
+      // of noise fed through a delay line with gentle damping. Sounds
+      // like a small banjo or mountain dulcimer.
+      var ROOT = 220; // A3
+      var SCALE = [1, 9/8, 5/4, 3/2, 5/3, 2, 9/4, 5/2, 3, 10/3, 4];
+      var strings = [];
 
-      function pluck(freq, when, dur, gain, bright) {
-        var osc = ctx.createOscillator();
-        osc.type = bright ? "triangle" : "sine";
-        osc.frequency.value = freq;
-        var g = ctx.createGain();
-        g.gain.setValueAtTime(0, when);
-        g.gain.linearRampToValueAtTime(gain, when + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.001, when + dur);
-        osc.connect(g); g.connect(musicGain);
-        osc.start(when); osc.stop(when + dur + 0.05);
+      function pluckBuffer(freq, seconds, damp) {
+        var rate = ctx.sampleRate;
+        var n = Math.floor(rate * seconds);
+        var period = Math.max(2, Math.round(rate / freq));
+        var buf = ctx.createBuffer(1, n, rate);
+        var out = buf.getChannelData(0);
+        var line = new Float32Array(period);
+        for (var i = 0; i < period; i++) line[i] = Math.random() * 2 - 1;
+        var p = 0;
+        for (var i = 0; i < n; i++) {
+          var next = (p + 1) % period;
+          line[p] = damp * 0.5 * (line[p] + line[next]);
+          out[i] = line[p];
+          p = next;
+        }
+        return buf;
       }
 
+      function buildStrings() {
+        for (var d = 0; d < SCALE.length; d++)
+          strings[d] = pluckBuffer(ROOT * SCALE[d], 1.4, 0.996);
+      }
+
+      function pluck(degree, when, gain) {
+        var src = ctx.createBufferSource();
+        src.buffer = strings[degree % strings.length];
+        var g = ctx.createGain();
+        g.gain.value = gain;
+        src.connect(g); g.connect(musicGain);
+        src.start(when);
+      }
+
+      // --- The village tune ------------------------------------------
+      // A waltz of banjo rolls: each bar rolls the chord low-high-mid
+      // while the melody walks a phrase grammar on top, so the tune
+      // wanders without repeating exactly.
+      var BEAT = 0.4;
+      var CHORDS = [[0, 2, 4], [3, 5, 7], [1, 4, 6], [4, 6, 8]];
       var PHRASES = [
-        [0, 2, 4, 5], [4, 5, 7, 5], [5, 4, 2, 0], [2, 4, 2, 1],
-        [0, 4, 5, 4], [7, 5, 4, 2], [4, 2, 1, 0], [1, 2, 4, 2]
+        [4, 5, 7, 5], [7, 8, 7, 5], [5, 4, 2, 4], [2, 4, 5, 4],
+        [7, 5, 4, 5], [8, 7, 5, 4], [4, 2, 1, 2], [5, 7, 8, 10]
       ];
-      var phrase = 0, chord = 0;
-      var CHORDS = [[0, 2], [3, 5], [1, 4], [0, 3]];
+      var phrase = 0, chord = 0, nextBar = 0;
 
       function scheduleBar(when) {
-        // Drone: two low voices holding the bar's chord.
         var c = CHORDS[chord % CHORDS.length];
-        pluck(ROOT / 2 * SCALE[c[0]], when, BEAT * 3.2, 0.10, false);
-        pluck(ROOT * SCALE[c[1]] / 2, when + BEAT, BEAT * 2.2, 0.06, false);
-        // Melody: one phrase note per beat, music-box register.
+        // The roll: six eighth-notes walking the chord, banjo style.
+        var roll = [c[0], c[1], c[2], c[1], c[2], c[1]];
+        for (var i = 0; i < 6; i++)
+          pluck(roll[i], when + i * BEAT / 2, 0.20 + (i === 0 ? 0.1 : 0));
+        // The melody: one phrase note per beat above the roll.
         var notes = PHRASES[phrase % PHRASES.length];
         for (var b = 0; b < 3; b++) {
-          var step = notes[b + (phrase % 2)];
-          if (b === 2 && Math.random() < 0.3) continue; // breathe
-          pluck(ROOT * 2 * SCALE[step % SCALE.length],
-            when + b * BEAT, BEAT * 1.4, 0.09, true);
+          if (b === 2 && Math.random() < 0.25) continue; // breathe
+          pluck(notes[(b + phrase) % 4], when + b * BEAT + 0.01, 0.42);
         }
         if (phrase % 2 === 1) chord++;
-        phrase += (Math.random() < 0.7) ? 1 : 3;
+        phrase += (Math.random() < 0.75) ? 1 : 3;
       }
 
       function startMusic() {
@@ -99,17 +125,39 @@
         })();
       }
 
-      // --- Gnome babble ----------------------------------------------
-      // Each seat speaks at its own pitch. A line of N letters becomes
-      // a short run of syllable blips, wobbling around the seat pitch.
-      window.heartleafTalk = function(seat, len) {
+      // --- Gnome voices ----------------------------------------------
+      // The browser reads each banner line aloud. Every seat gets its
+      // own pitch and pace, high and quick enough to sound gnome-sized.
+      // If the browser has no voices, fall back to syllable babble.
+      var voices = [];
+      function loadVoices() { voices = speechSynthesis.getVoices(); }
+      if (window.speechSynthesis) {
+        loadVoices();
+        speechSynthesis.onvoiceschanged = loadVoices;
+      }
+
+      window.heartleafTalk = function(seat, len, text) {
         if (!on || !ctx) return;
+        if (window.speechSynthesis && voices.length > 0 && text) {
+          if (speechSynthesis.pending) speechSynthesis.cancel();
+          var u = new SpeechSynthesisUtterance(text);
+          u.voice = voices[seat % voices.length];
+          u.pitch = 1.25 + ((seat * 5) % 9) * 0.08; // 1.25 - 1.9
+          u.rate = 1.15 + ((seat * 3) % 5) * 0.05;
+          u.volume = 0.9;
+          speechSynthesis.speak(u);
+          return;
+        }
+        babble(seat, len);
+      };
+
+      function babble(seat, len) {
         var base = 170 * Math.pow(2, ((seat % 9) * 3 % 12) / 12);
         var syllables = Math.max(2, Math.min(11, Math.round(len / 6)));
         var t = ctx.currentTime + 0.03;
         for (var i = 0; i < syllables; i++) {
           var freq = base * (1 + (Math.random() - 0.5) * 0.22) *
-            (i === syllables - 1 ? 0.9 : 1); // falling cadence
+            (i === syllables - 1 ? 0.9 : 1);
           var dur = 0.05 + Math.random() * 0.05;
           var osc = ctx.createOscillator();
           osc.type = "square";
@@ -125,7 +173,7 @@
           osc.start(t); osc.stop(t + dur + 0.02);
           t += dur + 0.02 + Math.random() * 0.03;
         }
-      };
+      }
 
       button.addEventListener("click", function() {
         on = !on;
@@ -135,8 +183,9 @@
           button.classList.add("on");
         } else {
           button.classList.remove("on");
+          if (window.speechSynthesis) speechSynthesis.cancel();
         }
-        if (ctx) musicGain.gain.value = on ? 0.16 : 0;
+        if (ctx) musicGain.gain.value = on ? 0.5 : 0;
       });
     })();
     </script>

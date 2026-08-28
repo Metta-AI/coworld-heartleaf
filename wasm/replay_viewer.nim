@@ -29,12 +29,15 @@ const
 when defined(emscripten):
   {.emit: """
 #include <emscripten.h>
-void heartleaf_talk(int seat, int len) {
-  EM_ASM({ if (window.heartleafTalk) window.heartleafTalk($0, $1); },
-    seat, len);
+void heartleaf_talk(int seat, int len, const char* text) {
+  EM_ASM({
+    if (window.heartleafTalk) window.heartleafTalk($0, $1, UTF8ToString($2));
+  }, seat, len, text);
 }
 """.}
-  proc heartleafTalk(seat, length: cint) {.importc: "heartleaf_talk", nodecl.}
+  proc heartleafTalk(
+    seat, length: cint, text: cstring
+  ) {.importc: "heartleaf_talk", nodecl.}
 
 type
   ReplayViewer = ref object
@@ -154,7 +157,11 @@ proc soundNewChat(viewer: ReplayViewer) =
     if now != viewer.lastChat:
       viewer.lastChat = now
       if now.index >= 0:
-        heartleafTalk(cint(now.gnomeIndex), cint(now.messageLen))
+        heartleafTalk(
+          cint(now.gnomeIndex),
+          cint(now.messageLen),
+          cstring(viewer.sim.chatFeedNowText())
+        )
 
 proc tick(viewer: ReplayViewer) =
   ## Pumps one replay viewer frame.

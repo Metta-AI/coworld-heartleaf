@@ -4379,6 +4379,12 @@ proc chatFeedNowPlaying*(
   let item = sim.chatFeed[sim.chatFeedIndex]
   (sim.chatFeedIndex, item.speaker.gnomeIndex, item.message.len)
 
+proc chatFeedNowText*(sim: SimServer): string =
+  ## The text of the banner's current chat line, for viewer speech.
+  if sim.chatFeedIndex < 0 or sim.chatFeedIndex >= sim.chatFeed.len:
+    return ""
+  sim.chatFeed[sim.chatFeedIndex].message
+
 proc addChatBanner(
   packet: var seq[uint8],
   sim: SimServer,
