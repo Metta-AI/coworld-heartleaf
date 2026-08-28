@@ -1,5 +1,5 @@
 import
-  std/[algorithm, json, math, os, random, strutils, tables, times],
+  std/[algorithm, json, math, os, osproc, random, strutils, tables, times],
   flatty, jsony, pixie,
   bitworld/aseprite, bitworld/pixelfonts, bitworld/spriteprotocol,
   bitworld/resources, bitworld/sprites,
@@ -651,6 +651,11 @@ when not defined(emscripten):
       nowPlayingText: string
         ## The chat line the banner shows right now, published for the
         ## viewer pages' speech layer.
+      voiceHoldSerial: int
+      voiceDoneSerial: int
+      voiceHoldSince: float
+        ## While a viewer is speaking line voiceHoldSerial aloud, the
+        ## replay holds; voicedone (or the timeout) releases it.
       playerSlots: Table[WebSocket, int]
         ## Seat requested by each /player socket, -1 for any free seat.
       globalViewers: Table[WebSocket, PlayerViewerState]
@@ -6286,28 +6291,104 @@ when not defined(emscripten):
   }
   document.addEventListener("pointerdown",firstGesture);
   document.addEventListener("keydown",firstGesture);
-  var voices=[],last=-1;
-  function loadVoices(){voices=speechSynthesis.getVoices();}
-  if(window.speechSynthesis){loadVoices();
-    speechSynthesis.onvoiceschanged=loadVoices;}
+  // Server-made voices: each new banner line arrives as a small AAC
+  // clip from /voice.m4a, one macOS voice per seat. The server holds
+  // the replay until /voicedone, so the next card pops when the voice
+  // finishes. Music ducks while a gnome speaks.
+  var v=new Audio();var last=-1;var speaking=false;
+  function lineDone(serial){
+    speaking=false;a.volume=0.55;
+    fetch("/voicedone?serial="+serial).catch(function(){});
+  }
   setInterval(function(){
-    if(!on||!window.speechSynthesis)return;
+    if(!on||speaking)return;
     fetch("/nowplaying").then(function(r){return r.json();})
       .then(function(d){
         if(d.serial===last||!d.text)return;
         if(last<0){last=d.serial;return;}
-        last=d.serial;
-        if(speechSynthesis.pending)speechSynthesis.cancel();
-        var u=new SpeechSynthesisUtterance(d.text);
-        if(voices.length>0)u.voice=voices[d.seat%voices.length];
-        u.pitch=1.25+((d.seat*5)%9)*0.08;
-        u.rate=1.15+((d.seat*3)%5)*0.05;
-        u.volume=0.9;
-        speechSynthesis.speak(u);
+        last=d.serial;speaking=true;a.volume=0.25;
+        v.src="/voice.m4a?serial="+d.serial;
+        v.onended=function(){lineDone(d.serial);};
+        v.onerror=function(){lineDone(d.serial);};
+        v.play().catch(function(){lineDone(d.serial);});
       }).catch(function(){});
-  },250);
+  },150);
 })();</script>
 """
+
+  const
+    VoiceHoldMaxSeconds = 20.0
+    VoiceCast = [
+      ("Grandpa (English (US))", 185),
+      ("Grandma (English (US))", 195),
+      ("Jester", 205),
+      ("Eddy (English (US))", 200),
+      ("Flo (English (US))", 200),
+      ("Reed (English (US))", 190),
+      ("Daniel", 195),
+      ("Moira", 195),
+      ("Rishi", 200)
+    ]
+
+  proc serveVoiceClip(request: Request): bool =
+    ## Speaks the current banner line as a small AAC clip, one voice
+    ## per seat, and holds the replay until the viewer reports the
+    ## line finished (or the hold times out).
+    if request.path != "/voice.m4a" or request.httpMethod != "GET":
+      return false
+    var serial, seat: int
+    var text: string
+    {.gcsafe.}:
+      withLock appState.lock:
+        serial = appState.nowPlayingSerial
+        seat = appState.nowPlayingSeat
+        text = appState.nowPlayingText
+    let wanted = request.queryParams.getOrDefault("serial", "").strip()
+    if wanted != $serial or text.len == 0:
+      request.respondPlain(409, "line has moved on\n")
+      return true
+    {.gcsafe.}:
+      withLock appState.lock:
+        appState.voiceHoldSerial = serial
+        appState.voiceHoldSince = epochTime()
+    let
+      voice = VoiceCast[seat mod VoiceCast.len]
+      base = getTempDir() / "heartleaf-voice-" & $serial
+    discard execProcess("/usr/bin/say", args = [
+      "-v", voice[0], "-r", $voice[1], "-o", base & ".aiff", text
+    ], options = {poUsePath})
+    discard execProcess("/usr/bin/afconvert", args = [
+      "-f", "m4af", "-d", "aac", base & ".aiff", base & ".m4a"
+    ], options = {poUsePath})
+    if not fileExists(base & ".m4a"):
+      {.gcsafe.}:
+        withLock appState.lock:
+          appState.voiceDoneSerial = max(appState.voiceDoneSerial, serial)
+      request.respondPlain(404, "voice synthesis failed\n")
+      return true
+    let body = readFile(base & ".m4a")
+    removeFile(base & ".aiff")
+    removeFile(base & ".m4a")
+    var headers: HttpHeaders
+    headers["Content-Type"] = "audio/mp4"
+    headers["Cache-Control"] = "no-cache"
+    request.respond(200, headers, body)
+    true
+
+  proc serveVoiceDone(request: Request): bool =
+    ## The viewer finished speaking one line; the replay may move on.
+    if request.path != "/voicedone" or request.httpMethod != "GET":
+      return false
+    let serial = request.queryParams.getOrDefault("serial", "").strip()
+    {.gcsafe.}:
+      withLock appState.lock:
+        try:
+          appState.voiceDoneSerial =
+            max(appState.voiceDoneSerial, parseInt(serial))
+        except ValueError:
+          discard
+    request.respondPlain(200, "ok\n")
+    true
 
   proc serveMusicFile(request: Request): bool =
     ## Streams the local music file named by HEARTLEAF_MUSIC_FILE, so a
@@ -6362,6 +6443,10 @@ when not defined(emscripten):
           bitworldClient.GlobalClientRoute
         )
     elif request.serveMusicFile():
+      discard
+    elif request.serveVoiceClip():
+      discard
+    elif request.serveVoiceDone():
       discard
     elif request.path == "/nowplaying" and request.httpMethod == "GET":
       var serial, seat: int
@@ -7359,7 +7444,16 @@ when not defined(emscripten):
           if directorWatching and sim.directorTweenLeft > 0 and
               replay.replaySpeedIndex() == DefaultSpeedIndex:
             ticksThisFrame = 0
-
+          # While a viewer speaks the current line aloud, the show
+          # waits: no ticks, so the next card pops when the voice ends.
+          var voiceHolding = false
+          {.gcsafe.}:
+            withLock appState.lock:
+              voiceHolding =
+                appState.voiceHoldSerial > appState.voiceDoneSerial and
+                epochTime() - appState.voiceHoldSince < VoiceHoldMaxSeconds
+          if voiceHolding:
+            ticksThisFrame = 0
           for _ in 0 ..< ticksThisFrame:
             if replay.playing:
               replay.stepReplay(sim)
