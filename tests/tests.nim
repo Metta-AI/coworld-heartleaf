@@ -835,7 +835,7 @@ block:
   doAssert sim.conversationCircles.len == 0,
     "speech bubbles without a conversation object must not draw a ring"
 
-echo "Testing a mid-ask bye does not reject the other gnome's say"
+echo "Testing say and bye flow through the conversation clock"
 block:
   var sim = initSimServer(1)
   doAssert sim.addPlayer("alice", 0) == 0
@@ -849,33 +849,51 @@ block:
   proc observations(): Table[int, Observation] =
     {0: sim.observe(0), 1: sim.observe(1)}.toTable
   var now = 2000.0
-  discard brains.advance(observations(), now)
-  var ivanTag, antonTag: string
-  for request in client.started:
-    if request.playerSlot == 0:
-      ivanTag = request.tag
-    else:
-      antonTag = request.tag
-  doAssert ivanTag.len > 0 and antonTag.len > 0
-  doAssert brains.villagers[0].askedWhileTalking
+  var frame = brains.advance(observations(), now)
+  doAssert client.started.len == 0,
+    "gnomes in a conversation get no plan call"
+  doAssert brains.phase == MovePhase,
+    "with everyone ready the movement turn begins at once"
+  var chats: seq[string]
+  proc drainChats() =
+    for item in frame.outputs:
+      if item.output.chat.len > 0:
+        chats.add(item.output.chat)
+  proc runToSlot() =
+    var guard = 0
+    while not frame.paused and guard < 40:
+      now += 0.05
+      frame = brains.advance(observations(), now)
+      drainChats()
+      inc guard
+    doAssert frame.paused, "a conversation tick holds the world"
+  runToSlot()
+  doAssert client.started.len == 1, "one member is asked for a line"
   client.scriptReply(BedrockReply(
-    tag: antonTag, statusCode: 200,
-    text: """{"action": "bye", "message": "later"}"""
-  ))
-  client.scriptReply(BedrockReply(
-    tag: ivanTag, statusCode: 200,
+    tag: client.started[^1].tag, statusCode: 200,
     text: """{"action": "say", "message": "wait I had more"}"""
   ))
   now += 0.1
-  let frame = brains.advance(observations(), now)
-  doAssert not frame.paused, "both replies are usable even if bye lands first"
-  doAssert brains.phase == MovePhase
-  var chats: seq[string]
-  for item in frame.outputs:
-    if item.output.chat.len > 0:
-      chats.add(item.output.chat)
-  doAssert "later" in chats
-  doAssert "wait I had more" in chats
+  frame = brains.advance(observations(), now)
+  drainChats()
+  runToSlot()
+  doAssert client.started.len == 2, "the turn rotates to the other member"
+  client.scriptReply(BedrockReply(
+    tag: client.started[^1].tag, statusCode: 200,
+    text: """{"action": "bye", "message": "later"}"""
+  ))
+  now += 0.1
+  frame = brains.advance(observations(), now)
+  drainChats()
+  var guard = 0
+  while ("later" notin chats or "wait I had more" notin chats) and guard < 60:
+    now += 0.05
+    frame = brains.advance(observations(), now)
+    drainChats()
+    inc guard
+  doAssert "wait I had more" in chats, "the say line lands"
+  doAssert "later" in chats, "the bye line lands"
+  doAssert not brains.villagers[1].talking, "bye leaves the conversation"
 
 echo "Testing leapfrog turns"
 block:
@@ -1009,33 +1027,34 @@ block:
   proc observations(): Table[int, Observation] =
     {0: sim.observe(0), 1: sim.observe(1)}.toTable
   var now = 6000.0
-  discard brains.advance(observations(), now)
-  var ivanTag, antonTag: string
-  for request in client.started:
-    if request.playerSlot == 0:
-      ivanTag = request.tag
-    else:
-      antonTag = request.tag
+  var frame = brains.advance(observations(), now)
+  doAssert brains.phase == MovePhase
+  var guard = 0
+  while not frame.paused and guard < 40:
+    now += 0.05
+    frame = brains.advance(observations(), now)
+    inc guard
+  doAssert frame.paused, "a conversation tick holds the world"
+  let asked = client.started[^1]
   client.scriptReply(BedrockReply(
-    tag: ivanTag, statusCode: 200, text: """{"action": "wait"}"""
-  ))
-  client.scriptReply(BedrockReply(
-    tag: antonTag, statusCode: 200,
-    text: """{"action": "say", "message": "hello"}"""
+    tag: asked.tag, statusCode: 200, text: """{"action": "wait"}"""
   ))
   now += 0.1
-  let frame = brains.advance(observations(), now)
-  doAssert not frame.paused
-  doAssert brains.phase == MovePhase
-  doAssert brains.villagers[0].talking, "wait does not leave the group"
-  doAssert brains.villagers[1].talking
-  doAssert brains.villagers[0].decision.action == Wait
-  doAssert brains.villagers[0].failures == 0
+  frame = brains.advance(observations(), now)
+  doAssert not frame.paused, "an ignored action releases the world"
+  let speaker = brains.villagers[asked.playerSlot]
+  doAssert speaker.talking, "wait does not leave the group"
+  doAssert speaker.failures == 0, "an ignored action is not a retry"
   var sawIgnore = false
-  for line in brains.villagers[0].history:
+  for line in speaker.history:
     if line.content.startsWith("(Your action was ignored:"):
       sawIgnore = true
   doAssert sawIgnore, "wait in conversation is ignored with a reason"
+  var silentRows = 0
+  for line in brains.gameLog.entries:
+    if "convo-tick" in line and "silent=true" in line:
+      inc silentRows
+  doAssert silentRows == 1, "the quiet stop counts as one silent tick"
 
 echo "Testing the conversation clock inside a movement turn"
 block:
@@ -1071,7 +1090,8 @@ block:
     inc guard
   doAssert frame.paused, "a conversation tick holds the world"
   doAssert brains.conversationTick == 1, "the first conversation tick"
-  doAssert client.started.len == 3, "exactly one member is asked for a line"
+  doAssert client.started.len == 1,
+    "one line call, and no plan calls for gnomes in a conversation"
   let slotRequest = client.started[^1]
   doAssert frame.blockedNames == @[slotRequest.playerName],
     "the world waits for the speaker alone"

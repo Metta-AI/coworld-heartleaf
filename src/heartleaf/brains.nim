@@ -53,6 +53,13 @@ type
       ## movement turn where one member of each conversation speaks.
     slotSeconds: float
       ## Wall seconds one conversation tick may hold the world.
+    planTurnTicks: int
+      ## Sim ticks of one movement turn (HEARTLEAF_PLAN_TURN_MINUTES,
+      ## default one game hour). Sets the plan calls per day.
+    slotIntervalTicks: int
+      ## Sim ticks between conversation ticks
+      ## (HEARTLEAF_CONVERSATION_GAP_MINUTES, default 4 game minutes).
+      ## Sets the talk speed and the talk cost.
     slotWaitSeats: seq[int]
       ## Seats composing a line right now; the world holds for them.
     slotDeadline: float
@@ -88,7 +95,12 @@ proc newBrains*(
     slotSeconds: parseFloat(getEnv(
       "HEARTLEAF_CONVERSATION_TICK_SECONDS",
       $DefaultConversationSlotSeconds
-    ))
+    )),
+    planTurnTicks: parseInt(getEnv("HEARTLEAF_PLAN_TURN_MINUTES", "60")) *
+      (MovementTurnTicks div 60),
+    slotIntervalTicks: parseInt(getEnv(
+      "HEARTLEAF_CONVERSATION_GAP_MINUTES", "4"
+    )) * (MovementTurnTicks div 60)
   )
 
 proc openGameLog*(brains: Brains, dir: string) =
@@ -664,6 +676,13 @@ proc scheduleRequests(
     if observation.scene == Overlay:
       villager.turnReady = true
       continue
+    if villager.encounterId > 0:
+      # A gnome in a conversation speaks through the conversation
+      # clock's line calls; the plan call would only ask the same
+      # question. Skipping it keeps the day's call count near the
+      # plan-only baseline.
+      villager.turnReady = true
+      continue
     if villager.waitingSinceTick < 0:
       villager.waitingSinceTick = observation.tick
     if now < villager.retryAt:
@@ -752,7 +771,7 @@ proc advance*(
     if brains.everyoneReady(observations):
       brains.phase = MovePhase
       inc brains.turnIndex
-      brains.moveTicksLeft = MovementTurnTicks
+      brains.moveTicksLeft = brains.planTurnTicks
       brains.logPhase("move")
       brains.slotMoveTicks = 0
     else:
@@ -772,7 +791,7 @@ proc advance*(
       return
   else:
     inc brains.slotMoveTicks
-    if brains.slotMoveTicks >= ConversationSlotIntervalTicks:
+    if brains.slotMoveTicks >= brains.slotIntervalTicks:
       brains.slotMoveTicks = 0
       brains.openConversationSlots(observations, now)
       if brains.slotWaitSeats.len > 0:
