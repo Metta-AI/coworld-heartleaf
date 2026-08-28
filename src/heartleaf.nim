@@ -155,6 +155,12 @@ const
   DirectorCardZ = 32_000
   DirectorCardSpriteBase = 9100
   DirectorCardObjectBase = 27_000
+  DirectorCardSliceInset = 10
+    ## Corner size kept crisp when the chat banner's leafy frame is
+    ## nine-sliced onto a conversation card.
+  DirectorBounceHops = [2, 4, 6, 6, 5, 4, 2, 0, 2, 3, 3, 2, 1, 0]
+    ## The little hop a gnome does when its new line lands, in pixels
+    ## of lift per frame.
   ClockPadX = 2
   ClockPadY = 1
   ClockGlyphGap = 1
@@ -444,6 +450,10 @@ type
     directorDinnerTtl: int
       ## While positive, the director overlays this house's interior:
       ## a dinner party is talking indoors, where the map shows nothing.
+    directorBounce: seq[int]
+      ## Frames left of the hop a gnome does when its new line lands.
+    directorLastMessages: seq[string]
+      ## The last spoken line seen per player, to spot new ones.
     inferredHuddles: Table[int, tuple[x, y, ttl: int]]
       ## Fallback conversation rings inferred from replay state when no
       ## game.log rides next to the replay (an http replay URI), keyed
@@ -2582,9 +2592,11 @@ proc addPlayerObjects(
   viewportWidth,
   viewportHeight: int,
   highlightIndex = -1,
-  includeBubbles = true
+  includeBubbles = true,
+  speakerHops = false
 ) =
-  ## Appends all player sprite objects for one map.
+  ## Appends all player sprite objects for one map. speakerHops lifts
+  ## a gnome briefly when its new spoken line lands (director cut).
   if mapIndex == MainMapIndex:
     packet.addConversationCircles(
       sim, cameraX, cameraY, viewportWidth, viewportHeight
@@ -2608,10 +2620,14 @@ proc addPlayerObjects(
       viewportHeight
     ):
       continue
+    var hop = 0
+    if speakerHops and i < sim.directorBounce.len and
+        sim.directorBounce[i] > 0:
+      hop = DirectorBounceHops[DirectorBounceHops.len - sim.directorBounce[i]]
     packet.addObject(
       PlayerObjectBase + i,
       screenX,
-      screenY,
+      screenY - hop,
       player.y + 100,
       MapLayerId,
       playerSpriteId(player.gnomeIndex, player.direction)
@@ -3017,6 +3033,17 @@ proc updateDirectorCamera*(sim: SimServer) =
     sim.directorCamY = 0
     sim.directorCamW = mapW
     sim.directorCamH = mapH
+  # A gnome hops when its new line lands, so the eye finds the speaker.
+  if sim.directorBounce.len < sim.players.len:
+    sim.directorBounce.setLen(sim.players.len)
+    sim.directorLastMessages.setLen(sim.players.len)
+  for i, player in sim.players:
+    if player.message.len > 0 and
+        player.message != sim.directorLastMessages[i]:
+      sim.directorLastMessages[i] = player.message
+      sim.directorBounce[i] = DirectorBounceHops.len
+    elif sim.directorBounce[i] > 0:
+      dec sim.directorBounce[i]
   # A dinner party happens indoors, where the outdoor map shows
   # nothing: track the busiest house holding a real gathering so the
   # view can overlay its interior.
@@ -3129,43 +3156,78 @@ proc cardPortraitSprite(sim: SimServer, gnomeIndex: int): RgbaSprite =
     for x in 0 ..< result.width:
       result.putPixel(x, y, source.rgbaSpriteAt(x * step, y * step))
 
-proc directorCardSprite(sim: SimServer, player: Player): RgbaSprite =
-  ## One parchment conversation card for the director cut: the
-  ## speaker's face and name beside their full spoken line.
+proc nineSliceSprite(source: RgbaSprite, width, height, inset: int): RgbaSprite =
+  ## Scales a bordered panel sprite to a new size with its corners
+  ## kept crisp: corners copy, edges and the middle stretch.
+  proc mapCoord(dest, destSize, srcSize, inset: int): int =
+    if dest < inset:
+      dest
+    elif dest >= destSize - inset:
+      srcSize - (destSize - dest)
+    else:
+      inset + (dest - inset) * (srcSize - inset * 2) div
+        max(1, destSize - inset * 2)
+  result = newRgbaSprite(width, height)
+  for y in 0 ..< height:
+    for x in 0 ..< width:
+      result.putPixel(x, y, source.rgbaSpriteAt(
+        clamp(mapCoord(x, width, source.width, inset), 0, source.width - 1),
+        clamp(mapCoord(y, height, source.height, inset), 0, source.height - 1)
+      ))
+
+proc directorCardSprite(
+  sim: SimServer,
+  player: Player,
+  relation: string
+): RgbaSprite =
+  ## One conversation card for the director cut, framed like the chat
+  ## banner: the speaker's face and name beside their full spoken
+  ## line, with the relation to their listener along the bottom.
   let
-    fill = rgba(233, 213, 170, 245)
-    border = rgba(122, 76, 33, 255)
     nameInk = rgba(94, 58, 22, 255)
     textInk = rgba(ChatBannerInkR, ChatBannerInkG, ChatBannerInkB, 255)
+    relationInk = rgba(158, 116, 66, 255)
     portrait = sim.cardPortraitSprite(player.gnomeIndex)
-    textX = DirectorCardPad + portrait.width + 4
-    textWidth = DirectorCardWidth - textX - DirectorCardPad
+    pad = DirectorCardPad + 4
+    textX = pad + portrait.width + 4
+    textWidth = DirectorCardWidth - textX - pad
     lines = sim.wrapCardLines(player.message, textWidth)
     lineHeight = sim.textFont.height + 1
+    relationHeight =
+      if relation.len > 0:
+        lineHeight + 3
+      else:
+        0
     textHeight = (lines.len + 1) * lineHeight + 2
-    height = max(
-      portrait.height + DirectorCardPad * 2,
-      textHeight + DirectorCardPad * 2
+    height = max(portrait.height, textHeight) + relationHeight + pad * 2
+  if sim.chatBanner.width > 0:
+    result = sim.chatBanner.nineSliceSprite(
+      DirectorCardWidth, height, DirectorCardSliceInset
     )
-  result = newRgbaSprite(DirectorCardWidth, height)
-  result.fillRect(1, 1, DirectorCardWidth - 2, height - 2, fill)
-  result.fillRect(1, 0, DirectorCardWidth - 2, 1, border)
-  result.fillRect(1, height - 1, DirectorCardWidth - 2, 1, border)
-  result.fillRect(0, 1, 1, height - 2, border)
-  result.fillRect(DirectorCardWidth - 1, 1, 1, height - 2, border)
+  else:
+    result = newRgbaSprite(DirectorCardWidth, height)
+    result.fillRect(0, 0, DirectorCardWidth, height, rgba(233, 213, 170, 245))
   for y in 0 ..< portrait.height:
     for x in 0 ..< portrait.width:
       let color = portrait.rgbaSpriteAt(x, y)
       if color.a > 0:
-        result.putPixel(DirectorCardPad + x, DirectorCardPad + y, color)
-  sim.blitTinyText(result, player.playerName, textX, DirectorCardPad, nameInk)
+        result.putPixel(pad + x, pad + y, color)
+  sim.blitTinyText(result, player.playerName, textX, pad, nameInk)
   for i, line in lines:
     sim.blitTinyText(
       result,
       line,
       textX,
-      DirectorCardPad + (i + 1) * lineHeight + 2,
+      pad + (i + 1) * lineHeight + 2,
       textInk
+    )
+  if relation.len > 0:
+    sim.blitTinyText(
+      result,
+      relation,
+      pad,
+      height - pad - lineHeight + 1,
+      relationInk
     )
 
 proc addDirectorConversationCards(
@@ -3178,18 +3240,40 @@ proc addDirectorConversationCards(
   ## margins beside the map crop: speakers left of the shot's center
   ## on the left, the rest on the right, each column centered on the
   ## conversation and top-to-bottom in the speakers' map order.
-  var left, right: seq[int]
+  var left, right, speakers: seq[int]
   for i, player in sim.players:
     if player.mapIndex != MainMapIndex:
       continue
     if player.message.len == 0 or player.messageTicks <= 0:
       continue
+    speakers.add(i)
     if player.x < worldCenterX:
       left.add(i)
     else:
       right.add(i)
-  if left.len + right.len == 0:
+  if speakers.len == 0:
     return
+  proc relationLabel(i: int): string =
+    ## Mocked for now: a stable label toward the nearest other
+    ## speaker. Later this reads the connection book.
+    var
+      other = -1
+      best = high(int)
+    for j in speakers:
+      if j == i:
+        continue
+      let
+        dx = sim.players[j].x - sim.players[i].x
+        dy = sim.players[j].y - sim.players[i].y
+        dist = dx * dx + dy * dy
+      if dist < best:
+        best = dist
+        other = j
+    if other < 0:
+      return ""
+    const moods = ["friend with ", "neutral to ", "warming to "]
+    moods[(i * 7 + other * 13) mod moods.len] &
+      sim.players[other].playerName
   for (column, columnX, topInset) in [
     # The score panel overlays the window's top left, so the left
     # column starts below it.
@@ -3200,9 +3284,12 @@ proc addDirectorConversationCards(
       continue
     var
       sprites: seq[RgbaSprite]
+      relations: seq[string]
       totalHeight = -DirectorCardGapY
     for i in column:
-      let sprite = sim.directorCardSprite(sim.players[i])
+      let relation = relationLabel(i)
+      relations.add(relation)
+      let sprite = sim.directorCardSprite(sim.players[i], relation)
       sprites.add(sprite)
       totalHeight += sprite.height + DirectorCardGapY
     # The delay-chat banner overlays the window's bottom edge; keep
@@ -3217,7 +3304,8 @@ proc addDirectorConversationCards(
         cache,
         DirectorCardSpriteBase + i,
         sprite,
-        "director card " & $i & " " & sim.players[i].message
+        "director card " & $i & " " & relations[slot] & " " &
+          sim.players[i].message
       )
       packet.addObject(
         DirectorCardObjectBase + i,
@@ -3264,7 +3352,8 @@ proc addDirectorWorldView(
     cameraY,
     paddedW,
     viewH,
-    includeBubbles = false
+    includeBubbles = false,
+    speakerHops = true
   )
   packet.addHouseGnomeObjects(sim, cache, cameraX, cameraY)
   packet.addObject(
@@ -3809,7 +3898,7 @@ proc buildGlobalPacket*(
         replayLooping,
         replayMismatchTick
       )
-    result.addChatBanner(sim, declareLayer = not replayControls)
+    # No delay-chat banner: the conversation cards carry the lines.
     return
   if nextState.pendingMapClick:
     nextState.pendingMapClick = false
