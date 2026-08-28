@@ -645,6 +645,12 @@ when not defined(emscripten):
   type
     WebSocketAppState = ref object
       lock: Lock
+      nowKey: tuple[index, gnomeIndex, messageLen: int]
+      nowPlayingSerial: int
+      nowPlayingSeat: int
+      nowPlayingText: string
+        ## The chat line the banner shows right now, published for the
+        ## viewer pages' speech layer.
       playerSlots: Table[WebSocket, int]
         ## Seat requested by each /player socket, -1 for any free seat.
       globalViewers: Table[WebSocket, PlayerViewerState]
@@ -5787,6 +5793,20 @@ when not defined(emscripten):
     appState.replayLoaded = false
     appState.pendingReplayUri = ""
 
+proc publishNowPlaying(sim: SimServer) =
+  ## Mirrors the banner's current chat line into shared state, so the
+  ## /nowplaying route can hand it to the viewer pages' speech layer.
+  let now = sim.chatFeedNowPlaying()
+  {.gcsafe.}:
+    withLock appState.lock:
+      if now != appState.nowKey:
+        appState.nowKey = now
+        if now.index >= 0:
+          inc appState.nowPlayingSerial
+          appState.nowPlayingSeat = now.gnomeIndex
+          appState.nowPlayingText = sim.chatFeedNowText()
+
+
 proc globalPanelClickedPlayer(data: string): int =
   ## Returns the clicked global score-panel player index or -1.
   result = -1
@@ -5991,6 +6011,7 @@ proc replayViewerFrame*(
   else:
     sim.inferConversationCircles()
   sim.advanceChatFeed()
+  sim.publishNowPlaying()
   sim.updateDirectorCamera()
   var nextState: PlayerViewerState
   result = sim.buildGlobalPacket(
@@ -6238,6 +6259,71 @@ when not defined(emscripten):
 })();</script>
 """
 
+  const DirectorAudioSnippet = """
+<button id="hlRadio" style="position:absolute;top:12px;right:12px;z-index:40;
+  font:bold 18px monospace;color:#cfc7a8;background:#2a2620;border:2px solid
+  #4a4436;border-radius:8px;padding:12px 20px;cursor:pointer;opacity:0.92;">
+  &#9834; sound: off</button>
+<audio id="hlMusic" src="/music.mp3" loop preload="none"></audio>
+<script>(function(){
+  var b=document.getElementById("hlRadio"),a=document.getElementById("hlMusic");
+  a.volume=0.55;var on=false;
+  function setOn(next){
+    on=next;
+    if(on){a.play();b.innerHTML="&#9834; sound: on";
+      b.style.color="#ffe9a0";b.style.borderColor="#8a7c4e";}
+    else{a.pause();if(window.speechSynthesis)speechSynthesis.cancel();
+      b.innerHTML="&#9834; sound: off";
+      b.style.color="#cfc7a8";b.style.borderColor="#4a4436";}
+  }
+  b.addEventListener("click",function(e){e.stopPropagation();setOn(!on);});
+  // The first click or key anywhere starts the sound: the gesture the
+  // browser requires, without hunting for the button.
+  function firstGesture(){
+    if(!on)setOn(true);
+    document.removeEventListener("pointerdown",firstGesture);
+    document.removeEventListener("keydown",firstGesture);
+  }
+  document.addEventListener("pointerdown",firstGesture);
+  document.addEventListener("keydown",firstGesture);
+  var voices=[],last=-1;
+  function loadVoices(){voices=speechSynthesis.getVoices();}
+  if(window.speechSynthesis){loadVoices();
+    speechSynthesis.onvoiceschanged=loadVoices;}
+  setInterval(function(){
+    if(!on||!window.speechSynthesis)return;
+    fetch("/nowplaying").then(function(r){return r.json();})
+      .then(function(d){
+        if(d.serial===last||!d.text)return;
+        if(last<0){last=d.serial;return;}
+        last=d.serial;
+        if(speechSynthesis.pending)speechSynthesis.cancel();
+        var u=new SpeechSynthesisUtterance(d.text);
+        if(voices.length>0)u.voice=voices[d.seat%voices.length];
+        u.pitch=1.25+((d.seat*5)%9)*0.08;
+        u.rate=1.15+((d.seat*3)%5)*0.05;
+        u.volume=0.9;
+        speechSynthesis.speak(u);
+      }).catch(function(){});
+  },250);
+})();</script>
+"""
+
+  proc serveMusicFile(request: Request): bool =
+    ## Streams the local music file named by HEARTLEAF_MUSIC_FILE, so a
+    ## run can score its viewers without the file entering the repo.
+    if request.path != "/music.mp3" or request.httpMethod != "GET":
+      return false
+    let path = getEnv("HEARTLEAF_MUSIC_FILE")
+    if path.len == 0 or not fileExists(path):
+      request.respondPlain(404, "no music configured\n")
+      return true
+    var headers: HttpHeaders
+    headers["Content-Type"] = "audio/mpeg"
+    headers["Cache-Control"] = "no-cache"
+    request.respond(200, headers, readFile(path))
+    true
+
   proc httpHandler(request: Request) =
     ## Handles Heartleaf HTTP and websocket routes.
     if request.serveHealthz():
@@ -6257,13 +6343,14 @@ when not defined(emscripten):
         return
       if request.path != GlobalWebSocketPath:
         # Director pages (the root and the /director alias) keep the
-        # stock viewer auto-fitted: the fit snippet re-arms the fit
-        # after every gesture so the wide shot stays centered.
+        # stock viewer auto-fitted via the fit snippet, and carry the
+        # music layer fed by the /music.mp3 route below.
         var page = bitworldClient.clientStaticBody(
           bitworldClient.GlobalClientRoute,
           bitworldClient.GlobalClientRoute
         )
         page = page.replace("</body>", DirectorFitSnippet & "</body>")
+        page = page.replace("</body>", DirectorAudioSnippet & "</body>")
         var headers: HttpHeaders
         headers["Content-Type"] = "text/html"
         headers["Cache-Control"] = "no-cache"
@@ -6274,6 +6361,21 @@ when not defined(emscripten):
           bitworldClient.GlobalClientRoute,
           bitworldClient.GlobalClientRoute
         )
+    elif request.serveMusicFile():
+      discard
+    elif request.path == "/nowplaying" and request.httpMethod == "GET":
+      var serial, seat: int
+      var text: string
+      {.gcsafe.}:
+        withLock appState.lock:
+          serial = appState.nowPlayingSerial
+          seat = appState.nowPlayingSeat
+          text = appState.nowPlayingText
+      var headers: HttpHeaders
+      headers["Content-Type"] = "application/json"
+      headers["Cache-Control"] = "no-cache"
+      request.respond(200, headers,
+        $(%*{"serial": serial, "seat": seat, "text": text}))
     elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
       if not request.checkReplayRequest():
@@ -6600,6 +6702,7 @@ when not defined(emscripten):
       let wasScoring = sim.scoreTicks > 0
       sim.step(stepInputs)
       sim.advanceChatFeed()
+      sim.publishNowPlaying()
       replayWriter.writeHash(uint32(sim.tickCount), sim.gameHash())
       if not wasScoring and sim.scoreTicks > 0:
         sim.writeArtifacts(runtimeConfig)
@@ -6682,6 +6785,7 @@ when not defined(emscripten):
           if simStarted:
             echo "sim paused: waiting on ", frame.blockedNames.join(", ")
         sim.advanceChatFeed()
+        sim.publishNowPlaying()
       else:
         if pausedSince > 0.0:
           echo "sim resumed after ",
@@ -7271,6 +7375,7 @@ when not defined(emscripten):
       else:
         sim.inferConversationCircles()
       sim.advanceChatFeed()
+      sim.publishNowPlaying()
       sim.updateDirectorCamera()
 
       for i in 0 ..< viewerSockets.len:
