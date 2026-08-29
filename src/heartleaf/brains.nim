@@ -9,6 +9,9 @@ import
     executor, report, prompt, pacing, bedrock_client, souls, encounters]
 
 const
+  JoinGraceTicks = 12
+    ## Half a game minute: long enough for a just-enrolled gnome to
+    ## plant its feet before the walker rule can drop it.
   PermanentConfirmations = 2
   PermanentRetrySeconds = 5.0
   ContextRetrySeconds = 2.0
@@ -73,6 +76,10 @@ type
       ## Encounter id -> seat that spoke last (round-robin cursor).
     encounterSilentSlots: Table[int, int]
       ## Encounter id -> consecutive silent conversation ticks.
+    encounterJoinTick: Table[int, int]
+      ## Seat -> sim tick when it joined its conversation. A fresh
+      ## member gets a short grace before the walker rule applies:
+      ## a gnome enrolled mid-stride needs a moment to stop.
 
 proc newBrains*(
   navigation: Navigation,
@@ -252,6 +259,8 @@ proc setEncounter(brains: Brains, houseIndex, id: int) =
   if houseIndex notin brains.villagers:
     return
   brains.villagers[houseIndex].encounterId = id
+  if id > 0:
+    brains.encounterJoinTick[houseIndex] = brains.villagers[houseIndex].tick
 
 proc conversationExtra(brains: Brains, encounter: Encounter): string =
   ## Chart fields for one conversation log line.
@@ -350,6 +359,9 @@ proc speakInEncounter*(
   let encounter = brains.book.encounter(speaker.encounterId)
   if encounter != nil:
     encounter.addLine(speaker.name, message)
+    # A line resets the conversation's silence, even when it lands
+    # after its slot: slow models are late, not quiet.
+    brains.encounterSilentSlots[encounter.id] = 0
     for houseIndex in encounter.members:
       if houseIndex in brains.villagers:
         brains.villagers[houseIndex].recordTalkLine(speaker.name, message)
@@ -829,6 +841,10 @@ proc dropWalkers*(
   var leavers: seq[int]
   for houseIndex, villager in brains.villagers.pairs:
     if not villager.talking:
+      continue
+    if villager.tick - brains.encounterJoinTick.getOrDefault(houseIndex, 0) <
+        JoinGraceTicks:
+      # Just enrolled: still stopping. The pin takes over next frame.
       continue
     if houseIndex in outdoorFeet and houseIndex notin stillFeet:
       leavers.add(houseIndex)
