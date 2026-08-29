@@ -1,5 +1,5 @@
 import
-  std/[algorithm, json, math, os, osproc, random, strutils, tables, times],
+  std/[algorithm, hashes, json, math, os, osproc, random, strutils, tables, times],
   flatty, jsony, pixie,
   bitworld/aseprite, bitworld/pixelfonts, bitworld/spriteprotocol,
   bitworld/resources, bitworld/sprites,
@@ -6318,6 +6318,80 @@ when not defined(emscripten):
 
   const
     VoiceHoldMaxSeconds = 20.0
+    ## The ElevenLabs cast, seat by seat, matched to the persona souls.
+    ## An empty id falls back to the macOS voice for that seat. Override
+    ## with HEARTLEAF_ELEVEN_VOICES, a comma list of voice ids.
+    ElevenCast = [
+      "nzeAacJi50IvxcyDnMXa",  # Ivan (chatty)    - Marshal, exuberant professor
+      "",                       # Anton (curious)  - Bading Garci, pending id
+      "M4zkunnpRihDKTNF0D7f",  # Yura (fatherly)  - Klaus Santa, warm and jolly
+      "",                       # Sasha (friendly) - Sergio, pending id
+      "LRpNiUBlcqgIsKUzcrlN",  # Maxim (funny)    - Georg, funny and emotional
+      "",                       # Nikita (grumpy)  - Grampa Werthers, pending id
+      "",                       # Vova (jolly)     - Bongpal, pending id
+      "gSYqSbtMajxq5LUT0bNl",  # Dima (poet)      - Elder, epic storyteller
+      "LxiqOV1uxBCgYTeitAHf"   # Egor (shy)       - Bowo, hoarse and quiet
+    ]
+
+  proc elevenKey(): string =
+    ## The ElevenLabs API key: the environment first, then the key
+    ## file, so the key never has to travel through a chat or a repo.
+    result = getEnv("ELEVENLABS_API_KEY").strip()
+    if result.len == 0:
+      let keyFile = getHomeDir() / ".elevenlabs_key"
+      if fileExists(keyFile):
+        result = readFile(keyFile).strip()
+
+  proc elevenVoiceFor(seat: int): string =
+    ## The ElevenLabs voice id for one seat, or empty for the fallback.
+    let listed = getEnv("HEARTLEAF_ELEVEN_VOICES").strip()
+    if listed.len > 0:
+      let ids = listed.split(',')
+      if seat >= 0 and seat < ids.len:
+        return ids[seat].strip()
+      return ""
+    if seat >= 0 and seat < ElevenCast.len:
+      return ElevenCast[seat]
+    ""
+
+  proc elevenClip(seat: int, text: string): string =
+    ## One spoken line from ElevenLabs as mp3 bytes, cached by voice
+    ## and text so a replay costs credits once. Empty on any failure -
+    ## the caller falls back to the macOS voice.
+    let key = elevenKey()
+    if key.len == 0:
+      return ""
+    let voiceId = elevenVoiceFor(seat)
+    if voiceId.len == 0:
+      return ""
+    let cacheDir = getTempDir() / "heartleaf-eleven"
+    createDir(cacheDir)
+    let clipPath = cacheDir / voiceId & "-" & $abs(hash(text)) & ".mp3"
+    if fileExists(clipPath):
+      return readFile(clipPath)
+    let bodyPath = cacheDir / "request.json"
+    writeFile(bodyPath, $(%*{
+      "text": text,
+      "model_id": "eleven_flash_v2_5"
+    }))
+    discard execProcess("/usr/bin/curl", args = [
+      "-s", "-f", "--max-time", "15",
+      "-X", "POST",
+      "https://api.elevenlabs.io/v1/text-to-speech/" & voiceId &
+        "?output_format=mp3_44100_64",
+      "-H", "xi-api-key: " & key,
+      "-H", "Content-Type: application/json",
+      "--data-binary", "@" & bodyPath,
+      "-o", clipPath
+    ], options = {poUsePath})
+    removeFile(bodyPath)
+    if fileExists(clipPath) and getFileSize(clipPath) > 500:
+      return readFile(clipPath)
+    if fileExists(clipPath):
+      removeFile(clipPath)
+    ""
+
+  const
     VoiceCast = [
       ("Grandpa (English (US))", 185),
       ("Grandma (English (US))", 195),
@@ -6351,6 +6425,13 @@ when not defined(emscripten):
       withLock appState.lock:
         appState.voiceHoldSerial = serial
         appState.voiceHoldSince = epochTime()
+    let premium = elevenClip(seat, text)
+    if premium.len > 0:
+      var headers: HttpHeaders
+      headers["Content-Type"] = "audio/mpeg"
+      headers["Cache-Control"] = "no-cache"
+      request.respond(200, headers, premium)
+      return true
     let
       voice = VoiceCast[seat mod VoiceCast.len]
       base = getTempDir() / "heartleaf-voice-" & $serial
