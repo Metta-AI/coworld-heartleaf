@@ -6329,7 +6329,7 @@ when not defined(emscripten):
       "nzeAacJi50IvxcyDnMXa",  # Ivan (chatty)    - Marshal, exuberant professor
       "ouL9IsyrSnUkCmfnD02u",  # Anton (curious)  - Grimblewood, snarky gnome
       "M4zkunnpRihDKTNF0D7f",  # Yura (fatherly)  - Klaus Santa, warm and jolly
-      "",                       # Sasha (friendly) - Sergio, pending id
+      "ZUz67EWNNT6d1i38Xmcm",  # Sasha (friendly) - Robert, warm baritone
       "LRpNiUBlcqgIsKUzcrlN",  # Maxim (funny)    - Georg, funny and emotional
       "0pkdtmrxitYBWv6q9NJO",  # Nikita (grumpy)  - Potato, deep wooden stoic
       "B52raBK48m23qWYbwchQ",  # Vova (jolly)     - Matthew Schmitz, warm teller
