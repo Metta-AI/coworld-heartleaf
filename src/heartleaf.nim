@@ -6327,12 +6327,12 @@ when not defined(emscripten):
     ## with HEARTLEAF_ELEVEN_VOICES, a comma list of voice ids.
     ElevenCast = [
       "nzeAacJi50IvxcyDnMXa",  # Ivan (chatty)    - Marshal, exuberant professor
-      "",                       # Anton (curious)  - Bading Garci, pending id
+      "ouL9IsyrSnUkCmfnD02u",  # Anton (curious)  - Grimblewood, snarky gnome
       "M4zkunnpRihDKTNF0D7f",  # Yura (fatherly)  - Klaus Santa, warm and jolly
       "",                       # Sasha (friendly) - Sergio, pending id
       "LRpNiUBlcqgIsKUzcrlN",  # Maxim (funny)    - Georg, funny and emotional
-      "",                       # Nikita (grumpy)  - Grampa Werthers, pending id
-      "",                       # Vova (jolly)     - Bongpal, pending id
+      "0pkdtmrxitYBWv6q9NJO",  # Nikita (grumpy)  - Potato, deep wooden stoic
+      "B52raBK48m23qWYbwchQ",  # Vova (jolly)     - Matthew Schmitz, warm teller
       "gSYqSbtMajxq5LUT0bNl",  # Dima (poet)      - Elder, epic storyteller
       "LxiqOV1uxBCgYTeitAHf"   # Egor (shy)       - Bowo, hoarse and quiet
     ]
@@ -6398,13 +6398,13 @@ when not defined(emscripten):
   const
     VoiceCast = [
       ("Grandpa (English (US))", 185),
-      ("Grandma (English (US))", 195),
+      ("Junior", 200),
       ("Jester", 205),
       ("Eddy (English (US))", 200),
-      ("Flo (English (US))", 200),
+      ("Ralph", 190),
       ("Reed (English (US))", 190),
       ("Daniel", 195),
-      ("Moira", 195),
+      ("Fred", 185),
       ("Rishi", 200)
     ]
 
@@ -7432,11 +7432,17 @@ when not defined(emscripten):
           appState.closedSockets.setLen(0)
 
       var voiceHolding = false
+      var restartShow = false
       {.gcsafe.}:
         withLock appState.lock:
           voiceHolding =
             appState.voiceHoldSerial > appState.voiceDoneSerial and
             epochTime() - appState.voiceHoldSince < VoiceHoldMaxSeconds
+          restartShow = appState.replayRestartPending
+          appState.replayRestartPending = false
+      if restartShow and replayLoaded and replay.replayMaxTick() > 0:
+        replay.seekReplay(sim, 0)
+        replay.playing = true
 
       if pendingReplayUri.len > 0:
         try:
