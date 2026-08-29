@@ -6277,7 +6277,8 @@ when not defined(emscripten):
     on=next;
     if(on){a.play();b.innerHTML="&#9834; sound: on";
       b.style.color="#ffe9a0";b.style.borderColor="#8a7c4e";}
-    else{a.pause();if(window.speechSynthesis)speechSynthesis.cancel();
+    else{a.pause();v.pause();
+      if(inFlight>=0)lineDone(inFlight);
       b.innerHTML="&#9834; sound: off";
       b.style.color="#cfc7a8";b.style.borderColor="#4a4436";}
   }
@@ -6295,18 +6296,21 @@ when not defined(emscripten):
   // clip from /voice.m4a, one macOS voice per seat. The server holds
   // the replay until /voicedone, so the next card pops when the voice
   // finishes. Music ducks while a gnome speaks.
-  var v=new Audio();var last=-1;var speaking=false;
+  var v=new Audio();var last=-1;var speaking=false;var inFlight=-1;
   function lineDone(serial){
-    speaking=false;a.volume=0.55;
+    speaking=false;inFlight=-1;a.volume=0.55;
     fetch("/voicedone?serial="+serial).catch(function(){});
   }
+  window.addEventListener("pagehide",function(){
+    if(inFlight>=0)navigator.sendBeacon("/voicedone?serial="+inFlight);
+  });
   setInterval(function(){
     if(!on||speaking)return;
     fetch("/nowplaying").then(function(r){return r.json();})
       .then(function(d){
         if(d.serial===last||!d.text)return;
         if(last<0){last=d.serial;return;}
-        last=d.serial;speaking=true;a.volume=0.25;
+        last=d.serial;speaking=true;inFlight=d.serial;a.volume=0.25;
         v.src="/voice.m4a?serial="+d.serial;
         v.onended=function(){lineDone(d.serial);};
         v.onerror=function(){lineDone(d.serial);};
@@ -6317,7 +6321,7 @@ when not defined(emscripten):
 """
 
   const
-    VoiceHoldMaxSeconds = 20.0
+    VoiceHoldMaxSeconds = 8.0
     ## The ElevenLabs cast, seat by seat, matched to the persona souls.
     ## An empty id falls back to the macOS voice for that seat. Override
     ## with HEARTLEAF_ELEVEN_VOICES, a comma list of voice ids.
@@ -6505,8 +6509,8 @@ when not defined(emscripten):
         return
       if request.path != GlobalWebSocketPath:
         # Director pages (the root and the /director alias) keep the
-        # stock viewer auto-fitted via the fit snippet, and carry the
-        # music layer fed by the /music.mp3 route below.
+        # stock viewer auto-fitted via the fit snippet, and get a small
+        # audio layer injected, fed by /music.mp3 and /voice.m4a below.
         var page = bitworldClient.clientStaticBody(
           bitworldClient.GlobalClientRoute,
           bitworldClient.GlobalClientRoute
@@ -7427,6 +7431,13 @@ when not defined(emscripten):
             sim.removePlayer(websocket)
           appState.closedSockets.setLen(0)
 
+      var voiceHolding = false
+      {.gcsafe.}:
+        withLock appState.lock:
+          voiceHolding =
+            appState.voiceHoldSerial > appState.voiceDoneSerial and
+            epochTime() - appState.voiceHoldSince < VoiceHoldMaxSeconds
+
       if pendingReplayUri.len > 0:
         try:
           replayData = loadReplayUri(pendingReplayUri)
@@ -7527,12 +7538,6 @@ when not defined(emscripten):
             ticksThisFrame = 0
           # While a viewer speaks the current line aloud, the show
           # waits: no ticks, so the next card pops when the voice ends.
-          var voiceHolding = false
-          {.gcsafe.}:
-            withLock appState.lock:
-              voiceHolding =
-                appState.voiceHoldSerial > appState.voiceDoneSerial and
-                epochTime() - appState.voiceHoldSince < VoiceHoldMaxSeconds
           if voiceHolding:
             ticksThisFrame = 0
           for _ in 0 ..< ticksThisFrame:
@@ -7549,7 +7554,8 @@ when not defined(emscripten):
       # 0.1.x format) stay readable for tooling but no longer drive
       # rendering: they move with the gnomes, which prod rings do not.
       sim.inferConversationCircles()
-      sim.advanceChatFeed()
+      if not voiceHolding:
+        sim.advanceChatFeed()
       sim.publishNowPlaying()
       sim.updateDirectorCamera()
 
