@@ -81,11 +81,14 @@ const
   ReplayScrubberTrackY = 2
   ReplayScrubberY = 26
   ReplayTickTextY = 11
+  ReplayConvTextY = 18
+    ## The "CONV N/M" queue position label sits under the tick counter,
+    ## in the same clear run between the transport buttons and speeds.
   TransportButtonsX = 10
   TransportRowY = 11
   TransportButtonWidth = 12
   TransportButtonStride = 14
-  TransportButtonCount = 4
+  TransportButtonCount = 6
   TransportRowHeight = 7
   TransportSpeedStride = 17
   TransportSpeedWidth = 16
@@ -173,6 +176,9 @@ const
     ## While the director is on a conversation at 1X, the replay slows
     ## to one tick every five frames - lines recorded 24 ticks apart
     ## then land about five seconds apart, show pacing.
+  QueueFastForwardTicks = 8
+    ## Ticks per frame the conversation-queue playhead covers between
+    ## conversations: a brisk automatic ~8X toward the next birth.
   DirectorCardMarginPx = 170
     ## Extra viewport width on each side of the director's crop. The
     ## conversation cards live in these margins, outside the map.
@@ -254,6 +260,7 @@ const
   ReplayControlsSpriteId = 8402
   ReplayMismatchSpriteId = 8403
   ReplayPanelBgSpriteId = 8404
+  ReplayConvSpriteId = 8405
   GnomeOutlineSpriteBase = 8500
   TrailDotSpriteBase = 8600
   ReplayTickObjectId = 20_400
@@ -261,6 +268,7 @@ const
   ReplayControlsObjectId = 20_402
   ReplayMismatchObjectId = 20_403
   ReplayPanelBgObjectId = 20_404
+  ReplayConvObjectId = 20_405
   HouseGnomeObjectBase = 21_000
   HouseGnomeBorderObjectBase = 21_100
   PlayerBorderObjectId = 21_200
@@ -406,6 +414,9 @@ type
     speaker: ChatFeedPerson
     hearers: seq[ChatFeedPerson]
     message: string
+    encounterId: int
+      ## The conversation this line was spoken in, from the replay's
+      ## records; zero when unknown (live play, dinner talk, shouts).
 
   ChatBannerHearer = object
     gnomeIndex: int
@@ -542,6 +553,33 @@ type
     chatFeedIndex: int
     chatFeedShownAt: float
       ## epochTime when the current delay-chat line first appeared.
+    convQueue*: seq[ConversationSpan]
+      ## The replay's conversations in birth order, for the
+      ## conversation-queue show. Viewer-only, never hashed; empty in
+      ## live play and on replays without conversation records.
+    convQueueIndex: int
+      ## The queue item now playing (while committed) or next up.
+    convQueueLast: int
+      ## The most recently committed item, for the prev-conv restart;
+      ## -1 before anything has played.
+    convQueueCommitted: bool
+      ## Whether playback is committed to convQueue[convQueueIndex]
+      ## end-to-end: birth tick through death tick.
+    convQueueMode: bool
+      ## Conversation-queue playback. False is free-watch, today's
+      ## behavior; only the replay server ever turns this on.
+    convQueueFurthest: int
+      ## The furthest tick queue playback has reached. After a
+      ## same-tick birth group's rewinds, forward playback resumes
+      ## from here, so world time never repeats or skips.
+    chatFeedScope: int
+      ## While committed, the encounter id whose lines the delay-chat
+      ## cursor may air; other circles' lines are skipped. Zero airs
+      ## everything.
+    directorCommitEncounter: int
+      ## While positive, the director camera belongs to this
+      ## encounter: no dwell rotation, no tour, until the queue
+      ## releases it.
 
   KeyframeState = object
     ## Dynamic simulation state stored in one replay keyframe. Static
@@ -1100,6 +1138,7 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   result.portraits = loadPortraits(dataRoot)
   result.conversationAnchors = initTable[int, ConversationAnchor]()
   result.chatFeedIndex = -1
+  result.convQueueLast = -1
   result.players = @[]
   result.dayNumber = 1
   result.playerInitPacket.addSpriteProtocolInit(
@@ -3339,6 +3378,19 @@ proc startDirectorTween(sim: SimServer) =
   sim.directorTweenFromW = sim.directorCamW
   sim.directorTweenFromH = sim.directorCamH
 
+proc releaseDirectorCommit(sim: SimServer) =
+  ## Ends the camera's queue commitment: the shot glides back out to
+  ## the wide view and the feed scope opens up again.
+  sim.directorCommitEncounter = 0
+  sim.chatFeedScope = 0
+  if sim.directorFocusActive:
+    sim.directorFocusActive = false
+    sim.directorLastFocusX = sim.directorFocusX
+    sim.directorLastFocusY = sim.directorFocusY
+    sim.directorHasLastFocus = true
+    sim.startDirectorTween()
+    echo "Director commit out at tick ", sim.tickCount
+
 proc updateDirectorCamera*(sim: SimServer) =
   ## Advances the director cut's camera one frame. The cut is fully
   ## automated: the wide shot of the village while nothing happens, a
@@ -3391,10 +3443,29 @@ proc updateDirectorCamera*(sim: SimServer) =
         inc occupants
     if occupants < 2:  # the party is over the moment the table empties
       sim.directorDinnerTtl = 0
+  # A queue commitment owns the camera: the shot belongs to one
+  # conversation, addressed by its encounter id, from birth to death.
+  # No dwell rotation and no tour - the DirectorFocusDwellFrames
+  # behavior is subsumed while committed - and a missing anchor (the
+  # huddle still walking into place, or briefly dispersed) keeps the
+  # last framing instead of dropping the cut.
+  if sim.directorCommitEncounter > 0:
+    if sim.directorCommitEncounter in sim.conversationAnchors:
+      let anchor = sim.conversationAnchors[sim.directorCommitEncounter]
+      if not sim.directorFocusActive:
+        sim.directorFocusActive = true
+        sim.directorWideTicks = 0
+        sim.directorFocusTicks = 0
+        sim.startDirectorTween()
+        echo "Director commit in at tick ", sim.tickCount,
+          ": encounter ", sim.directorCommitEncounter
+      sim.directorFocusX = anchor.x
+      sim.directorFocusY = anchor.y
+      sim.directorFocusRadius = ConversationRingRadius
   # Keep following the focused ring while its conversation lives; the
   # ring is anchored but replacements land nearby, so it is matched by
   # proximity.
-  if sim.directorFocusActive:
+  elif sim.directorFocusActive:
     var found = false
     for circle in sim.conversationCircles:
       if abs(circle.x - sim.directorFocusX) <= DirectorStickPx and
@@ -3419,8 +3490,11 @@ proc updateDirectorCamera*(sim: SimServer) =
       echo "Director cut out at tick ", sim.tickCount
   # Only pick the next conversation once the camera has finished its
   # glide back to the wide shot and dwelt there a beat, so every cut
-  # is out-then-in and neither leg ever snaps.
-  if not sim.directorFocusActive:
+  # is out-then-in and neither leg ever snaps. In queue mode the tour
+  # never picks: between conversations the playhead fast-forwards in
+  # the wide shot, and commitment alone brings the camera in.
+  if not sim.directorFocusActive and sim.directorCommitEncounter == 0 and
+      not sim.convQueueMode:
     if sim.conversationCircles.len > 0 and
         sim.directorTweenLeft <= 0 and
         sim.directorCamH >= mapH * DirectorWideSnapRatio:
@@ -3864,8 +3938,10 @@ proc replayCommandAt(layer, x, y: int): char =
       return '\0'
     case index
     of 0: return '<'
-    of 1: return ' '
-    of 2: return 'e'
+    of 1: return 'N'  # prev conversation
+    of 2: return ' '
+    of 3: return 'n'  # next conversation
+    of 4: return 'e'
     else: return 'r'
   let speedX = x - SpeedRowX
   if speedX >= 0 and
@@ -3953,14 +4029,20 @@ proc buildReplayControlsSprite(
     dim = rgba(178, 138, 90, 255)
     buttons = [
       "<<",
+      "[<",
       if playing: "||" else: "|>",
+      ">]",
       ">|",
       "R"
     ]
   for i, label in buttons:
     let color =
-      if i == 3:
+      if i == 5:
         if looping: bright else: dim
+      elif i == 1 or i == 3:
+        # Prev/next conversation: greyed out on a day whose replay
+        # holds no conversations to queue.
+        if sim.convQueue.len > 0: bright else: dim
       else:
         bright
     sim.blitTinyText(
@@ -4116,6 +4198,35 @@ proc addReplayControls(
     ReplayCenterBottomLayerId,
     ReplayTickSpriteId
   )
+  if sim.convQueue.len > 0:
+    # The queue position label, under the tick counter. Bright while
+    # queue playback drives; dim in free-watch after a manual seek.
+    let
+      convInk =
+        if sim.convQueueMode:
+          rgba(GlobalPanelTextR, GlobalPanelTextG, GlobalPanelTextB, 255)
+        else:
+          rgba(GlobalPanelScoreR, GlobalPanelScoreG, GlobalPanelScoreB, 255)
+      convText = sim.globalPanelTextSprite(
+        "CONV " & $min(sim.convQueueIndex + 1, sim.convQueue.len) &
+          "/" & $sim.convQueue.len,
+        convInk
+      )
+    packet.addRgbaSpriteCached(
+      cache,
+      ReplayConvSpriteId,
+      convText,
+      "replay conv position"
+    )
+    packet.addObject(
+      ReplayConvObjectId,
+      TransportButtonsEndX + max(0,
+        (SpeedRowX - TransportButtonsEndX - convText.width) div 2),
+      ChatBannerAreaHeight + ReplayConvTextY,
+      0,
+      ReplayCenterBottomLayerId,
+      ReplayConvSpriteId
+    )
   packet.addRgbaSpriteCached(
     cache,
     ReplayScrubberSpriteId,
@@ -5047,6 +5158,18 @@ proc observe*(sim: SimServer, playerIndex: int): Observation =
           ViewportWidth, ViewportHeight
         )
 
+proc encounterIdForSeat(sim: SimServer, seat: int): int =
+  ## The open conversation this house seat sits in at the current
+  ## tick, from the replay's conversation records; zero in live play
+  ## or when the seat is not in one.
+  if seat < 0 or sim.conversationTimeline.events.len == 0:
+    return 0
+  for group in sim.conversationTimeline.encounterGroupsAt(sim.tickCount):
+    for member in group.members:
+      if member == seat:
+        return group.id
+  0
+
 proc captureChatFeed(sim: SimServer) =
   ## Queues freshly spoken chats with their audience for the delay chat.
   ## Messages nobody heard are skipped.
@@ -5056,12 +5179,18 @@ proc captureChatFeed(sim: SimServer) =
     let audience = sim.replayChatAudience(i)
     if audience.len == 0:
       continue
+    let seat =
+      if player.homeFlag.isHomeMap():
+        player.homeFlag - HomeMapIndexBase
+      else:
+        -1
     var item = ChatFeedItem(
       speaker: ChatFeedPerson(
         name: player.playerName,
         gnomeIndex: player.gnomeIndex
       ),
-      message: player.message
+      message: player.message,
+      encounterId: sim.encounterIdForSeat(seat)
     )
     for slot in audience:
       item.hearers.add(ChatFeedPerson(
@@ -5086,24 +5215,75 @@ proc queueDelayChat*(sim: SimServer, speaker, message: string) =
     message: message
   ))
 
+proc chatFeedScopeMatches(sim: SimServer, index: int): bool =
+  ## Whether the feed scope admits this line. Scope zero admits every
+  ## line; a committed conversation admits only its own.
+  sim.chatFeedScope == 0 or
+    sim.chatFeed[index].encounterId == sim.chatFeedScope
+
+proc chatFeedNextIndex(sim: SimServer, fromIndex: int): int =
+  ## The first feed line at or after fromIndex that the current scope
+  ## admits, or -1 when none has been captured yet.
+  var i = max(fromIndex, 0)
+  while i < sim.chatFeed.len:
+    if sim.chatFeedScopeMatches(i):
+      return i
+    inc i
+  -1
+
 proc advanceChatFeed*(sim: SimServer, now = epochTime()) =
   ## Advances the delay-chat cursor by wall clock, not sim ticks or
   ## render frames. Each queued line stays up ChatFeedShowSeconds so it
-  ## can be read while the sim zips or the viewer runs at 60fps.
+  ## can be read while the sim zips or the viewer runs at 60fps. While
+  ## a queue commitment scopes the feed, the cursor steps only through
+  ## the committed conversation's lines and skips every other
+  ## circle's: cards and the banner follow the cursor, so scoping it
+  ## scopes the whole show.
   if sim.directorTweenLeft > 0:
     # The camera is mid-glide: the line on screen keeps its full read
     # time once the shot settles, and nothing new starts meanwhile.
     sim.chatFeedShownAt = now
     return
   if sim.chatFeedIndex < 0:
-    if sim.chatFeed.len > 0:
-      sim.chatFeedIndex = 0
+    let first = sim.chatFeedNextIndex(0)
+    if first >= 0:
+      sim.chatFeedIndex = first
       sim.chatFeedShownAt = now
+    return
+  if sim.chatFeedIndex >= sim.chatFeed.len or
+      not sim.chatFeedScopeMatches(sim.chatFeedIndex):
+    # The cursor sits on another circle's line (a scope landed
+    # mid-feed): jump to the next admitted line, or park past the end
+    # until one is captured.
+    let next = sim.chatFeedNextIndex(sim.chatFeedIndex)
+    if next >= 0:
+      sim.chatFeedIndex = next
+      sim.chatFeedShownAt = now
+    else:
+      sim.chatFeedIndex = sim.chatFeed.len
     return
   if now - sim.chatFeedShownAt < ChatFeedShowSeconds:
     return
-  if sim.chatFeedIndex + 1 < sim.chatFeed.len:
-    inc sim.chatFeedIndex
+  let next = sim.chatFeedNextIndex(sim.chatFeedIndex + 1)
+  if next >= 0:
+    sim.chatFeedIndex = next
+    sim.chatFeedShownAt = now
+
+proc advanceChatFeedNow*(sim: SimServer, now = epochTime()) =
+  ## Steps the delay chat to the next line right away: the voice for
+  ## the line on screen has finished, so its card leaves with it
+  ## instead of lingering out the wall-clock timer.
+  if sim.directorTweenLeft > 0:
+    sim.chatFeedShownAt = now
+    return
+  if sim.chatFeedIndex < 0 or
+      sim.chatFeedIndex >= sim.chatFeed.len or
+      not sim.chatFeedScopeMatches(sim.chatFeedIndex):
+    sim.advanceChatFeed(now)
+    return
+  let next = sim.chatFeedNextIndex(sim.chatFeedIndex + 1)
+  if next >= 0:
+    sim.chatFeedIndex = next
     sim.chatFeedShownAt = now
 
 proc step*(sim: SimServer, inputs: openArray[InputState]) =
@@ -5352,9 +5532,103 @@ proc seekReplay*(replay: var ReplayPlayer, sim: SimServer, tick: int) =
   while sim.tickCount < endTick:
     replay.stepReplay(sim)
 
+proc buildConversationQueue*(sim: SimServer, finalTick: int) =
+  ## Builds the conversation queue from the attached timeline: every
+  ## conversation in birth order, same-tick births together in a
+  ## stable order. An empty queue (a day with no conversations) keeps
+  ## plain playback.
+  sim.convQueue = sim.conversationTimeline.conversationSpans(finalTick)
+  sim.convQueueIndex = 0
+  sim.convQueueLast = -1
+  sim.convQueueCommitted = false
+  sim.convQueueFurthest = 0
+  sim.convQueueMode = sim.convQueue.len > 0
+  sim.chatFeedScope = 0
+  sim.directorCommitEncounter = 0
+  if sim.convQueue.len > 0:
+    echo "Conversation queue: ", sim.convQueue.len, " conversations"
+
+proc commitConversation(
+  sim: SimServer,
+  replay: var ReplayPlayer,
+  index: int
+) =
+  ## Commits playback to one queue item: the playhead moves to its
+  ## birth tick (the rewind, when the playhead already ran past it in
+  ## a same-tick birth group), and the camera and feed belong to the
+  ## conversation until its death tick.
+  let item = sim.convQueue[index]
+  sim.convQueueIndex = index
+  sim.convQueueLast = index
+  sim.convQueueCommitted = true
+  if sim.directorCommitEncounter != item.id and sim.directorFocusActive:
+    # Jumping between commitments keeps the glide grammar: the camera
+    # tweens from the old ring instead of snapping.
+    sim.startDirectorTween()
+  if sim.tickCount != item.birthTick:
+    replay.seekReplay(sim, item.birthTick)
+  sim.directorCommitEncounter = item.id
+  sim.chatFeedScope = item.id
+
+proc exitConversationQueue(sim: SimServer) =
+  ## A manual seek exits queue mode into free-watch: today's behavior,
+  ## dwell rotation allowed. The queue position is kept so next-conv
+  ## can re-enter at the first unplayed conversation.
+  if not sim.convQueueMode and sim.directorCommitEncounter == 0:
+    return
+  sim.convQueueMode = false
+  sim.convQueueCommitted = false
+  sim.releaseDirectorCommit()
+
+proc restartConversationQueue(sim: SimServer) =
+  ## Playback restarted from tick zero: queue mode starts over from
+  ## the top of the queue.
+  sim.convQueueIndex = 0
+  sim.convQueueLast = -1
+  sim.convQueueCommitted = false
+  sim.convQueueFurthest = 0
+  sim.releaseDirectorCommit()
+  sim.convQueueMode = sim.convQueue.len > 0
+
+proc stepConversationQueue(
+  sim: SimServer,
+  replay: var ReplayPlayer
+) =
+  ## One frame of conversation-queue bookkeeping, run while playback
+  ## advances. Commits to the queue head when the playhead reaches its
+  ## birth; at a death tick releases the shot and either rewinds to
+  ## the next same-group birth or resumes forward from the furthest
+  ## tick already reached, so world time never repeats or skips.
+  if not sim.convQueueMode:
+    return
+  sim.convQueueFurthest = max(sim.convQueueFurthest, sim.tickCount)
+  if sim.convQueueCommitted:
+    let item = sim.convQueue[sim.convQueueIndex]
+    if sim.tickCount >= item.deathTick:
+      # This conversation has played end-to-end.
+      sim.convQueueCommitted = false
+      sim.releaseDirectorCommit()
+      let next = sim.convQueueIndex + 1
+      if next < sim.convQueue.len and
+          sim.convQueue[next].birthTick <= sim.tickCount:
+        # The concurrent case: the next queue item was born at or
+        # before the playhead. Seek back and play it whole.
+        sim.commitConversation(replay, next)
+      else:
+        sim.convQueueIndex = next
+        if sim.tickCount < sim.convQueueFurthest:
+          # The group is played out; resume from the furthest tick
+          # already shown, then fast-forward to the next birth.
+          replay.seekReplay(sim, sim.convQueueFurthest)
+  elif sim.convQueueIndex < sim.convQueue.len:
+    if sim.tickCount >= sim.convQueue[sim.convQueueIndex].birthTick:
+      sim.commitConversation(replay, sim.convQueueIndex)
+
 proc applyReplaySeek*(replay: var ReplayPlayer, sim: SimServer, tick: int) =
-  ## Seeks replay playback and pauses on the target tick.
+  ## Seeks replay playback and pauses on the target tick. A manual
+  ## seek leaves queue mode: the viewer took the transport.
   replay.playing = false
+  sim.exitConversationQueue()
   replay.seekReplay(sim, clamp(tick, 0, replay.replayMaxTick()))
 
 proc applyReplayCommand*(
@@ -5392,18 +5666,56 @@ proc applyReplayCommand*(
     replay.speedIndex = 7
   of ',', '<':
     replay.playing = false
+    sim.restartConversationQueue()
     replay.seekReplay(sim, 0)
   of 'b':
     replay.playing = false
+    sim.exitConversationQueue()
     replay.seekReplay(sim, max(0, sim.tickCount - 1))
   of 'e':
     replay.playing = false
+    sim.exitConversationQueue()
     replay.seekReplay(sim, replay.replayMaxTick())
   of 'r':
     replay.looping = not replay.looping
   of '.', '>':
     replay.playing = false
+    sim.exitConversationQueue()
     replay.seekReplay(sim, sim.tickCount + ReplayFps * 5)
+  of 'n':
+    # Next conversation: abandon the current queue item and jump to
+    # the following item's birth. From free-watch this re-enters
+    # queue mode at the first unplayed conversation whose birth is at
+    # or past the playhead. No-op on an empty queue.
+    if sim.convQueue.len > 0:
+      if not sim.convQueueMode:
+        var target = -1
+        for i in sim.convQueueIndex ..< sim.convQueue.len:
+          if sim.convQueue[i].birthTick >= sim.tickCount:
+            target = i
+            break
+        if target < 0 and sim.convQueueIndex < sim.convQueue.len:
+          # Every unplayed birth lies behind the playhead: take the
+          # first unplayed item anyway rather than dead-ending.
+          target = sim.convQueueIndex
+        if target >= 0:
+          sim.convQueueMode = true
+          sim.commitConversation(replay, target)
+      else:
+        let target =
+          if sim.convQueueCommitted:
+            sim.convQueueIndex + 1
+          else:
+            sim.convQueueIndex
+        if target < sim.convQueue.len:
+          sim.commitConversation(replay, target)
+  of 'N':
+    # Prev conversation: restart the last-played or current item from
+    # its birth tick, back in queue mode. No-op before anything has
+    # played and on an empty queue.
+    if sim.convQueue.len > 0 and sim.convQueueLast >= 0:
+      sim.convQueueMode = true
+      sim.commitConversation(replay, sim.convQueueLast)
   else:
     discard
 
@@ -6751,6 +7063,7 @@ when not defined(emscripten):
     if replayLoaded:
       sim.attachConversationTimeline(replayData, cliLoadReplayPath())
       replay.buildReplayKeyframes(replaySeed, replayDayTicks)
+      sim.buildConversationQueue(replay.replayMaxTick())
     # The server holds paused on the final tick instead of looping, so
     # a page load never lands mid-recording; "r" re-enables looping.
     replay.looping = false
@@ -6807,6 +7120,7 @@ when not defined(emscripten):
           )
           replay = initReplayPlayer(replayData)
           replay.buildReplayKeyframes(replaySeed, replayDayTicks)
+          sim.buildConversationQueue(replay.replayMaxTick())
           replay.looping = false
           replayLoaded = true
           {.gcsafe.}:
@@ -6841,6 +7155,7 @@ when not defined(emscripten):
         # was watching, or when playback already ran to the end.
         if restartPending or
             (viewerJoined and sim.tickCount >= replay.replayMaxTick()):
+          sim.restartConversationQueue()
           replay.seekReplay(sim, 0)
           replay.playing = true
         for seekTick in seekTicks:
@@ -6848,6 +7163,10 @@ when not defined(emscripten):
         for command in commands:
           replay.applyReplayCommand(sim, command)
         if replay.playing:
+          # Queue-mode bookkeeping: commit at births, release at
+          # deaths, rewind through same-tick birth groups, resume
+          # from the furthest tick shown.
+          sim.stepConversationQueue(replay)
           # With a director watching, a conversation on screen slows
           # 1X playback to show pacing: recorded lines land about five
           # seconds apart. Other speeds respect the transport.
@@ -6868,6 +7187,20 @@ when not defined(emscripten):
           else:
             directorShowAccum = 0
             ticksThisFrame = replay.replayTicksThisFrame()
+          # Between conversations the queue's playhead fast-forwards
+          # briskly to the next birth; committed playback never runs
+          # past its item's death tick. The clamps land the playhead
+          # exactly on each boundary.
+          if sim.convQueueMode:
+            if not sim.convQueueCommitted and
+                replay.replaySpeedIndex() == DefaultSpeedIndex:
+              ticksThisFrame = QueueFastForwardTicks
+            if sim.convQueueCommitted:
+              ticksThisFrame = min(ticksThisFrame, max(0,
+                sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount))
+            elif sim.convQueueIndex < sim.convQueue.len:
+              ticksThisFrame = min(ticksThisFrame, max(0,
+                sim.convQueue[sim.convQueueIndex].birthTick - sim.tickCount))
           # A camera glide is a held breath: at show speed the replay
           # pauses until the shot settles, so cuts never swallow lines.
           if directorWatching and sim.directorTweenLeft > 0 and
@@ -6879,6 +7212,7 @@ when not defined(emscripten):
               replay.stepReplay(sim)
           if replay.looping and not replay.playing and
               replay.replayMaxTick() > 0:
+            sim.restartConversationQueue()
             replay.seekReplay(sim, 0)
             replay.playing = true
       if replay.circlesTimeline.len > 0:
