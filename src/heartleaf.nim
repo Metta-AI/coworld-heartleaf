@@ -158,14 +158,16 @@ const
     ## Card faces are the banner portraits downscaled to about this.
   DirectorCardZ = 32_000
   DirectorCardSpriteBase = 9100
-  DirectorCardObjectBase = 27_000
+  DirectorCardObjectBase = 28_000
+    ## Clear of HeartObjectBase (27_000..): the heart emotes ride the
+    ## same packets as the cards in the director view.
   DirectorCardSliceInset = 10
     ## Corner size kept crisp when the chat banner's leafy frame is
     ## nine-sliced onto a conversation card.
   DirectorCardInnerPad = DirectorCardPad + 4
     ## Content padding inside a card's leafy frame.
   DirectorCardFaceSpriteBase = 9150
-  DirectorCardFaceObjectBase = 27_100
+  DirectorCardFaceObjectBase = 28_100
   DirectorBounceHops = [2, 4, 6, 6, 5, 4, 2, 0, 2, 3, 3, 2, 1, 0]
     ## The little hop a gnome does when its new line lands, in pixels
     ## of lift per frame.
