@@ -6269,7 +6269,7 @@ when not defined(emscripten):
   font:bold 18px monospace;color:#cfc7a8;background:#2a2620;border:2px solid
   #4a4436;border-radius:8px;padding:12px 20px;cursor:pointer;opacity:0.92;">
   &#9834; sound: off</button>
-<audio id="hlMusic" src="/music.mp3" loop preload="none"></audio>
+<audio id="hlMusic" src="/music.m4a" loop preload="none"></audio>
 <script>(function(){
   var b=document.getElementById("hlRadio"),a=document.getElementById("hlMusic");
   a.volume=0.55;var on=false;
@@ -6476,16 +6476,22 @@ when not defined(emscripten):
     true
 
   proc serveMusicFile(request: Request): bool =
-    ## Streams the local music file named by HEARTLEAF_MUSIC_FILE, so a
-    ## run can score its viewers without the file entering the repo.
-    if request.path != "/music.mp3" or request.httpMethod != "GET":
+    ## Streams the village background music. HEARTLEAF_MUSIC_FILE names a
+    ## custom track when set; otherwise the placeholder loop committed in
+    ## data/village_music.m4a plays, so music works out of the box.
+    if request.path notin ["/music.mp3", "/music.m4a"] or
+        request.httpMethod != "GET":
       return false
-    let path = getEnv("HEARTLEAF_MUSIC_FILE")
+    var path = getEnv("HEARTLEAF_MUSIC_FILE")
     if path.len == 0 or not fileExists(path):
+      path = dataDir() / "village_music.m4a"
+    if not fileExists(path):
       request.respondPlain(404, "no music configured\n")
       return true
     var headers: HttpHeaders
-    headers["Content-Type"] = "audio/mpeg"
+    headers["Content-Type"] =
+      if path.toLowerAscii().endsWith(".m4a"): "audio/mp4"
+      else: "audio/mpeg"
     headers["Cache-Control"] = "no-cache"
     request.respond(200, headers, readFile(path))
     true
@@ -6510,7 +6516,7 @@ when not defined(emscripten):
       if request.path != GlobalWebSocketPath:
         # Director pages (the root and the /director alias) keep the
         # stock viewer auto-fitted via the fit snippet, and get a small
-        # audio layer injected, fed by /music.mp3 and /voice.m4a below.
+        # audio layer injected, fed by /music.m4a and /voice.m4a below.
         var page = bitworldClient.clientStaticBody(
           bitworldClient.GlobalClientRoute,
           bitworldClient.GlobalClientRoute
