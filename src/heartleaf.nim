@@ -482,6 +482,12 @@ when not defined(emscripten):
       replayServerMode: bool
       replayLoaded: bool
       pendingReplayUri: string
+      replayRestartPending: bool
+        ## A viewer connected while nobody was watching; the replay
+        ## loop restarts playback from tick zero.
+      replayViewerJoined: bool
+        ## A viewer connected; if playback already sits at the end of
+        ## the recording, the replay loop restarts from tick zero.
 
     ServerThreadArgs = ref object
       server: ptr Server
@@ -4214,7 +4220,11 @@ proc checkReplayHash(replay: var ReplayPlayer, sim: SimServer) =
   inc replay.hashIndex
 
 proc stepReplay*(replay: var ReplayPlayer, sim: SimServer) =
-  ## Advances replay playback by one simulation tick.
+  ## Advances replay playback by one simulation tick, holding on the
+  ## final recorded tick so the counter never outruns the recording.
+  if sim.tickCount >= replay.replayMaxTick():
+    replay.playing = false
+    return
   replay.applyReplayEvents(sim)
   var inputs = newSeq[InputState](sim.players.len)
   for playerIndex in 0 ..< sim.players.len:
@@ -4288,7 +4298,11 @@ proc seekReplay*(replay: var ReplayPlayer, sim: SimServer, tick: int) =
   sim.chatFeedShownAt = 0.0
   sim.conversationCircles.setLen(0)
   sim.conversationAnchors.clear()
-  while sim.tickCount < tick and replay.hashIndex < replay.data.hashes.len:
+  # Bound stepping by the last recorded tick, not by the hash cursor:
+  # after a hash mismatch the cursor stops advancing and would let a
+  # past-the-end seek step the simulation far beyond the recording.
+  let endTick = min(tick, replay.replayMaxTick())
+  while sim.tickCount < endTick:
     replay.stepReplay(sim)
 
 proc applyReplaySeek*(replay: var ReplayPlayer, sim: SimServer, tick: int) =
@@ -4837,6 +4851,11 @@ when not defined(emscripten):
       let websocket = request.upgradeToWebSocket()
       {.gcsafe.}:
         withLock appState.lock:
+          if appState.replayServerMode:
+            if appState.globalViewers.len == 0 and
+                appState.replayViewers.len == 0:
+              appState.replayRestartPending = true
+            appState.replayViewerJoined = true
           appState.globalViewers[websocket] = PlayerViewerState(
             selectedPlayerIndex: -1
           )
@@ -4847,6 +4866,11 @@ when not defined(emscripten):
       let websocket = request.upgradeToWebSocket()
       {.gcsafe.}:
         withLock appState.lock:
+          if appState.replayServerMode:
+            if appState.globalViewers.len == 0 and
+                appState.replayViewers.len == 0:
+              appState.replayRestartPending = true
+            appState.replayViewerJoined = true
           appState.replayViewers[websocket] = PlayerViewerState(
             selectedPlayerIndex: -1
           )
@@ -5625,6 +5649,9 @@ when not defined(emscripten):
     if replayLoaded:
       sim.attachConversationTimeline(replayData, cliLoadReplayPath())
       replay.buildReplayKeyframes(replaySeed, replayDayTicks)
+    # The server holds paused on the final tick instead of looping, so
+    # a page load never lands mid-recording; "r" re-enables looping.
+    replay.looping = false
     # Load assets before healthz so replay viewers get frames immediately.
     let httpServer = newServer(
       httpHandler,
@@ -5650,11 +5677,17 @@ when not defined(emscripten):
         viewerIsReplay: seq[bool] = @[]
         seekTicks: seq[int] = @[]
         commands: seq[char] = @[]
+        restartPending = false
+        viewerJoined = false
 
       {.gcsafe.}:
         withLock appState.lock:
           pendingReplayUri = appState.pendingReplayUri
           appState.pendingReplayUri = ""
+          restartPending = appState.replayRestartPending
+          appState.replayRestartPending = false
+          viewerJoined = appState.replayViewerJoined
+          appState.replayViewerJoined = false
           for websocket in appState.closedSockets:
             sim.removePlayer(websocket)
           appState.closedSockets.setLen(0)
@@ -5671,6 +5704,7 @@ when not defined(emscripten):
           )
           replay = initReplayPlayer(replayData)
           replay.buildReplayKeyframes(replaySeed, replayDayTicks)
+          replay.looping = false
           replayLoaded = true
           {.gcsafe.}:
             withLock appState.lock:
@@ -5700,6 +5734,12 @@ when not defined(emscripten):
             )
 
       if replayLoaded:
+        # A fresh viewer restarts playback from tick zero when nobody
+        # was watching, or when playback already ran to the end.
+        if restartPending or
+            (viewerJoined and sim.tickCount >= replay.replayMaxTick()):
+          replay.seekReplay(sim, 0)
+          replay.playing = true
         for seekTick in seekTicks:
           replay.applyReplaySeek(sim, seekTick)
         for command in commands:
