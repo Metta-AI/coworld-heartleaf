@@ -552,6 +552,13 @@ type
     chatFeed: seq[ChatFeedItem]   ## viewer-only delay chat, never hashed
     chatFeedIndex: int
     chatFeedShownAt: float
+    directorCardLive: bool
+      ## Whether the current delay-chat line's card may show on the
+      ## director cut this frame. While a viewer speaks the lines
+      ## aloud, the card lives exactly as long as its voice: it
+      ## appears when the voice starts and leaves on voicedone. With
+      ## no voice pacing the card simply rides the delay-chat cursor.
+      ## Viewer-only, never hashed.
       ## epochTime when the current delay-chat line first appeared.
     convQueue*: seq[ConversationSpan]
       ## The replay's conversations in birth order, for the
@@ -1148,6 +1155,7 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   result.conversationAnchors = initTable[int, ConversationAnchor]()
   result.chatFeedIndex = -1
   result.convQueueLast = -1
+  result.directorCardLive = true
   result.players = @[]
   result.dayNumber = 1
   result.playerInitPacket.addSpriteProtocolInit(
@@ -3646,6 +3654,7 @@ proc cardPortraitSprite(sim: SimServer, gnomeIndex: int): RgbaSprite =
 proc directorCardSprite(
   sim: SimServer,
   player: Player,
+  spokenLine: string,
   relation: string,
   connections: int,
   portrait: RgbaSprite
@@ -3654,7 +3663,9 @@ proc directorCardSprite(
   ## banner: the speaker's name beside their full spoken line, then a
   ## ruled footer with their points, connections, and the relation to
   ## their listener. The face is a separate object over the reserved
-  ## left area, so it can hop when the line is new.
+  ## left area, so it can hop when the line is new. The line comes
+  ## from the delay-chat feed, which trails the sim: the card shows
+  ## the line being spoken, not whatever the gnome said last.
   let
     nameInk = rgba(94, 58, 22, 255)
     textInk = rgba(ChatBannerInkR, ChatBannerInkG, ChatBannerInkB, 255)
@@ -3663,7 +3674,7 @@ proc directorCardSprite(
     pad = DirectorCardInnerPad
     textX = pad + portrait.width + 4
     textWidth = DirectorCardWidth - textX - pad
-    lines = sim.wrapCardLines(player.message, textWidth)
+    lines = sim.wrapCardLines(spokenLine, textWidth)
     lineHeight = sim.textFont.height + 1
     bodyHeight = max(portrait.height, (lines.len + 1) * lineHeight + 2)
     relationHeight =
@@ -3711,25 +3722,31 @@ proc addDirectorConversationCards(
   cache: var seq[SpriteCacheEntry],
   cropX, cropY, cropW, cropH, paddedWidth, forestPad: int
 ) =
-  ## Draws one parchment card per active spoken line, stacked in the
-  ## margins beside the map crop: speakers left of the shot's center
-  ## on the left, the rest on the right, each column centered on the
-  ## conversation and top-to-bottom in the speakers' map order. Only
-  ## the framed circle's own gnomes get a card, so a zoomed
-  ## conversation shows its own voices and no other huddle's.
+  ## Draws the parchment card for the line now being spoken, in the
+  ## margin beside the map crop: left of the shot's center on the
+  ## left, otherwise on the right. The card lives exactly as long as
+  ## its line does - it appears when the line's voice starts (or when
+  ## the delay-chat cursor reaches it, for muted viewers) and leaves
+  ## when the line finishes, so voices and cards can never drift
+  ## apart. Only the framed circle's own gnomes get a card, so a
+  ## zoomed conversation shows its own voices and no other huddle's.
+  if not sim.directorCardLive:
+    return
+  if sim.chatFeedIndex < 0 or sim.chatFeedIndex >= sim.chatFeed.len:
+    return
   let
+    item = sim.chatFeed[sim.chatFeedIndex]
     viewHeight = cropH
     worldCenterX = cropX + cropW div 2
     reach = sim.directorFocusRadius + ConversationExitRadius div 2 +
       GnomeSpriteSize div 2
-  var left, right, speakers: seq[int]
+  # The framed circle's members: the card only shows for one of them,
+  # and the relation footer reads against the same group.
+  var
+    speakers: seq[int]
+    speaker = -1
   for i, player in sim.players:
     if player.mapIndex != MainMapIndex:
-      continue
-    if player.message.len == 0 or player.messageTicks <= 0:
-      continue
-    if player.x + GnomeSpriteSize <= cropX or player.x >= cropX + cropW or
-        player.y + GnomeSpriteSize <= cropY or player.y >= cropY + cropH:
       continue
     let
       dx = player.playerFootX() - sim.directorFocusX
@@ -3737,11 +3754,16 @@ proc addDirectorConversationCards(
     if dx * dx + dy * dy > reach * reach:
       continue
     speakers.add(i)
-    if player.x < worldCenterX:
-      left.add(i)
-    else:
-      right.add(i)
-  if speakers.len == 0:
+    if player.playerName == item.speaker.name:
+      speaker = i
+  if speaker < 0:
+    # The line on air belongs to another huddle; this cut stays quiet.
+    return
+  let speakingPlayer = sim.players[speaker]
+  if speakingPlayer.x + GnomeSpriteSize <= cropX or
+      speakingPlayer.x >= cropX + cropW or
+      speakingPlayer.y + GnomeSpriteSize <= cropY or
+      speakingPlayer.y >= cropY + cropH:
     return
   # The heart ledger: pair strengths keyed by house seat, folded from
   # the conversation records in a replay or the live encounter book.
@@ -3788,81 +3810,66 @@ proc addDirectorConversationCards(
         break
     const moods = ["neutral with ", "friend with ", "best friend with "]
     moods[heartLinkTier(links)] & sim.players[other].playerName
-  for (column, columnX, topInset) in [
-    # The score panel overlays the window's top left, so the left
-    # column starts below it. The columns hug the map crop, inside
-    # the forest-only viewport padding.
-    (left, forestPad + 4, viewHeight div 4),
-    (
-      right,
-      paddedWidth - forestPad - DirectorCardWidth - 4,
-      8
+  let
+    onLeft = speakingPlayer.x < worldCenterX
+    columnX =
+      if onLeft:
+        forestPad + 4
+      else:
+        paddedWidth - forestPad - DirectorCardWidth - 4
+    # The score panel overlays the window's top left, so a card on
+    # the left starts below it.
+    topInset =
+      if onLeft:
+        viewHeight div 4
+      else:
+        8
+    relation = relationLabel(speaker)
+    face = sim.cardPortraitSprite(speakingPlayer.gnomeIndex)
+    sprite = sim.directorCardSprite(
+      speakingPlayer, item.message, relation, connectionPoints(speaker), face
     )
-  ]:
-    if column.len == 0:
-      continue
-    var
-      sprites: seq[RgbaSprite]
-      faces: seq[RgbaSprite]
-      relations: seq[string]
-      totalHeight = -DirectorCardGapY
-    for i in column:
-      let
-        relation = relationLabel(i)
-        face = sim.cardPortraitSprite(sim.players[i].gnomeIndex)
-      relations.add(relation)
-      faces.add(face)
-      let sprite = sim.directorCardSprite(
-        sim.players[i], relation, connectionPoints(i), face
-      )
-      sprites.add(sprite)
-      totalHeight += sprite.height + DirectorCardGapY
     # The delay-chat banner overlays the window's bottom edge; keep
-    # the columns clear of it.
-    let bottomLimit = viewHeight - viewHeight div 6
-    var y = max(topInset, (viewHeight - totalHeight) div 2)
-    for slot, i in column:
-      let sprite = sprites[slot]
-      if y + sprite.height > bottomLimit and slot > 0:
-        break  # the column is full; later cards wait their turn
-      packet.addRgbaSpriteCached(
-        cache,
-        DirectorCardSpriteBase + i,
-        sprite,
-        "director card " & $i & " " & $sim.players[i].score & " " &
-          $connectionPoints(i) & " " & relations[slot] & " " &
-          sim.players[i].message
-      )
-      packet.addObject(
-        DirectorCardObjectBase + i,
-        columnX,
-        y,
-        DirectorCardZ,
-        MapLayerId,
-        DirectorCardSpriteBase + i
-      )
-      # The face rides over the card as its own object so it can hop
-      # when the line is new.
-      var hop = 0
-      if i < sim.directorBounce.len and sim.directorBounce[i] > 0:
-        hop =
-          DirectorBounceHops[DirectorBounceHops.len - sim.directorBounce[i]]
-      let gnomeIndex = sim.players[i].gnomeIndex
-      packet.addRgbaSpriteCached(
-        cache,
-        DirectorCardFaceSpriteBase + gnomeIndex,
-        faces[slot],
-        "director card face " & $gnomeIndex
-      )
-      packet.addObject(
-        DirectorCardFaceObjectBase + i,
-        columnX + DirectorCardInnerPad,
-        y + DirectorCardInnerPad - hop,
-        DirectorCardZ + 1,
-        MapLayerId,
-        DirectorCardFaceSpriteBase + gnomeIndex
-      )
-      y += sprite.height + DirectorCardGapY
+    # the card clear of it.
+    bottomLimit = viewHeight - viewHeight div 6
+  var y = max(topInset, (viewHeight - sprite.height) div 2)
+  if y + sprite.height > bottomLimit:
+    y = max(topInset, bottomLimit - sprite.height)
+  packet.addRgbaSpriteCached(
+    cache,
+    DirectorCardSpriteBase + speaker,
+    sprite,
+    "director card " & $speaker & " " & $speakingPlayer.score & " " &
+      $connectionPoints(speaker) & " " & relation & " " & item.message
+  )
+  packet.addObject(
+    DirectorCardObjectBase + speaker,
+    columnX,
+    y,
+    DirectorCardZ,
+    MapLayerId,
+    DirectorCardSpriteBase + speaker
+  )
+  # The face rides over the card as its own object so it can hop
+  # while the card is fresh on screen.
+  var hop = 0
+  let hopIndex = int((epochTime() - sim.chatFeedShownAt) * 24.0)
+  if hopIndex >= 0 and hopIndex < DirectorBounceHops.len:
+    hop = DirectorBounceHops[hopIndex]
+  packet.addRgbaSpriteCached(
+    cache,
+    DirectorCardFaceSpriteBase + speakingPlayer.gnomeIndex,
+    face,
+    "director card face " & $speakingPlayer.gnomeIndex
+  )
+  packet.addObject(
+    DirectorCardFaceObjectBase + speaker,
+    columnX + DirectorCardInnerPad,
+    y + DirectorCardInnerPad - hop,
+    DirectorCardZ + 1,
+    MapLayerId,
+    DirectorCardFaceSpriteBase + speakingPlayer.gnomeIndex
+  )
 
 proc addDirectorWorldView(
   packet: var seq[uint8],
@@ -6322,6 +6329,13 @@ when not defined(emscripten):
 
   const
     VoiceHoldMaxSeconds = 8.0
+    VoicePacedWindowSeconds = 30.0
+      ## How long after the last voice hold the show still counts as
+      ## voice-paced. While voice-paced, cards live exactly as long as
+      ## their spoken line; once the window lapses (the listening
+      ## viewer left, or sound never started) the show falls back to
+      ## the wall-clock delay-chat pacing, so muted viewers never
+      ## stall.
     ## The ElevenLabs cast, seat by seat, matched to the persona souls.
     ## An empty id falls back to the macOS voice for that seat. Override
     ## with HEARTLEAF_ELEVEN_VOICES, a comma list of voice ids.
@@ -7437,13 +7451,27 @@ when not defined(emscripten):
             sim.removePlayer(websocket)
           appState.closedSockets.setLen(0)
 
-      var voiceHolding = false
-      var restartShow = false
+      var
+        voiceHolding = false
+        voicePaced = false
+        voiceSpeaking = false
+        voiceLineDone = false
+        restartShow = false
       {.gcsafe.}:
         withLock appState.lock:
+          let voiceNow = epochTime()
           voiceHolding =
             appState.voiceHoldSerial > appState.voiceDoneSerial and
-            epochTime() - appState.voiceHoldSince < VoiceHoldMaxSeconds
+            voiceNow - appState.voiceHoldSince < VoiceHoldMaxSeconds
+          # Voice-paced means some viewer spoke a line recently; the
+          # cards then live exactly as long as their voices.
+          voicePaced = appState.voiceHoldSerial > 0 and
+            voiceNow - appState.voiceHoldSince < VoicePacedWindowSeconds
+          voiceSpeaking = voiceHolding and
+            appState.voiceHoldSerial == appState.nowPlayingSerial
+          voiceLineDone =
+            appState.voiceHoldSerial == appState.nowPlayingSerial and
+            appState.voiceDoneSerial >= appState.voiceHoldSerial
           restartShow = appState.replayRestartPending
           appState.replayRestartPending = false
       if restartShow and replayLoaded and replay.replayMaxTick() > 0:
@@ -7567,7 +7595,17 @@ when not defined(emscripten):
       # rendering: they move with the gnomes, which prod rings do not.
       sim.inferConversationCircles()
       if not voiceHolding:
-        sim.advanceChatFeed()
+        if voicePaced:
+          # The card left with its voice; bring up the next line as
+          # soon as the release lands. A line whose voice never
+          # started (the viewer left, or synthesis failed silently)
+          # falls forward on the hold timeout instead of stalling.
+          if voiceLineDone or
+              epochTime() - sim.chatFeedShownAt >= VoiceHoldMaxSeconds:
+            sim.advanceChatFeedNow()
+        else:
+          sim.advanceChatFeed()
+      sim.directorCardLive = not voicePaced or voiceSpeaking
       sim.publishNowPlaying()
       sim.updateDirectorCamera()
 
