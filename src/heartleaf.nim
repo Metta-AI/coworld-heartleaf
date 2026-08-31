@@ -5582,6 +5582,7 @@ proc seekReplay*(replay: var ReplayPlayer, sim: SimServer, tick: int) =
   ## Seeks replay playback to a target tick using seek keyframes.
   if replay.keyframes.len == 0:
     return
+  inc replay.seekSerial
   let keyframe = replay.keyframes[replay.replayKeyframeIndex(tick)]
   sim.restoreKeyframe(keyframe.simBytes)
   replay.restoreReplayKeyframeCursors(keyframe)
@@ -7426,7 +7427,9 @@ when not defined(emscripten):
     )
     httpServer.waitUntilReady()
     lastTick = getMonoTime()
-    var directorShowAccum = 0
+    var
+      directorShowAccum = 0
+      lastSeekSerial = replay.seekSerial
 
     while true:
       var
@@ -7588,6 +7591,18 @@ when not defined(emscripten):
             sim.restartConversationQueue()
             replay.seekReplay(sim, 0)
             replay.playing = true
+      # Any seek strands a viewer mid-line: the clip it is speaking
+      # belongs to a feed that no longer exists, and its voicedone
+      # would otherwise be the only thing releasing the hold. Release
+      # it here so a queue rewind, a next/prev jump, or a scrub never
+      # freezes the show for the full hold timeout; the stale clip
+      # plays out client-side and its late voicedone lands harmlessly.
+      if replay.seekSerial != lastSeekSerial:
+        lastSeekSerial = replay.seekSerial
+        {.gcsafe.}:
+          withLock appState.lock:
+            if appState.voiceHoldSerial > appState.voiceDoneSerial:
+              appState.voiceDoneSerial = appState.voiceHoldSerial
       # Rings always come from the production path - the conversation
       # timeline's frozen anchors, or the huddle fallback - so replays
       # look exactly like live play. Raw recorded circle rows (the old

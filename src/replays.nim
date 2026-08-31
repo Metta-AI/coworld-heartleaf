@@ -41,6 +41,12 @@ type
     hashValidationFailed*: bool
     hashMismatchTick*: int
     keyframes*: seq[ReplayKeyframe]
+    seekSerial*: int
+      ## Bumped on every keyframed seek. The replay server watches it
+      ## to release a viewer's voice hold when the line being spoken
+      ## was seeked away - a queue rewind, a next/prev jump, a scrub -
+      ## so the show never stalls out the hold timeout on a line that
+      ## no longer exists in the feed.
 
 const
   ReplayFps* = 24
