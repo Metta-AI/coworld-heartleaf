@@ -72,25 +72,31 @@ const
   ReplayMismatchLayerKind = 5
   MapLayerFlags = 1
   UiLayerFlags = 2
-  ReplayPanelHeight = 27
-  ReplayScrubberWidth = 300
+  ReplayPanelHeight = 42
+    ## Tall enough for the parchment card's leafy border around the
+    ## transport row and the scrubber.
+  ReplayScrubberWidth = 288
   ReplayScrubberHeight = 5
   ReplayControlsBgAlpha = 204'u8
   ReplayScrubberTrackY = 2
-  ReplayScrubberY = 15
-  ReplayTickTextY = 4
-  TransportButtonsX = 6
-  TransportRowY = 4
+  ReplayScrubberY = 26
+  ReplayTickTextY = 11
+  TransportButtonsX = 10
+  TransportRowY = 11
   TransportButtonWidth = 12
   TransportButtonStride = 14
   TransportButtonCount = 4
   TransportRowHeight = 7
-  TransportSpeedStride = 18
+  TransportSpeedStride = 17
   TransportSpeedWidth = 16
   TransportSpeedLabels = ["1/4", "1/2", "1X", "2X", "3X", "4X", "8X", "16X"]
   TransportSpeedCommands = ['q', 'h', '1', '2', '3', '4', '8', '6']
   SpeedRowX =
-    ViewportWidth - TransportSpeedStride * TransportSpeedLabels.len - 6
+    ViewportWidth - TransportSpeedStride * TransportSpeedLabels.len - 10
+  TransportButtonsEndX =
+    TransportButtonsX + TransportButtonCount * TransportButtonStride
+    ## The tick counter is centered between the transport buttons and
+    ## the speed labels, so "TICK 5074" never collides with "1/2".
   ReplayMismatchPadX = 4
   ReplayMismatchPadY = 3
   InventoryColumns = 8
@@ -100,21 +106,33 @@ const
   InventoryUiHeight = InventoryRows * InventoryIconStep
   ClockUiWidth = 120
   ClockUiHeight = 12
-  GlobalPanelWidth = 128
+  GlobalPanelWidth = 176
   GlobalPanelHeight = 128
   GlobalPanelPad = 2
   GlobalPanelRowHeight = 9
   GlobalPanelScoreX = 2
   GlobalPanelNameX = 22
-  GlobalPanelTextR = 245'u8
-  GlobalPanelTextG = 247'u8
-  GlobalPanelTextB = 240'u8
-  GlobalPanelScoreR = 185'u8
-  GlobalPanelScoreG = 195'u8
-  GlobalPanelScoreB = 205'u8
+  GlobalPanelCardPadX = 9
+    ## Content inset that clears the parchment card's leafy border.
+  GlobalPanelCardPadY = 8
+  GlobalPanelCardSpriteId = 8290
+  GlobalPanelCardObjectId = 20_090
+  GlobalPanelTextR = 0x5E'u8
+    ## Dark parchment ink: the score panel sits on a nine-sliced
+    ## chat-banner card, the same design system as the director cards.
+  GlobalPanelTextG = 0x3A'u8
+  GlobalPanelTextB = 0x16'u8
+  GlobalPanelScoreR = 158'u8
+  GlobalPanelScoreG = 116'u8
+  GlobalPanelScoreB = 66'u8
   GlobalPanelSelectedR = 255'u8
   GlobalPanelSelectedG = 226'u8
   GlobalPanelSelectedB = 92'u8
+  GlobalPanelSelectedInkR = 191'u8
+    ## Selected-name ink with enough contrast on parchment; the map
+    ## outline highlight keeps the original gold.
+  GlobalPanelSelectedInkG = 82'u8
+  GlobalPanelSelectedInkB = 30'u8
   DirectorMinCropHeight = 220
     ## The tightest zoom, as a crop height in world pixels; keeps a
     ## small circle from filling the whole screen with two gnomes.
@@ -954,6 +972,25 @@ proc loadChatBanner(path: string): RgbaSprite =
         full.rgbaSpriteAt(bounds.minX + x, bounds.minY + y)
       )
 
+proc nineSliceSprite(source: RgbaSprite, width, height, inset: int): RgbaSprite =
+  ## Scales a bordered panel sprite to a new size with its corners
+  ## kept crisp: corners copy, edges and the middle stretch.
+  proc mapCoord(dest, destSize, srcSize, inset: int): int =
+    if dest < inset:
+      dest
+    elif dest >= destSize - inset:
+      srcSize - (destSize - dest)
+    else:
+      inset + (dest - inset) * (srcSize - inset * 2) div
+        max(1, destSize - inset * 2)
+  result = newRgbaSprite(width, height)
+  for y in 0 ..< height:
+    for x in 0 ..< width:
+      result.putPixel(x, y, source.rgbaSpriteAt(
+        clamp(mapCoord(x, width, source.width, inset), 0, source.width - 1),
+        clamp(mapCoord(y, height, source.height, inset), 0, source.height - 1)
+      ))
+
 proc loadPortraits(dataRoot: string): seq[RgbaSprite] =
   ## Loads the gnome profile portraits used by the delay chat banner
   ## from a 3x3 grid sheet.
@@ -1394,27 +1431,70 @@ proc addGlobalScorePanel(
   cache: var seq[SpriteCacheEntry],
   selectedIndex: int
 ) =
-  ## Appends the global top-left score and selection panel.
+  ## Appends the global top-left score and selection panel, housed in
+  ## the same parchment nine-slice card as the conversation cards.
   if sim.players.len == 0:
     return
+  # Size the card to its rows before drawing anything.
+  var
+    rows = 0
+    maxRight = 0
   for i, player in sim.players:
+    let rowY = GlobalPanelPad + i * GlobalPanelRowHeight
+    if GlobalPanelCardPadY * 2 + rowY + GlobalPanelRowHeight >
+        GlobalPanelHeight:
+      break
+    rows = i + 1
+    maxRight = max(maxRight, GlobalPanelNameX +
+      sim.textFont.textWidth(player.attributedDisplayName()))
+    maxRight = max(maxRight, GlobalPanelScoreX +
+      sim.textFont.textWidth(player.score.globalPanelScoreText()))
+  if rows == 0:
+    return
+  let
+    cardWidth = min(GlobalPanelWidth, GlobalPanelCardPadX * 2 + maxRight + 1)
+    cardHeight = GlobalPanelCardPadY * 2 + GlobalPanelPad +
+      rows * GlobalPanelRowHeight
+  var card: RgbaSprite
+  if sim.chatBanner.width > 0:
+    card = sim.chatBanner.nineSliceSprite(
+      cardWidth, cardHeight, DirectorCardSliceInset
+    )
+  else:
+    card = newRgbaSprite(cardWidth, cardHeight)
+    card.fillRect(0, 0, cardWidth, cardHeight, rgba(233, 213, 170, 245))
+  packet.addRgbaSpriteCached(
+    cache,
+    GlobalPanelCardSpriteId,
+    card,
+    "global panel card " & $cardWidth & "x" & $cardHeight
+  )
+  packet.addObject(
+    GlobalPanelCardObjectId,
+    0,
+    0,
+    0,
+    GlobalPanelLayerId,
+    GlobalPanelCardSpriteId
+  )
+  for i, player in sim.players:
+    if i >= rows:
+      return
     let
-      rowY = GlobalPanelPad + i * GlobalPanelRowHeight
+      rowY = GlobalPanelCardPadY + GlobalPanelPad + i * GlobalPanelRowHeight
       scoreText = player.score.globalPanelScoreText()
       scoreSpriteId = GlobalPanelScoreSpriteBase + i
       nameSpriteId = GlobalPanelNameSpriteBase + i
       nameColor =
         if i == selectedIndex:
           rgba(
-            GlobalPanelSelectedR,
-            GlobalPanelSelectedG,
-            GlobalPanelSelectedB,
+            GlobalPanelSelectedInkR,
+            GlobalPanelSelectedInkG,
+            GlobalPanelSelectedInkB,
             255
           )
         else:
           rgba(GlobalPanelTextR, GlobalPanelTextG, GlobalPanelTextB, 255)
-    if rowY + GlobalPanelRowHeight > GlobalPanelHeight:
-      return
     packet.addRgbaSpriteCached(
       cache,
       scoreSpriteId,
@@ -1428,11 +1508,12 @@ proc addGlobalScorePanel(
       cache,
       nameSpriteId,
       sim.globalPanelTextSprite(player.attributedDisplayName(), nameColor),
-      "global name " & player.attributedDisplayName()
+      "global name " & $i & " " & player.attributedDisplayName() & " " &
+        (if i == selectedIndex: "selected" else: "plain")
     )
     packet.addObject(
       GlobalPanelScoreObjectBase + i,
-      GlobalPanelScoreX,
+      GlobalPanelCardPadX + GlobalPanelScoreX,
       rowY,
       1,
       GlobalPanelLayerId,
@@ -1440,7 +1521,7 @@ proc addGlobalScorePanel(
     )
     packet.addObject(
       GlobalPanelNameObjectBase + i,
-      GlobalPanelNameX,
+      GlobalPanelCardPadX + GlobalPanelNameX,
       rowY,
       2,
       GlobalPanelLayerId,
@@ -3403,25 +3484,6 @@ proc cardPortraitSprite(sim: SimServer, gnomeIndex: int): RgbaSprite =
     for x in 0 ..< result.width:
       result.putPixel(x, y, source.rgbaSpriteAt(x * step, y * step))
 
-proc nineSliceSprite(source: RgbaSprite, width, height, inset: int): RgbaSprite =
-  ## Scales a bordered panel sprite to a new size with its corners
-  ## kept crisp: corners copy, edges and the middle stretch.
-  proc mapCoord(dest, destSize, srcSize, inset: int): int =
-    if dest < inset:
-      dest
-    elif dest >= destSize - inset:
-      srcSize - (destSize - dest)
-    else:
-      inset + (dest - inset) * (srcSize - inset * 2) div
-        max(1, destSize - inset * 2)
-  result = newRgbaSprite(width, height)
-  for y in 0 ..< height:
-    for x in 0 ..< width:
-      result.putPixel(x, y, source.rgbaSpriteAt(
-        clamp(mapCoord(x, width, source.width, inset), 0, source.width - 1),
-        clamp(mapCoord(y, height, source.height, inset), 0, source.height - 1)
-      ))
-
 proc directorCardSprite(
   sim: SimServer,
   player: Player,
@@ -3791,10 +3853,10 @@ proc buildReplayScrubberSprite(tick, maxTick, dayTicks: int): RgbaSprite =
   ## Builds the compact replay scrubber sprite with dinner-time pips.
   result = newRgbaSprite(ReplayScrubberWidth, ReplayScrubberHeight)
   let
-    track = rgba(90, 90, 90, 255)
-    knob = rgba(255, 255, 255, 255)
-    knobEdge = rgba(180, 180, 180, 255)
-    pip = rgba(255, 196, 64, 255)
+    track = rgba(178, 138, 90, 255)
+    knob = rgba(94, 58, 22, 255)
+    knobEdge = rgba(140, 100, 60, 255)
+    pip = rgba(205, 118, 32, 255)
     knobX =
       if maxTick > 0:
         clamp(
@@ -3837,8 +3899,8 @@ proc buildReplayControlsSprite(
   ## Builds the one-row transport buttons and speed labels sprite.
   result = newRgbaSprite(ViewportWidth, TransportRowHeight)
   let
-    bright = rgba(255, 255, 255, 255)
-    dim = rgba(128, 128, 128, 255)
+    bright = rgba(94, 58, 22, 255)
+    dim = rgba(178, 138, 90, 255)
     buttons = [
       "<<",
       if playing: "||" else: "|>",
@@ -3948,15 +4010,23 @@ proc addReplayControls(
   looping: bool,
   mismatchTick = -1
 ) =
-  ## Adds the replay timing controls for one replay viewer frame.
+  ## Adds the replay timing controls for one replay viewer frame. The
+  ## controls live on the same parchment nine-slice card as the
+  ## conversation cards and the score panel.
   packet.addReplayControlLayers()
-  var panelBg = newRgbaSprite(ViewportWidth, ReplayPanelHeight)
-  panelBg.fillRect(0, 0, panelBg.width, panelBg.height, ReplayControlsBg)
+  var panelBg: RgbaSprite
+  if sim.chatBanner.width > 0:
+    panelBg = sim.chatBanner.nineSliceSprite(
+      ViewportWidth, ReplayPanelHeight, DirectorCardSliceInset
+    )
+  else:
+    panelBg = newRgbaSprite(ViewportWidth, ReplayPanelHeight)
+    panelBg.fillRect(0, 0, panelBg.width, panelBg.height, ReplayControlsBg)
   packet.addRgbaSpriteCached(
     cache,
     ReplayPanelBgSpriteId,
     panelBg,
-    "replay panel bg"
+    "replay panel card"
   )
   packet.addObject(
     ReplayPanelBgObjectId,
@@ -3987,7 +4057,10 @@ proc addReplayControls(
   )
   packet.addObject(
     ReplayTickObjectId,
-    max(0, (ViewportWidth - tickText.width) div 2),
+    # Centered in the clear run between the transport buttons and the
+    # speed labels, where the counter can never touch either.
+    TransportButtonsEndX + max(0,
+      (SpeedRowX - TransportButtonsEndX - tickText.width) div 2),
     ChatBannerAreaHeight + ReplayTickTextY,
     0,
     ReplayCenterBottomLayerId,
@@ -5319,11 +5392,13 @@ proc globalPanelClickedPlayer(data: string): int =
       if layer != GlobalPanelLayerId or item.button != 1'u8 or
           not item.down:
         continue
-      if x < GlobalPanelNameX or x >= GlobalPanelWidth:
+      if x < GlobalPanelCardPadX + GlobalPanelNameX or
+          x >= GlobalPanelWidth:
         continue
-      if y < GlobalPanelPad:
+      if y < GlobalPanelCardPadY + GlobalPanelPad:
         continue
-      let row = (y - GlobalPanelPad) div GlobalPanelRowHeight
+      let row = (y - GlobalPanelCardPadY - GlobalPanelPad) div
+        GlobalPanelRowHeight
       if row >= 0 and row < HouseCount:
         return row
     of SpriteClientChatMessage, SpriteClientInputMessage,
