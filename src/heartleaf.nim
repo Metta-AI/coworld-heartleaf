@@ -1,5 +1,5 @@
 import
-  std/[json, math, os, random, strutils, tables, times],
+  std/[algorithm, json, math, os, random, strutils, tables, times],
   flatty, jsony, pixie,
   bitworld/aseprite, bitworld/pixelfonts, bitworld/spriteprotocol,
   bitworld/resources, bitworld/sprites,
@@ -134,6 +134,10 @@ const
   DirectorWideSnapRatio = 0.92
     ## The camera counts as "back to wide" once its crop height passes
     ## this fraction of the map height.
+  DirectorFocusDwellFrames = 360
+    ## Frames the camera dwells inside one conversation while others
+    ## are running: about three spoken lines under show pacing, then
+    ## the cut goes wide and rotates to the next ring.
   HuddleHoldFrames = 96
     ## Viewer frames an inferred ring outlives the last spoken line,
     ## bridging the quiet beats between lines of one conversation.
@@ -450,6 +454,13 @@ type
       ## tracked by proximity so it survives members shuffling.
     directorWideTicks: int
       ## Frames spent back on the wide shot with a conversation waiting.
+    directorFocusTicks: int
+      ## Frames spent inside the current cut; a long dwell with other
+      ## conversations running rotates the camera to the next ring.
+    directorLastFocusX, directorLastFocusY: int
+    directorHasLastFocus: bool
+      ## Where the camera last dwelt, so the next pick tours the other
+      ## conversations instead of returning to the same ring.
     directorDinnerHouse: int
     directorDinnerTtl: int
       ## While positive, the director overlays this house's interior:
@@ -3086,8 +3097,18 @@ proc updateDirectorCamera*(sim: SimServer) =
         sim.directorFocusRadius = circle.radius
         found = true
         break
+    if found:
+      inc sim.directorFocusTicks
+      if sim.conversationCircles.len > 1 and
+          sim.directorFocusTicks >= DirectorFocusDwellFrames:
+        # This ring had its turn on screen; go wide, then the next.
+        found = false
     if not found:
       sim.directorFocusActive = false
+      sim.directorLastFocusX = sim.directorFocusX
+      sim.directorLastFocusY = sim.directorFocusY
+      sim.directorHasLastFocus = true
+      echo "Director cut out at tick ", sim.tickCount
   # Only pick the next conversation once the camera is back on the wide
   # shot and has dwelt there a beat, so every cut is out-then-in.
   if not sim.directorFocusActive:
@@ -3095,16 +3116,39 @@ proc updateDirectorCamera*(sim: SimServer) =
         sim.directorCamH >= mapH * DirectorWideSnapRatio:
       inc sim.directorWideTicks
       if sim.directorWideTicks >= DirectorWideHoldTicks:
-        var best = 0
-        for i, circle in sim.conversationCircles:
-          if circle.radius > sim.conversationCircles[best].radius:
-            best = i
+        # The rings tour in a stable order, so with several
+        # conversations running the cut after a dwell is the next ring
+        # along and every huddle gets its screen time.
+        var order: seq[int]
+        for i in 0 ..< sim.conversationCircles.len:
+          order.add(i)
+        order.sort(proc(a, b: int): int =
+          cmp(
+            (sim.conversationCircles[a].y, sim.conversationCircles[a].x),
+            (sim.conversationCircles[b].y, sim.conversationCircles[b].x)
+          ))
+        var best = order[0]
+        if sim.directorHasLastFocus:
+          for pos, i in order:
+            let circle = sim.conversationCircles[i]
+            if abs(circle.x - sim.directorLastFocusX) <= DirectorStickPx and
+                abs(circle.y - sim.directorLastFocusY) <= DirectorStickPx:
+              best = order[(pos + 1) mod order.len]
+              break
+        else:
+          for i in order:
+            if sim.conversationCircles[i].radius >
+                sim.conversationCircles[best].radius:
+              best = i
         let circle = sim.conversationCircles[best]
         sim.directorFocusActive = true
         sim.directorFocusX = circle.x
         sim.directorFocusY = circle.y
         sim.directorFocusRadius = circle.radius
         sim.directorWideTicks = 0
+        sim.directorFocusTicks = 0
+        echo "Director cut in at tick ", sim.tickCount,
+          ": circle at ", circle.x, ",", circle.y
     else:
       sim.directorWideTicks = 0
   var
