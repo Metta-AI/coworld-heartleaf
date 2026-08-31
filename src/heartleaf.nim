@@ -142,7 +142,14 @@ const
   DirectorPaddingPx = 56
     ## World pixels kept visible around the focused circle.
   DirectorTweenRate = 0.10
-    ## Fraction of the remaining distance the camera covers each frame.
+    ## Fraction of the remaining distance the camera covers each frame
+    ## while it follows a focused ring's small drift.
+  DirectorTweenFrames = 48
+    ## Frames one camera glide takes - out to the wide shot, or in to
+    ## the next ring. Two seconds at the 24fps loop, eased at both
+    ## ends, so a cut reads as a camera move instead of a snap. The
+    ## show holds its breath while a glide runs: no replay ticks land
+    ## and the delay-chat cursor stays put until the camera rests.
   DirectorStickPx = 80
     ## How far a circle's center may drift between frames and still be
     ## recognized as the conversation the director is focused on.
@@ -500,6 +507,14 @@ type
     directorFocusX, directorFocusY, directorFocusRadius: int
       ## The conversation circle the director camera is following,
       ## tracked by proximity so it survives members shuffling.
+    directorTweenLeft: int
+      ## Frames left in the current camera glide; zero when the camera
+      ## rests. While positive the show waits: no replay ticks, no new
+      ## cards, no delay-chat advance.
+    directorTweenFromX, directorTweenFromY: float
+    directorTweenFromW, directorTweenFromH: float
+      ## The crop the current glide started from, eased toward the
+      ## target over DirectorTweenFrames frames.
     directorWideTicks: int
       ## Frames spent back on the wide shot with a conversation waiting.
     directorFocusTicks: int
@@ -3314,6 +3329,16 @@ proc addGlobalWorldView(
   )
   packet.addClockObjects(sim)
 
+proc startDirectorTween(sim: SimServer) =
+  ## Begins a timed camera glide from the current crop. The target is
+  ## recomputed every frame, so a glide can chase a drifting ring and
+  ## still land exactly on it when the countdown runs out.
+  sim.directorTweenLeft = DirectorTweenFrames
+  sim.directorTweenFromX = sim.directorCamX
+  sim.directorTweenFromY = sim.directorCamY
+  sim.directorTweenFromW = sim.directorCamW
+  sim.directorTweenFromH = sim.directorCamH
+
 proc updateDirectorCamera*(sim: SimServer) =
   ## Advances the director cut's camera one frame. The cut is fully
   ## automated: the wide shot of the village while nothing happens, a
@@ -3390,11 +3415,14 @@ proc updateDirectorCamera*(sim: SimServer) =
       sim.directorLastFocusX = sim.directorFocusX
       sim.directorLastFocusY = sim.directorFocusY
       sim.directorHasLastFocus = true
+      sim.startDirectorTween()
       echo "Director cut out at tick ", sim.tickCount
-  # Only pick the next conversation once the camera is back on the wide
-  # shot and has dwelt there a beat, so every cut is out-then-in.
+  # Only pick the next conversation once the camera has finished its
+  # glide back to the wide shot and dwelt there a beat, so every cut
+  # is out-then-in and neither leg ever snaps.
   if not sim.directorFocusActive:
     if sim.conversationCircles.len > 0 and
+        sim.directorTweenLeft <= 0 and
         sim.directorCamH >= mapH * DirectorWideSnapRatio:
       inc sim.directorWideTicks
       if sim.directorWideTicks >= DirectorWideHoldTicks:
@@ -3429,6 +3457,7 @@ proc updateDirectorCamera*(sim: SimServer) =
         sim.directorFocusRadius = circle.radius
         sim.directorWideTicks = 0
         sim.directorFocusTicks = 0
+        sim.startDirectorTween()
         echo "Director cut in at tick ", sim.tickCount,
           ": circle at ", circle.x, ",", circle.y
     else:
@@ -3450,10 +3479,29 @@ proc updateDirectorCamera*(sim: SimServer) =
       targetH = targetW * mapH / mapW
     targetX = clamp(float(sim.directorFocusX) - targetW / 2, 0.0, mapW - targetW)
     targetY = clamp(float(sim.directorFocusY) - targetH / 2, 0.0, mapH - targetH)
-  sim.directorCamX += (targetX - sim.directorCamX) * DirectorTweenRate
-  sim.directorCamY += (targetY - sim.directorCamY) * DirectorTweenRate
-  sim.directorCamW += (targetW - sim.directorCamW) * DirectorTweenRate
-  sim.directorCamH += (targetH - sim.directorCamH) * DirectorTweenRate
+  if sim.directorTweenLeft > 0:
+    # A cut glides: the crop eases from where the glide started to the
+    # target over a fixed run of frames, slow-fast-slow, and lands on
+    # the target exactly when the countdown ends.
+    dec sim.directorTweenLeft
+    let
+      t = 1.0 -
+        float(sim.directorTweenLeft) / float(DirectorTweenFrames)
+      eased = t * t * (3.0 - 2.0 * t)
+    sim.directorCamX =
+      sim.directorTweenFromX + (targetX - sim.directorTweenFromX) * eased
+    sim.directorCamY =
+      sim.directorTweenFromY + (targetY - sim.directorTweenFromY) * eased
+    sim.directorCamW =
+      sim.directorTweenFromW + (targetW - sim.directorTweenFromW) * eased
+    sim.directorCamH =
+      sim.directorTweenFromH + (targetH - sim.directorTweenFromH) * eased
+  else:
+    # At rest the camera only follows the focused ring's small drift.
+    sim.directorCamX += (targetX - sim.directorCamX) * DirectorTweenRate
+    sim.directorCamY += (targetY - sim.directorCamY) * DirectorTweenRate
+    sim.directorCamW += (targetW - sim.directorCamW) * DirectorTweenRate
+    sim.directorCamH += (targetH - sim.directorCamH) * DirectorTweenRate
 
 proc wrapCardLines(sim: SimServer, text: string, maxWidth: int): seq[string] =
   ## Word-wraps one spoken line to a pixel width in the Tiny5 font.
@@ -3775,6 +3823,7 @@ proc addDirectorWorldView(
   # A talking dinner party pulls up its house interior, but only from
   # the wide shot: an outdoor conversation keeps the camera.
   if sim.directorDinnerTtl > 0 and not sim.directorFocusActive and
+      sim.directorTweenLeft <= 0 and
       sim.directorCamH >= float(sim.mainMap.height) * DirectorWideSnapRatio:
     packet.addHouseInsetView(
       sim,
@@ -3782,9 +3831,10 @@ proc addDirectorWorldView(
       sim.directorDinnerHouse,
       offsetX = DirectorCardMarginPx + forestPad
     )
-  # Cards belong to the cut: they appear only once the camera is
-  # actually in on a conversation, and frame that circle's speakers.
-  if sim.directorFocusActive and
+  # Cards belong to the cut: they appear only once the camera has
+  # finished its glide in on a conversation, and frame that circle's
+  # speakers.
+  if sim.directorFocusActive and sim.directorTweenLeft <= 0 and
       sim.directorCamH < float(sim.mainMap.height) * DirectorWideSnapRatio:
     packet.addDirectorConversationCards(
       sim,
@@ -5040,6 +5090,11 @@ proc advanceChatFeed*(sim: SimServer, now = epochTime()) =
   ## Advances the delay-chat cursor by wall clock, not sim ticks or
   ## render frames. Each queued line stays up ChatFeedShowSeconds so it
   ## can be read while the sim zips or the viewer runs at 60fps.
+  if sim.directorTweenLeft > 0:
+    # The camera is mid-glide: the line on screen keeps its full read
+    # time once the shot settles, and nothing new starts meanwhile.
+    sim.chatFeedShownAt = now
+    return
   if sim.chatFeedIndex < 0:
     if sim.chatFeed.len > 0:
       sim.chatFeedIndex = 0
@@ -5807,6 +5862,21 @@ when not defined(emscripten):
         appState.pendingReplayUri = uri
     return true
 
+  const DirectorFitSnippet = """
+<script>(function(){
+  // The director cut frames every shot itself, so the page must stay
+  // auto-fitted. The stock viewer drops auto-fit on the first click or
+  // scroll (meant for hand-panning the plain global view), which
+  // freezes zoom and pan at that moment's crop - the next wide shot
+  // then renders far off center, stranded in a corner. Re-arm the fit
+  // after every gesture; the server ignores director clicks anyway.
+  function rearm(){if(!autoFit){autoFit=true;fit();}}
+  addEventListener("pointerup",rearm);
+  addEventListener("wheel",rearm);
+  setInterval(rearm,1000);
+})();</script>
+"""
+
   proc httpHandler(request: Request) =
     ## Handles Heartleaf HTTP and websocket routes.
     if request.serveHealthz():
@@ -5824,11 +5894,25 @@ when not defined(emscripten):
       if request.path != GlobalWebSocketPath and
           not request.checkReplayRequest():
         return
-      discard bitworldClient.serveClientFile(
-        request,
-        bitworldClient.GlobalClientRoute,
-        bitworldClient.GlobalClientRoute
-      )
+      if request.path != GlobalWebSocketPath:
+        # Director pages (the root and the /director alias) keep the
+        # stock viewer auto-fitted: the fit snippet re-arms the fit
+        # after every gesture so the wide shot stays centered.
+        var page = bitworldClient.clientStaticBody(
+          bitworldClient.GlobalClientRoute,
+          bitworldClient.GlobalClientRoute
+        )
+        page = page.replace("</body>", DirectorFitSnippet & "</body>")
+        var headers: HttpHeaders
+        headers["Content-Type"] = "text/html"
+        headers["Cache-Control"] = "no-cache"
+        request.respond(200, headers, page)
+      else:
+        discard bitworldClient.serveClientFile(
+          request,
+          bitworldClient.GlobalClientRoute,
+          bitworldClient.GlobalClientRoute
+        )
     elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
       if not request.checkReplayRequest():
@@ -6784,6 +6868,12 @@ when not defined(emscripten):
           else:
             directorShowAccum = 0
             ticksThisFrame = replay.replayTicksThisFrame()
+          # A camera glide is a held breath: at show speed the replay
+          # pauses until the shot settles, so cuts never swallow lines.
+          if directorWatching and sim.directorTweenLeft > 0 and
+              replay.replaySpeedIndex() == DefaultSpeedIndex:
+            ticksThisFrame = 0
+
           for _ in 0 ..< ticksThisFrame:
             if replay.playing:
               replay.stepReplay(sim)
