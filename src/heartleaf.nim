@@ -168,12 +168,22 @@ const
     ## Content padding inside a card's leafy frame.
   DirectorCardFaceSpriteBase = 9150
   DirectorCardFaceObjectBase = 28_100
-  ForestMarginPx = 192
+  DirectorForestAspectNum = 16
+  DirectorForestAspectDen = 9
+    ## Target width:height of the director viewport (16:9). Shots
+    ## narrower than this gain forest-only padding on each side, so
+    ## common browser shapes see forest where they used to letterbox
+    ## in black; the conversation cards stay next to the map. Zoomed
+    ## shots are already wide and gain nothing.
+  ForestMarginPx = 480
     ## World pixels of generated forest border around the main map. The
-    ## director viewport pads the camera crop by DirectorCardMarginPx on
-    ## each side, so the border must reach at least that far past the
-    ## map edge; it extends further so every camera position stays
-    ## covered with slack.
+    ## director viewport pads the camera crop by DirectorCardMarginPx
+    ## plus the forest-only padding on each side, so the border must
+    ## reach at least that far past the map edge; it extends further so
+    ## every camera position stays covered with slack.
+  DirectorForestPadMax = ForestMarginPx - DirectorCardMarginPx - 22
+    ## The forest-only padding cannot exceed what the generated border
+    ## sprite can fill at the widest shot, slack included.
   ForestBandPx = 44
     ## Depth of the map-edge band the forest border is built from. Only
     ## the outermost band is sampled, so houses and lawns deeper in the
@@ -801,12 +811,18 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
       var
         sx = wx
         sy = wy
+      let
+        # The wave wanders more the deeper the forest goes, so the far
+        # field jumbles its reflections instead of repeating in rows.
+        # Its wavelength is long, so the wander reads as drifting
+        # canopy rather than zigzag hedges.
+        waveAmp = min(2.2, 1.0 + float(outDist) / 220.0)
       if dx > 0:
         # The wave is keyed on the along-edge coordinate so reflection
         # boundaries wander instead of forming straight ripples.
         let
-          wave = int(8.0 * sin(float(wy) * 0.043) +
-            5.0 * sin(float(wy) * 0.011 + 1.7))
+          wave = int(9.0 * sin(float(wy) * 0.017) * waveAmp +
+            4.0 * sin(float(wy) * 0.045 + 1.7))
           depth = foldIntoBand(max(0, dx - 1 + wave), band)
         sx =
           if wx < 0:
@@ -816,8 +832,8 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
         sy = wy + jy
       if dy > 0:
         let
-          wave = int(8.0 * sin(float(wx) * 0.037 + 0.9) +
-            5.0 * sin(float(wx) * 0.013))
+          wave = int(9.0 * sin(float(wx) * 0.014 + 0.9) * waveAmp +
+            4.0 * sin(float(wx) * 0.039) )
           depth = foldIntoBand(max(0, dy - 1 + wave), band)
         sy =
           if wy < 0:
@@ -839,7 +855,7 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
           255
         )
       let shade =
-        1.0 - 0.45 * min(1.0, float(outDist) / float(margin))
+        1.0 - 0.55 * pow(min(1.0, float(outDist) / float(margin)), 0.75)
       result.putPixel(x, y, rgba(
         uint8(float(color.r) * shade),
         uint8(float(color.g) * shade),
@@ -1040,6 +1056,7 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
     ViewportHeight,
     true
   )
+  echo "init packet bytes: ", result.playerInitPacket.len
 
 proc addRgbaSprite(
   packet: var seq[uint8],
@@ -3471,7 +3488,7 @@ proc addDirectorConversationCards(
   packet: var seq[uint8],
   sim: SimServer,
   cache: var seq[SpriteCacheEntry],
-  cropX, cropY, cropW, cropH, paddedWidth: int
+  cropX, cropY, cropW, cropH, paddedWidth, forestPad: int
 ) =
   ## Draws one parchment card per active spoken line, stacked in the
   ## margins beside the map crop: speakers left of the shot's center
@@ -3552,9 +3569,14 @@ proc addDirectorConversationCards(
     moods[heartLinkTier(links)] & sim.players[other].playerName
   for (column, columnX, topInset) in [
     # The score panel overlays the window's top left, so the left
-    # column starts below it.
-    (left, 4, viewHeight div 4),
-    (right, paddedWidth - DirectorCardWidth - 4, 8)
+    # column starts below it. The columns hug the map crop, inside
+    # the forest-only viewport padding.
+    (left, forestPad + 4, viewHeight div 4),
+    (
+      right,
+      paddedWidth - forestPad - DirectorCardWidth - 4,
+      8
+    )
   ]:
     if column.len == 0:
       continue
@@ -3635,8 +3657,16 @@ proc addDirectorWorldView(
     cameraY = int(sim.directorCamY)
     viewW = max(1, int(sim.directorCamW))
     viewH = max(1, int(sim.directorCamH))
-    cameraX = int(sim.directorCamX) - DirectorCardMarginPx
-    paddedW = viewW + DirectorCardMarginPx * 2
+    # Forest-only padding widens tall shots toward the target frame
+    # shape; the cards keep hugging the map crop.
+    forestPad = clamp(
+      (viewH * DirectorForestAspectNum div DirectorForestAspectDen -
+        viewW - DirectorCardMarginPx * 2) div 2,
+      0,
+      DirectorForestPadMax
+    )
+    cameraX = int(sim.directorCamX) - DirectorCardMarginPx - forestPad
+    paddedW = viewW + (DirectorCardMarginPx + forestPad) * 2
   packet.addViewport(MapLayerId, paddedW, viewH)
   if sim.mainMap.forestSprite.width > 0:
     # The generated forest border sits behind the map, filling the
@@ -3685,7 +3715,10 @@ proc addDirectorWorldView(
   if sim.directorDinnerTtl > 0 and not sim.directorFocusActive and
       sim.directorCamH >= float(sim.mainMap.height) * DirectorWideSnapRatio:
     packet.addHouseInsetView(
-      sim, cache, sim.directorDinnerHouse, offsetX = DirectorCardMarginPx
+      sim,
+      cache,
+      sim.directorDinnerHouse,
+      offsetX = DirectorCardMarginPx + forestPad
     )
   # Cards belong to the cut: they appear only once the camera is
   # actually in on a conversation, and frame that circle's speakers.
@@ -3698,7 +3731,8 @@ proc addDirectorWorldView(
       cameraY,
       viewW,
       viewH,
-      paddedW
+      paddedW,
+      forestPad
     )
   packet.addClockObjects(sim)
 
