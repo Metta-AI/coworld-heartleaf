@@ -3293,11 +3293,13 @@ proc addDirectorConversationCards(
   ## margins beside the map crop: speakers left of the shot's center
   ## on the left, the rest on the right, each column centered on the
   ## conversation and top-to-bottom in the speakers' map order. Only
-  ## gnomes inside the shot get a card, so a zoomed conversation
-  ## shows its own voices and nobody off screen.
+  ## the framed circle's own gnomes get a card, so a zoomed
+  ## conversation shows its own voices and no other huddle's.
   let
     viewHeight = cropH
     worldCenterX = cropX + cropW div 2
+    reach = sim.directorFocusRadius + ConversationExitRadius div 2 +
+      GnomeSpriteSize div 2
   var left, right, speakers: seq[int]
   for i, player in sim.players:
     if player.mapIndex != MainMapIndex:
@@ -3306,6 +3308,11 @@ proc addDirectorConversationCards(
       continue
     if player.x + GnomeSpriteSize <= cropX or player.x >= cropX + cropW or
         player.y + GnomeSpriteSize <= cropY or player.y >= cropY + cropH:
+      continue
+    let
+      dx = player.playerFootX() - sim.directorFocusX
+      dy = player.playerFootY() - sim.directorFocusY
+    if dx * dx + dy * dy > reach * reach:
       continue
     speakers.add(i)
     if player.x < worldCenterX:
@@ -3483,15 +3490,19 @@ proc addDirectorWorldView(
     packet.addHouseInsetView(
       sim, cache, sim.directorDinnerHouse, offsetX = DirectorCardMarginPx
     )
-  packet.addDirectorConversationCards(
-    sim,
-    cache,
-    int(sim.directorCamX),
-    cameraY,
-    viewW,
-    viewH,
-    paddedW
-  )
+  # Cards belong to the cut: they appear only once the camera is
+  # actually in on a conversation, and frame that circle's speakers.
+  if sim.directorFocusActive and
+      sim.directorCamH < float(sim.mainMap.height) * DirectorWideSnapRatio:
+    packet.addDirectorConversationCards(
+      sim,
+      cache,
+      int(sim.directorCamX),
+      cameraY,
+      viewW,
+      viewH,
+      paddedW
+    )
   packet.addClockObjects(sim)
 
 proc replayCommandAt(layer, x, y: int): char =
