@@ -261,6 +261,10 @@ proc encounterGroupsAt*(
   for event in timeline.events:
     if event.tick > tick:
       continue
+    if event.spokenTurn:
+      # A convo-tick row is a spoken turn, not an exit: the speaker
+      # stays in the group.
+      continue
     if event.enter:
       if event.members.len > 0:
         groups[event.encounterId] = event.members
