@@ -74,6 +74,7 @@ proc loadReplayBytes(viewer: ReplayViewer, name, bytes: string) =
       data = parseReplayBytes(bytes)
       config = data.replaySimConfig()
     viewer.sim = initSimServer(config.seed, config.dayTicks)
+    viewer.sim.attachConversationTimeline(data, name)
     viewer.replay = initReplayPlayer(data)
     viewer.replay.buildReplayKeyframes(config.seed, config.dayTicks)
     viewer.state = newReplayViewerState()
@@ -92,7 +93,6 @@ proc loadReplayPath(viewer: ReplayViewer, path: string) =
     return
   try:
     viewer.loadReplayBytes(path, readFile(path))
-    viewer.sim.attachConversationLog(path)
   except CatchableError as e:
     viewer.app.setStatus("Could not read replay: " & e.msg)
 

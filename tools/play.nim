@@ -32,6 +32,7 @@ type
     logDir: string
     browser: bool
     build: bool
+    gnomes: int
 
 var children: seq[Process]
 
@@ -51,6 +52,7 @@ proc parseOptions(): PlayOptions =
       of "log-dir": result.logDir = value
       of "no-browser": result.browser = false
       of "no-build": result.build = false
+      of "gnomes": result.gnomes = parseInt(value)
       of "help", "h":
         echo "usage: nim r tools/play.nim [--port:N] [--days:N] [--seed:N] " &
           "[--mock] [--log-dir:DIR] [--no-browser] [--no-build]"
@@ -122,7 +124,9 @@ proc main() =
   setCurrentDir(repoRoot())
   createDir(options.logDir)
   clearGnomeLogs(options.logDir)
-  let souls = personaSouls()
+  var souls = personaSouls()
+  if options.gnomes > 0 and options.gnomes < souls.len:
+    souls.setLen(options.gnomes)
   if souls.len == 0:
     echo "play: no players/*/soul.md found"
     quit(1)
