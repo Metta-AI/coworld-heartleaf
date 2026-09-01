@@ -13,29 +13,25 @@ Personality:
 You are warm and friendly. You make everyone feel welcome...
 ```
 
-- Line 1 is `#!` followed by the Bedrock model id that plays the gnome
-  (letters, digits, `. - _ : /`, at most 128 characters). The hosted
-  platform provides Bedrock access; the model must be one it can reach.
-  Known-good ids (us-east-1 cross-region profiles):
+- Line 1 is `#!` followed by the model id that plays the gnome (letters,
+  digits, `. - _ : /`, at most 128 characters). The hosted platform
+  provides the model access; the id must be one from the supported list,
+  every entry of which was verified end-to-end on the hosted platform
+  (2026-09-01, heartleaf 0.2.3):
   `us.anthropic.claude-haiku-4-5-20251001-v1:0`,
   `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
   `us.anthropic.claude-sonnet-4-6`, `us.anthropic.claude-sonnet-5`,
   `us.anthropic.claude-opus-4-5-20251101-v1:0`,
   `us.anthropic.claude-opus-4-6-v1`, `us.anthropic.claude-opus-4-7`,
   `us.anthropic.claude-opus-4-8`, `us.anthropic.claude-opus-5`,
-  `us.anthropic.claude-fable-5`. The game shapes each request for the
-  model family (no sampling parameters on 4.7+, thinking switched off on
-  Opus 5 / Sonnet 5, low effort and a larger output cap on Fable 5).
-  Any other Bedrock model goes through the Converse API, for example
-  `us.xai.grok-4.6`, `us.openai.gpt-5.6-luna`, `openai.gpt-oss-120b-1:0`,
-  `us.meta.llama4-maverick-17b-instruct-v1:0`, `deepseek.v3.2`,
-  `qwen.qwen3-next-80b-a3b`, `mistral.mistral-large-3-675b-instruct`,
-  `moonshotai.kimi-k2.5`, `moonshot.kimi-k2-thinking`, `qwen.qwen3-32b-v1:0`,
-  `us.deepseek.r1-v1:0`, `minimax.minimax-m2.5`, `zai.glm-5`,
-  `zai.glm-4.7-flash`, `us.amazon.nova-pro-v1:0` (reasoning models get no
-  sampling parameters, a larger output cap, and a longer timeout).
-  Prompt caching only applies to Claude. See [models.md](models.md) for
-  cost, latency, and play notes on every model.
+  `us.amazon.nova-pro-v1:0`. Any id not on this list fails the seat on
+  its first decision call, the failure is charged to the entrant, and
+  repeated failures disqualify the soul. The game shapes each request
+  for the model family (no sampling parameters on 4.7+, thinking
+  switched off on Opus 5 / Sonnet 5); Nova Pro goes through the
+  Converse API. Prompt caching only applies to Claude. See
+  [models.md](models.md) for cost, latency, and play notes on every
+  supported model.
 - Everything after line 1 is the system prompt: personality, manners,
   strategy, example phrases. `{name}` is replaced with the gnome's fixed
   name (Ivan, Anton, Yura, Sasha, Maxim, Nikita, Vova, Dima, Egor, by
