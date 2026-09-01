@@ -5,6 +5,7 @@ import
   bitworld/resources, bitworld/sprites,
   heartleaf/common, heartleaf/protocol, heartleaf/souls,
   heartleaf/observation, heartleaf/navigation, heartleaf/encounters,
+  heartleaf/connection,
   replays
 
 when not defined(emscripten):
@@ -507,6 +508,17 @@ type
     heartLinks*: seq[tuple[a, b, links: int]]
       ## Connection strengths from the heart ledger (live) or the
       ## conversation records (replay). Viewer-only, never hashed.
+    connectionRecording*: bool
+      ## True in live games: dinner record rows are produced for the
+      ## replay and the live Connection fold. Replay playback leaves
+      ## it off - there the records come from the replay file itself.
+    connectionRows*: seq[string]
+      ## Dinner record rows waiting for the replay writer. Same JSON
+      ## shape as the conversation rows; same debug-sprite channel.
+    connectionEvents*: seq[ConversationEvent]
+      ## The live game's own record stream (conversation rows plus
+      ## dinner rows), so the live Connection scores come from the
+      ## same pure fold a replay of this game will run.
     heartEmoteBases: array[3, RgbaSprite]
       ## The emote sprites: neutral, smile, star-eyes, by tier.
     heartEmoteFaded: Table[int, RgbaSprite]
@@ -1426,14 +1438,61 @@ proc attributedDisplayName(player: Player): string =
     return player.playerName
   return player.username & " (" & player.playerName & ")"
 
+proc connectionPairsNow*(sim: SimServer): seq[ConnectionPair] =
+  ## The per-pair Connection fold at this moment. A replay folds the
+  ## records inside the one file at the playhead tick, so scrubbing
+  ## anywhere rebuilds the same c; a live game folds its own record
+  ## stream so far - the same rows the replay will carry.
+  if sim.conversationTimeline.events.len > 0:
+    sim.conversationTimeline.connectionsAt(sim.tickCount)
+  else:
+    foldConnections(sim.connectionEvents)
+
+proc playerConnectionScore(
+  sim: SimServer,
+  pairs: seq[ConnectionPair],
+  playerIndex: int
+): float =
+  ## One player's Connection score - the win metric - from the fold.
+  let seat = sim.players[playerIndex].homeFlag - HomeMapIndexBase
+  if seat < 0 or seat >= HouseCount:
+    return 0.0
+  pairs.connectionScore(seat)
+
+proc connectionRankOrder(
+  sim: SimServer,
+  pairs: seq[ConnectionPair]
+): seq[int] =
+  ## Player indices ranked by Connection score, best first; equal
+  ## scores keep the seat order stable.
+  for i in 0 ..< sim.players.len:
+    result.add(i)
+  result.sort(proc(x, y: int): int =
+    let
+      a = sim.playerConnectionScore(pairs, x)
+      b = sim.playerConnectionScore(pairs, y)
+    if a > b: -1
+    elif a < b: 1
+    else: cmp(x, y))
+
+proc connectionScoreText(score: float): string =
+  ## One Connection score as its 0-1 display value.
+  formatFloat(score, ffDecimal, 2)
+
 proc scoreOverlaySprite(sim: SimServer): RgbaSprite =
-  ## Builds the full-screen cumulative score overlay.
+  ## Builds the full-screen end-of-day overlay: gnomes ranked by their
+  ## Connection score - the win metric - with the dinner points kept
+  ## visible underneath.
   result = overlaySprite()
   sim.blitChatText(result, "End of day scores", 8, 8)
-  for i, player in sim.players:
+  let
+    pairs = sim.connectionPairsNow()
+    order = sim.connectionRankOrder(pairs)
+  for slot, i in order:
     let
-      col = i mod OverlayScoreColumns
-      row = i div OverlayScoreColumns
+      player = sim.players[i]
+      col = slot mod OverlayScoreColumns
+      row = slot div OverlayScoreColumns
       x = 8 + col * OverlayScoreCellWidth
       y = 28 + row * OverlayScoreCellHeight
     if y + GnomeSpriteSize > ViewportHeight:
@@ -1449,7 +1508,14 @@ proc scoreOverlaySprite(sim: SimServer): RgbaSprite =
       x,
       y + GnomeSpriteSize + 2
     )
-    sim.blitChatText(result, "Score: " & $player.score, x + 36, y + 12)
+    sim.blitChatText(
+      result,
+      "Conn: " &
+        sim.playerConnectionScore(pairs, i).connectionScoreText(),
+      x + 36,
+      y + 2
+    )
+    sim.blitChatText(result, "Score: " & $player.score, x + 36, y + 14)
 
 proc globalPanelTextSprite(
   sim: SimServer,
@@ -1462,10 +1528,6 @@ proc globalPanelTextSprite(
     sim.textFont.height
   )
   sim.blitTinyText(result, text, 0, 0, color)
-
-proc globalPanelScoreText(score: int): string =
-  ## Returns one global panel score label.
-  $max(0, score)
 
 proc selectedGlobalPlayerIndex(state: PlayerViewerState, sim: SimServer): int =
   ## Returns the selected global player index clamped to connected players.
@@ -1484,23 +1546,31 @@ proc addGlobalScorePanel(
   selectedIndex: int
 ) =
   ## Appends the global top-left score and selection panel, housed in
-  ## the same parchment nine-slice card as the conversation cards.
+  ## the same parchment nine-slice card as the conversation cards. The
+  ## rows rank the gnomes by Connection score - the win metric - and
+  ## show that 0-1 value.
   if sim.players.len == 0:
     return
+  let
+    pairs = sim.connectionPairsNow()
+    order = sim.connectionRankOrder(pairs)
   # Size the card to its rows before drawing anything.
   var
     rows = 0
     maxRight = 0
-  for i, player in sim.players:
-    let rowY = GlobalPanelPad + i * GlobalPanelRowHeight
+  for slot, i in order:
+    let
+      player = sim.players[i]
+      rowY = GlobalPanelPad + slot * GlobalPanelRowHeight
     if GlobalPanelCardPadY * 2 + rowY + GlobalPanelRowHeight >
         GlobalPanelHeight:
       break
-    rows = i + 1
+    rows = slot + 1
     maxRight = max(maxRight, GlobalPanelNameX +
       sim.textFont.textWidth(player.attributedDisplayName()))
     maxRight = max(maxRight, GlobalPanelScoreX +
-      sim.textFont.textWidth(player.score.globalPanelScoreText()))
+      sim.textFont.textWidth(
+        sim.playerConnectionScore(pairs, i).connectionScoreText()))
   if rows == 0:
     return
   let
@@ -1529,14 +1599,16 @@ proc addGlobalScorePanel(
     GlobalPanelLayerId,
     GlobalPanelCardSpriteId
   )
-  for i, player in sim.players:
-    if i >= rows:
+  for slot, i in order:
+    if slot >= rows:
       return
     let
-      rowY = GlobalPanelCardPadY + GlobalPanelPad + i * GlobalPanelRowHeight
-      scoreText = player.score.globalPanelScoreText()
-      scoreSpriteId = GlobalPanelScoreSpriteBase + i
-      nameSpriteId = GlobalPanelNameSpriteBase + i
+      player = sim.players[i]
+      rowY = GlobalPanelCardPadY + GlobalPanelPad + slot * GlobalPanelRowHeight
+      scoreText =
+        sim.playerConnectionScore(pairs, i).connectionScoreText()
+      scoreSpriteId = GlobalPanelScoreSpriteBase + slot
+      nameSpriteId = GlobalPanelNameSpriteBase + slot
       nameColor =
         if i == selectedIndex:
           rgba(
@@ -1554,17 +1626,17 @@ proc addGlobalScorePanel(
         scoreText,
         rgba(GlobalPanelScoreR, GlobalPanelScoreG, GlobalPanelScoreB, 255)
       ),
-      "global value " & $i & " " & scoreText
+      "global value " & $slot & " " & scoreText
     )
     packet.addRgbaSpriteCached(
       cache,
       nameSpriteId,
       sim.globalPanelTextSprite(player.attributedDisplayName(), nameColor),
-      "global name " & $i & " " & player.attributedDisplayName() & " " &
+      "global name " & $slot & " " & player.attributedDisplayName() & " " &
         (if i == selectedIndex: "selected" else: "plain")
     )
     packet.addObject(
-      GlobalPanelScoreObjectBase + i,
+      GlobalPanelScoreObjectBase + slot,
       GlobalPanelCardPadX + GlobalPanelScoreX,
       rowY,
       1,
@@ -1572,7 +1644,7 @@ proc addGlobalScorePanel(
       scoreSpriteId
     )
     packet.addObject(
-      GlobalPanelNameObjectBase + i,
+      GlobalPanelNameObjectBase + slot,
       GlobalPanelCardPadX + GlobalPanelNameX,
       rowY,
       2,
@@ -1773,13 +1845,17 @@ proc portraitSpriteId(gnomeIndex: int, flipped: bool): int =
     PortraitSpriteBase + slot
 
 proc dailyResultsJson*(sim: SimServer): string =
-  ## Returns one daily player score result as JSON.
+  ## Returns one daily player result as JSON. connectionScores is the
+  ## win metric - the gnome with the highest Connection score wins the
+  ## day - and scores keeps the dinner points visible beside it.
   var
     names = newJArray()
     usernames = newJArray()
     playerNames = newJArray()
     scores = newJArray()
+    connectionScores = newJArray()
     results = newJObject()
+  let pairs = sim.connectionPairsNow()
   for houseIndex in 0 ..< sim.seatCount:
     let fixedPlayerName = houseIndex.playerNameForHouse()
     var player: Player = nil
@@ -1797,11 +1873,13 @@ proc dailyResultsJson*(sim: SimServer): string =
       usernames.add(%"")
       playerNames.add(%fixedPlayerName)
       scores.add(%0)
+    connectionScores.add(%pairs.connectionScore(houseIndex))
   results["day"] = %sim.dayNumber
   results["names"] = names
   results["usernames"] = usernames
   results["playerNames"] = playerNames
   results["scores"] = scores
+  results["connectionScores"] = connectionScores
   return $results
 
 proc totalItems(foods: FoodCounts): int =
@@ -4984,6 +5062,31 @@ proc startDinnerParties(sim: SimServer) =
         )
       )
 
+    if sim.connectionRecording:
+      # One dinner record row per table, the way #33 writes the
+      # conversation rows: the same stamped JSON shape, queued for the
+      # replay's debug-sprite channel and folded into the live
+      # Connection events, so live play and a later replay of it run
+      # the identical pure fold.
+      var guestSeats: seq[string]
+      for visitorIndex in visitors:
+        let seat = sim.players[visitorIndex].homeFlag - HomeMapIndexBase
+        if seat >= 0 and seat < HouseCount:
+          guestSeats.add(seat.playerNameForHouse())
+      let row = $(%*{
+        "seat": homeIndex,
+        "gnome": homeIndex.playerNameForHouse(),
+        "day": sim.dayNumber,
+        "tick": sim.tickCount,
+        "text": "dinner host=" & homeIndex.playerNameForHouse() &
+          " guests=" & guestSeats.join(",") &
+          " served=" & $served.totalItems(),
+        "kind": "dinner"
+      })
+      sim.connectionRows.add(row)
+      for event in parseConversationTimeline(row).events:
+        sim.connectionEvents.add(event)
+
 proc startDay(sim: SimServer) =
   ## Starts a new morning while keeping long-game player progress.
   inc sim.dayNumber
@@ -6509,6 +6612,9 @@ when not defined(emscripten):
       seatPlayers: array[HouseCount, int]
       simStarted = tokens.len == 0
       pausedSince = 0.0
+    # Live games produce their own record stream (conversation rows
+    # plus dinner rows); replay playback reads records instead.
+    sim.connectionRecording = true
     for seat in 0 ..< HouseCount:
       seatPlayers[seat] = -1
     if tokens.len > 0:
@@ -6571,7 +6677,9 @@ when not defined(emscripten):
             chatText
           )
       # Conversation enter/exit rows ride inside the replay so playback
-      # can rebuild the ring timeline from the one file.
+      # can rebuild the ring timeline from the one file. The same rows
+      # feed the live Connection fold, so live play and a later replay
+      # of it run the identical pure fold.
       if not brains.gameLog.isNil and
           brains.gameLog.conversationLines.len > 0:
         if replayWriter.enabled:
@@ -6579,9 +6687,22 @@ when not defined(emscripten):
             replayWriter.writeConversationRecord(
               tickTime(sim.tickCount), line
             )
+        for line in brains.gameLog.conversationLines:
+          for event in parseConversationTimeline(line).events:
+            sim.connectionEvents.add(event)
         brains.gameLog.conversationLines.setLen(0)
       let wasScoring = sim.scoreTicks > 0
       sim.step(stepInputs)
+      # A 6pm tally leaves dinner record rows behind; they ride the
+      # same channel as the conversation rows.
+      if sim.connectionRows.len > 0:
+        if replayWriter.enabled:
+          for row in sim.connectionRows:
+            replayWriter.writeConversationRecord(
+              tickTime(sim.tickCount), row
+            )
+        sim.connectionRows.setLen(0)
+      brains.connectionPairs = sim.connectionPairsNow()
       sim.advanceChatFeed()
       replayWriter.writeHash(uint32(sim.tickCount), sim.gameHash())
       if not wasScoring and sim.scoreTicks > 0:
@@ -6746,6 +6867,7 @@ when not defined(emscripten):
         if maxGames > 0 and gamesFinished >= maxGames:
           quit(0)
         sim = initSimServer(seed + gamesFinished, dayTicks)
+        sim.connectionRecording = true
         if tokens.len > 0:
           sim.seatCount = tokens.len
         runTicks = 0

@@ -6,7 +6,8 @@
 import
   std/[algorithm, options, os, sets, strutils, tables],
   heartleaf/[common, protocol, decisions, observation, navigation, villager,
-    executor, report, prompt, pacing, bedrock_client, souls, encounters]
+    executor, report, prompt, pacing, bedrock_client, souls, encounters,
+    connection]
 
 const
   JoinGraceTicks = 12
@@ -51,6 +52,10 @@ type
     book*: EncounterBook
     heartLedger*: HeartLedger
       ## Connection strengths minted by spoken conversation turns.
+    connectionPairs*: seq[ConnectionPair]
+      ## The per-pair Connection fold, pushed in by the server loop
+      ## from the live record stream (conversation and dinner rows),
+      ## for the state reports.
     gameLog*: GameLog
       ## One village log for LLM lifecycle and world stamps.
     conversationTick*: int
@@ -736,23 +741,25 @@ proc heartPairs*(brains: Brains): seq[tuple[a, b, links: int]] =
   brains.heartLedger.heartPairs()
 
 proc refreshConnectionTexts*(brains: Brains) =
-  ## Puts each villager's live connections into its state reports:
-  ## "Anton 2, Yura 1. Your connection score: 2.4".
+  ## Puts each villager's live Connection bonds into its state reports:
+  ## "Anton 0.17, Yura 0.05. Your Connection score: 0.04".
   for seat, villager in brains.villagers:
     var parts: seq[string]
-    for pair in brains.heartLedger.heartPairs():
+    for pair in brains.connectionPairs:
       let other =
         if pair.a == seat: pair.b
         elif pair.b == seat: pair.a
         else: -1
-      if other >= 0:
-        parts.add(other.playerNameForHouse() & " " & $pair.links)
+      if other >= 0 and pair.c > 0.0:
+        parts.add(other.playerNameForHouse() & " " &
+          formatFloat(pair.c, ffDecimal, 2))
     villager.connectionsText =
       if parts.len == 0:
         ""
       else:
-        parts.join(", ") & ". Your connection score: " &
-          formatFloat(brains.heartLedger.connectionScore(seat), ffDecimal, 1)
+        parts.join(", ") & ". Your Connection score: " &
+          formatFloat(
+            brains.connectionPairs.connectionScore(seat), ffDecimal, 2)
 
 proc advance*(
   brains: Brains,
