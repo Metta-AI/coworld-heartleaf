@@ -82,7 +82,18 @@ Every gnome wants to eat every garden food once this game. The state
 report lists Food looking for, and Food collected when you carry
 something. Always use those names. Never say vegetable 0 or food 3.
 Ask nearby gnomes if they have one food you still need. Talk about
-the foods you gathered."""
+the foods you gathered.
+
+Connections and winning:
+Connection points measure time truly spent together. Each spoken
+turn you take in a conversation, right after another member spoke,
+gives you and that member one connection point each. Nothing else
+earns them: shouting outside a conversation earns zero, standing
+silent in one earns zero, and dinners earn zero connection. Your
+connection score is the sum of the square root of your points with
+each gnome, so real talks with many different gnomes beat many
+words with one. The gnome with the highest connection score wins
+the game. Your current points appear in the state report."""
 
 proc housesText*(): string =
   ## The fixed houses of the village, by owner name.

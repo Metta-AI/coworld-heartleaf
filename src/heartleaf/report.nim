@@ -95,6 +95,8 @@ proc stateReport*(
   if carry.len > 0 and carry != "none":
     result.add("Food collected: " & carry & "\n")
   result.add("Food looking for: " & observation.foodLookingForText & "\n")
+  if villager.connectionsText.len > 0:
+    result.add("Connections: " & villager.connectionsText & "\n")
   result.add("Return JSON now.")
 
 proc requestMessages*(

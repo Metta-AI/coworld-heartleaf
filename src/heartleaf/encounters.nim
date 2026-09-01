@@ -2,7 +2,7 @@
 ## nine, with a line log every member sees. Pure data plus join and
 ## leave helpers used by the brains runtime.
 
-import std/[algorithm, json, os, strutils, tables], heartleaf/[common, protocol]
+import std/[algorithm, json, math, os, strutils, tables], heartleaf/[common, protocol]
 
 type
   Encounter* = ref object
@@ -24,6 +24,9 @@ type
     encounterId*: int
     seat*: int
     members*: seq[int]
+    spokenTurn*: bool
+      ## A convo-tick row where the seat actually spoke: the unit that
+      ## mints heart connections.
   ConversationTimeline* = object
     events*: seq[ConversationEvent]
   ConversationGroup* = object
@@ -207,13 +210,19 @@ proc parseConversationLine(line: string): ConversationEvent =
   try:
     let node = parseJson(line)
     let kind = node{"kind"}.getStr()
-    if kind != "convo-enter" and kind != "convo-exit":
+    if kind notin ["convo-enter", "convo-exit", "convo-tick"]:
       return
     result.tick = node{"tick"}.getInt()
     result.seat = node{"seat"}.getInt()
-    result.enter = kind == "convo-enter"
     let text = node{"text"}.getStr()
     result.encounterId = text.intAfter(" id=")
+    if kind == "convo-tick":
+      if " silent=true" in text:
+        result.encounterId = 0  # a silent slot mints nothing; drop it
+      else:
+        result.spokenTurn = true
+      return
+    result.enter = kind == "convo-enter"
     if result.enter:
       result.members = text.parseMemberSeats()
   except CatchableError:
@@ -252,6 +261,10 @@ proc encounterGroupsAt*(
   for event in timeline.events:
     if event.tick > tick:
       continue
+    if event.spokenTurn:
+      # A convo-tick row is a spoken turn, not an exit: the speaker
+      # stays in the group.
+      continue
     if event.enter:
       if event.members.len > 0:
         groups[event.encounterId] = event.members
@@ -287,3 +300,89 @@ proc placeConversationAnchor*(
   ## Frozen ring position for one conversation huddle.
   let circle = huddle.conversationCircle()
   ConversationAnchor(x: circle.x, y: circle.y, seats: seats)
+
+## Heart connections: one rule on top of the conversation turns. A
+## spoken turn connects the speaker with every member who spoke within
+## the last full round of that conversation; the pair earns +1, held by
+## both sides. A gnome's connection score is the sum of sqrt(links)
+## over its partners, so real talks with many gnomes beat many words
+## with one. Everything else - shouts, silent lurking, dinners - earns
+## nothing by construction.
+
+type
+  HeartLedger* = object
+    links*: Table[(int, int), int]
+      ## Connection strength per gnome pair, low seat first.
+    lastTurn: Table[(int, int), int]
+      ## (encounterId, seat) -> ordinal of that seat's last spoken turn.
+    turnCount: Table[int, int]
+      ## encounterId -> spoken turns so far.
+
+proc creditTurn*(
+  ledger: var HeartLedger,
+  encounterId, speakerSeat: int,
+  members: seq[int]
+) =
+  ## One spoken conversation turn lands: connect the speaker with every
+  ## member whose own last spoken turn is within the last round.
+  let turn = ledger.turnCount.getOrDefault(encounterId) + 1
+  ledger.turnCount[encounterId] = turn
+  let
+    window = members.len + 1
+    ownLast = ledger.lastTurn.getOrDefault(
+      (encounterId, speakerSeat), low(int) div 2)
+  for member in members:
+    if member == speakerSeat:
+      continue
+    let last = ledger.lastTurn.getOrDefault(
+      (encounterId, member), low(int) div 2)
+    # the member must have spoken since our own last turn (a real
+    # exchange, not a monologue) and within the last round
+    if last > ownLast and turn - last <= window:
+      let key = (min(speakerSeat, member), max(speakerSeat, member))
+      ledger.links[key] = ledger.links.getOrDefault(key) + 1
+  ledger.lastTurn[(encounterId, speakerSeat)] = turn
+
+proc heartPairs*(ledger: HeartLedger): seq[tuple[a, b, links: int]] =
+  ## Every connected pair with its strength, in a stable order.
+  for key, links in ledger.links:
+    result.add((a: key[0], b: key[1], links: links))
+  result.sort(proc(x, y: tuple[a, b, links: int]): int =
+    cmp((x.a, x.b), (y.a, y.b)))
+
+proc connectionScore*(ledger: HeartLedger, seat: int): float =
+  ## One gnome's score: the sum of sqrt(links) over its partners.
+  for key, links in ledger.links:
+    if key[0] == seat or key[1] == seat:
+      result += sqrt(float(links))
+
+proc heartLinksAt*(
+  timeline: ConversationTimeline,
+  tick: int
+): seq[tuple[a, b, links: int]] =
+  ## The pair strengths at one replay tick: a pure fold of the
+  ## conversation records up to that tick, so any viewer can rebuild
+  ## the connections from the one replay file.
+  var
+    ledger: HeartLedger
+    groups: Table[int, seq[int]]
+  for event in timeline.events:
+    if event.tick > tick:
+      break
+    if event.spokenTurn:
+      ledger.creditTurn(event.encounterId, event.seat,
+        groups.getOrDefault(event.encounterId))
+    elif event.enter:
+      if event.members.len > 0:
+        groups[event.encounterId] = event.members
+      else:
+        var members = groups.getOrDefault(event.encounterId)
+        members.addUniqueSeat(event.seat)
+        groups[event.encounterId] = members
+    else:
+      var next: seq[int]
+      for member in groups.getOrDefault(event.encounterId):
+        if member != event.seat:
+          next.add(member)
+      groups[event.encounterId] = next
+  ledger.heartPairs()

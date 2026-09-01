@@ -49,6 +49,8 @@ type
     turnIndex*: int
     moveTicksLeft*: int
     book*: EncounterBook
+    heartLedger*: HeartLedger
+      ## Connection strengths minted by spoken conversation turns.
     gameLog*: GameLog
       ## One village log for LLM lifecycle and world stamps.
     conversationTick*: int
@@ -452,6 +454,8 @@ proc logConversationTick(
   silent: bool
 ) =
   ## Stamps one closed conversation tick; the row rides into the replay.
+  if not silent:
+    brains.heartLedger.creditTurn(encounter.id, seat, encounter.members)
   if seat in brains.villagers:
     brains.villagers[seat].logConversation(
       "tick",
@@ -727,12 +731,36 @@ proc everyoneReady(
       return false
   counted > 0
 
+proc heartPairs*(brains: Brains): seq[tuple[a, b, links: int]] =
+  ## Every connected gnome pair with its strength, for the emotes.
+  brains.heartLedger.heartPairs()
+
+proc refreshConnectionTexts*(brains: Brains) =
+  ## Puts each villager's live connections into its state reports:
+  ## "Anton 2, Yura 1. Your connection score: 2.4".
+  for seat, villager in brains.villagers:
+    var parts: seq[string]
+    for pair in brains.heartLedger.heartPairs():
+      let other =
+        if pair.a == seat: pair.b
+        elif pair.b == seat: pair.a
+        else: -1
+      if other >= 0:
+        parts.add(other.playerNameForHouse() & " " & $pair.links)
+    villager.connectionsText =
+      if parts.len == 0:
+        ""
+      else:
+        parts.join(", ") & ". Your connection score: " &
+          formatFloat(brains.heartLedger.connectionScore(seat), ffDecimal, 1)
+
 proc advance*(
   brains: Brains,
   observations: Table[int, Observation],
   now: float
 ): BrainFrame =
   ## One frame: memories, LLM wait-for-all, or one movement tick.
+  brains.refreshConnectionTexts()
   for houseIndex, villager in brains.villagers.pairs:
     if houseIndex notin observations:
       continue
@@ -873,3 +901,4 @@ proc allFailed*(brains: Brains): bool =
     if not villager.failed:
       return false
   brains.villagers.len > 0
+

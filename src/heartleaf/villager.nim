@@ -96,6 +96,9 @@ type
     turnReady*: bool
       ## True when this gnome has a usable action for the current LLM turn.
     encounterId*: int
+    connectionsText*: string
+      ## "Anton 2, Yura 1. Your connection score: 2.4" - refreshed by
+      ## the brains from the heart ledger before every request.
       ## Shared conversation id, 0 when not talking.
     askedWhileTalking*: bool
       ## True when the in-flight request started inside a conversation,
