@@ -1,5 +1,5 @@
 import
-  std/[json, os, random, sequtils, sets, strutils, tables],
+  std/[json, math, os, random, sequtils, sets, strutils, tables],
   bitworld/client as bitworldClient,
   bitworld/resources,
   bitworld/spriteprotocol,
@@ -7,7 +7,7 @@ import
   heartleaf,
   heartleaf/[common, protocol, decisions, souls, observation, navigation,
     villager, executor, report, prompt, pacing, bedrock_client, brains,
-    encounters],
+    encounters, connection],
   replays,
   ../tools/llm_chart
 
@@ -1739,5 +1739,144 @@ block:
     "a silent slot mints nothing"
   doAssert timeline.heartLinksAt(300) == @[(a: 0, b: 1, links: 2)],
     "the answered turn mints again; scrubbing anywhere reproduces it"
+
+echo "Testing connection events"
+block:
+  # Positive: one real conversation exchange raises the pair's c.
+  var talk: ConnectionLedger
+  let two = @[0, 1]
+  talk.spokenTurn(1, 0, two)
+  doAssert talk.connectionPairs().pairConnection(0, 1) == 0.0,
+    "the opener alone is no exchange"
+  talk.spokenTurn(1, 1, two)
+  doAssert abs(talk.connectionPairs().pairConnection(0, 1) -
+    ConversationExchangeGain) < 1e-9, "the reply is one exchange"
+  # Negative: a silent slot lowers it toward every member.
+  talk.silentTurn(0, two)
+  doAssert abs(talk.connectionPairs().pairConnection(0, 1) -
+    (ConversationExchangeGain - SilentTurnPenalty)) < 1e-9,
+    "a silent slot costs the pair"
+  # Clamped at zero: silence toward a stranger cannot go negative.
+  var quiet: ConnectionLedger
+  quiet.silentTurn(0, two)
+  doAssert quiet.connectionPairs().pairConnection(0, 1) == 0.0,
+    "c is clamped at zero"
+  # Positive: attendance pays the guest-host pair, sharing the table
+  # pays the guest-guest pair.
+  var feast: ConnectionLedger
+  feast.dinner(0, @[1, 2], 5)
+  doAssert abs(feast.connectionPairs().pairConnection(0, 1) -
+    DinnerAttendanceGain) < 1e-9, "eating at their table connects"
+  doAssert abs(feast.connectionPairs().pairConnection(0, 2) -
+    DinnerAttendanceGain) < 1e-9, "every guest connects with the host"
+  doAssert abs(feast.connectionPairs().pairConnection(1, 2) -
+    SharedTableGain) < 1e-9, "fellow guests share the table"
+  # Negative: a table with nothing on it converts nothing and costs.
+  var bare: ConnectionLedger
+  bare.dinner(0, @[1], 3)
+  bare.dinner(0, @[1], 0)
+  doAssert abs(bare.connectionPairs().pairConnection(0, 1) -
+    (DinnerAttendanceGain - ServingNothingPenalty)) < 1e-9,
+    "hosting with an empty pantry subtracts"
+  # Negative: a repeat visit to a host you never repay freeloads.
+  var moocher: ConnectionLedger
+  moocher.dinner(0, @[1], 3)
+  moocher.dinner(0, @[1], 3)
+  doAssert abs(moocher.connectionPairs().pairConnection(0, 1) -
+    (2 * DinnerAttendanceGain - FreeloadingPenalty)) < 1e-9,
+    "unreciprocated repeat attendance is discounted"
+  var mutual: ConnectionLedger
+  mutual.dinner(0, @[1], 3)
+  mutual.dinner(1, @[0], 3)
+  mutual.dinner(0, @[1], 3)
+  doAssert abs(mutual.connectionPairs().pairConnection(0, 1) -
+    3 * DinnerAttendanceGain) < 1e-9,
+    "hosting them back clears the freeloading discount"
+  # Clamped at one: no pair can pass full depth.
+  var regulars: ConnectionLedger
+  for night in 0 ..< 20:
+    regulars.dinner(night mod 2, @[1 - night mod 2], 3)
+  doAssert regulars.connectionPairs().pairConnection(0, 1) == 1.0,
+    "c is clamped at one"
+
+echo "Testing the polar Connection score"
+block:
+  # The spec's own table: r = live ties, theta = (1 - mean depth) *
+  # pi/2, score = r * cos(theta), over 8 possible partners.
+  doAssert polarConnectionScore(@[]) == 0.0, "nobody scores zero"
+  doAssert abs(polarConnectionScore(newSeqWith(8, 1.0)) - 1.0) < 1e-9,
+    "all 8 at full depth is exactly 1.0"
+  doAssert abs(polarConnectionScore(newSeqWith(8, 0.5)) - 0.7071) < 0.0005,
+    "8 half-depth ties beat 4 full ones"
+  doAssert abs(polarConnectionScore(newSeqWith(6, 0.7)) - 0.6683) < 0.0005,
+    "6 ties at 0.7"
+  doAssert abs(polarConnectionScore(newSeqWith(4, 1.0)) - 0.5) < 1e-9,
+    "4 full ties are half the sky"
+  doAssert abs(polarConnectionScore(
+    @[1.0, 1.0, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]) - 0.4886) < 0.0005,
+    "2 full + 6 token"
+  doAssert abs(polarConnectionScore(newSeqWith(8, 0.1)) - 0.1564) < 0.0005,
+    "8 token ties barely register"
+  doAssert abs(polarConnectionScore(@[1.0]) - 0.125) < 1e-9,
+    "one perfect friendship cannot carry you"
+  # The identity: r * cos((1 - q) * pi/2) == r * sin(q * pi/2).
+  for q in [0.0, 0.1, 0.33, 0.5, 0.9, 1.0]:
+    doAssert abs(cos((1.0 - q) * PI / 2.0) - sin(q * PI / 2.0)) < 1e-9,
+      "the two polar forms are the same curve"
+  # The live-tie threshold: a pair below it holds no radius.
+  let faint = @[(a: 0, b: 1, c: LiveTieThreshold / 2.0)]
+  doAssert faint.connectionScore(0) == 0.0,
+    "a tie below the threshold is not live"
+  let held = @[(a: 0, b: 1, c: LiveTieThreshold)]
+  doAssert held.connectionScore(0) > 0.0, "at the threshold it is"
+
+echo "Testing the Connection fold from the records"
+block:
+  # The replay-side fold: c rebuilt purely from the record rows, the
+  # conversation rows plus the dinner rows on the same channel.
+  proc row(tick: int, kind, text: string, seat: int): string =
+    $(%*{"kind": kind, "tick": tick, "seat": seat, "text": text})
+  let log = @[
+    row(100, "convo-enter", "enter id=1 members=Ivan, Anton", 0),
+    row(110, "convo-tick", "tick id=1 ct=1 speaker=Ivan silent=false", 0),
+    row(140, "convo-tick", "tick id=1 ct=2 speaker=Anton silent=false", 1),
+    row(170, "convo-tick", "tick id=1 ct=3 speaker= silent=true", 0),
+    row(230, "convo-exit", "exit id=1", 1),
+    row(300, "dinner", "dinner host=Ivan guests=Anton,Yura served=4", 0),
+    row(400, "dinner", "dinner host=Ivan guests=Anton served=0", 0)
+  ].join("\n")
+  let timeline = parseConversationTimeline(log)
+  doAssert timeline.connectionsAt(90).len == 0, "nothing before the talk"
+  doAssert abs(timeline.connectionsAt(150).pairConnection(0, 1) -
+    ConversationExchangeGain) < 1e-9, "the reply is one exchange"
+  doAssert abs(timeline.connectionsAt(200).pairConnection(0, 1) -
+    (ConversationExchangeGain - SilentTurnPenalty)) < 1e-9,
+    "the recorded silent slot subtracts"
+  let at350 = timeline.connectionsAt(350)
+  doAssert abs(at350.pairConnection(0, 1) - (ConversationExchangeGain -
+    SilentTurnPenalty + DinnerAttendanceGain)) < 1e-9,
+    "the dinner row pays the guest-host pair"
+  doAssert abs(at350.pairConnection(0, 2) - DinnerAttendanceGain) < 1e-9,
+    "every recorded guest connects with the host"
+  doAssert abs(at350.pairConnection(1, 2) - SharedTableGain) < 1e-9,
+    "recorded fellow guests share the table"
+  doAssert abs(timeline.connectionsAt(450).pairConnection(0, 1) -
+    (ConversationExchangeGain - SilentTurnPenalty + DinnerAttendanceGain -
+      ServingNothingPenalty)) < 1e-9,
+    "the empty-table row subtracts"
+  # Scrubbing: the fold is pure, so any revisited tick reproduces it.
+  doAssert timeline.connectionsAt(200) == timeline.connectionsAt(200),
+    "the fold is deterministic"
+  doAssert abs(timeline.connectionsAt(150).pairConnection(0, 1) -
+    ConversationExchangeGain) < 1e-9,
+    "scrubbing back after folding forward reproduces the past"
+  # The other folds ignore the new rows: no heart links from dinners
+  # or silence, no phantom exits from the kept silent rows.
+  doAssert timeline.heartLinksAt(450) == @[(a: 0, b: 1, links: 1)],
+    "dinner and silent rows mint no heart links"
+  doAssert timeline.encounterMembersAt(200) == @[@[0, 1]],
+    "a silent row does not remove its seat from the conversation"
+  doAssert timeline.conversationSpans(500).len == 1,
+    "dinner rows open no conversation spans"
 
 echo "All tests passed"

@@ -27,6 +27,16 @@ type
     spokenTurn*: bool
       ## A convo-tick row where the seat actually spoke: the unit that
       ## mints heart connections.
+    silentTurn*: bool
+      ## A convo-tick row where the seat's slot came and they said
+      ## nothing: being reached for and not answering. Mints nothing
+      ## for the heart ledger; the Connection fold reads it.
+    dinner*: bool
+      ## A dinner record row: the seat hosted, dinnerGuests ate at
+      ## their table, dinnerServed items were on it. Rides the same
+      ## record channel as the conversation rows.
+    dinnerGuests*: seq[int]
+    dinnerServed*: int
   ConversationTimeline* = object
     events*: seq[ConversationEvent]
   ConversationGroup* = object
@@ -213,20 +223,44 @@ proc parseMemberSeats(text: string): seq[int] =
     if house >= 0:
       result.add(house)
 
+proc parseGuestSeats(text: string): seq[int] =
+  ## House seats from the guests= field of one dinner record row.
+  let at = text.find("guests=")
+  if at < 0:
+    return
+  var rest = text[at + "guests=".len .. ^1]
+  let spaceAt = rest.find(' ')
+  if spaceAt >= 0:
+    rest = rest[0 ..< spaceAt]
+  for name in rest.split(','):
+    let house = name.strip().houseIndexForPlayerName()
+    if house >= 0:
+      result.add(house)
+
 proc parseConversationLine(line: string): ConversationEvent =
-  ## One game.log conversation enter or exit, or an empty event.
+  ## One game.log conversation enter or exit, a dinner record, or an
+  ## empty event.
   try:
     let node = parseJson(line)
     let kind = node{"kind"}.getStr()
-    if kind notin ["convo-enter", "convo-exit", "convo-tick"]:
+    if kind notin ["convo-enter", "convo-exit", "convo-tick", "dinner"]:
       return
     result.tick = node{"tick"}.getInt()
     result.seat = node{"seat"}.getInt()
     let text = node{"text"}.getStr()
+    if kind == "dinner":
+      # A dinner row: seat is the host, the text carries the guests
+      # and how many items the pantry put on the table.
+      result.dinner = true
+      result.dinnerGuests = text.parseGuestSeats()
+      result.dinnerServed = text.intAfter(" served=")
+      return
     result.encounterId = text.intAfter(" id=")
     if kind == "convo-tick":
       if " silent=true" in text:
-        result.encounterId = 0  # a silent slot mints nothing; drop it
+        # A silent slot mints no heart links, but it is a recorded
+        # non-answer the Connection fold reads; keep the row.
+        result.silentTurn = true
       else:
         result.spokenTurn = true
       return
@@ -242,7 +276,7 @@ proc parseConversationTimeline*(text: string): ConversationTimeline =
     if line.len == 0:
       continue
     let event = parseConversationLine(line)
-    if event.encounterId > 0:
+    if event.encounterId > 0 or event.dinner:
       result.events.add(event)
 
 proc loadConversationTimeline*(path: string): ConversationTimeline =
@@ -269,9 +303,9 @@ proc encounterGroupsAt*(
   for event in timeline.events:
     if event.tick > tick:
       continue
-    if event.spokenTurn:
-      # A convo-tick row is a spoken turn, not an exit: the speaker
-      # stays in the group.
+    if event.spokenTurn or event.silentTurn or event.dinner:
+      # A convo-tick row is a turn, not an exit - the speaker stays in
+      # the group - and a dinner row is no conversation at all.
       continue
     if event.enter:
       if event.members.len > 0:
@@ -316,7 +350,7 @@ proc conversationSpans*(
     live: Table[int, seq[int]]
       ## Current members of each conversation that is still open.
   for event in timeline.events:
-    if event.spokenTurn:
+    if event.spokenTurn or event.silentTurn or event.dinner:
       continue
     if event.enter:
       if event.encounterId in spanAt:
@@ -393,9 +427,11 @@ proc creditTurn*(
   ledger: var HeartLedger,
   encounterId, speakerSeat: int,
   members: seq[int]
-) =
+): seq[int] {.discardable.} =
   ## One spoken conversation turn lands: connect the speaker with every
   ## member whose own last spoken turn is within the last round.
+  ## Returns the members connected by this turn, so other folds (the
+  ## Connection ledger) can price the same exchange.
   let turn = ledger.turnCount.getOrDefault(encounterId) + 1
   ledger.turnCount[encounterId] = turn
   let
@@ -412,6 +448,7 @@ proc creditTurn*(
     if last > ownLast and turn - last <= window:
       let key = (min(speakerSeat, member), max(speakerSeat, member))
       ledger.links[key] = ledger.links.getOrDefault(key) + 1
+      result.add(member)
   ledger.lastTurn[(encounterId, speakerSeat)] = turn
 
 proc heartPairs*(ledger: HeartLedger): seq[tuple[a, b, links: int]] =
@@ -440,7 +477,10 @@ proc heartLinksAt*(
   for event in timeline.events:
     if event.tick > tick:
       break
-    if event.spokenTurn:
+    if event.silentTurn or event.dinner:
+      # Neither a silent slot nor a dinner mints heart links.
+      discard
+    elif event.spokenTurn:
       ledger.creditTurn(event.encounterId, event.seat,
         groups.getOrDefault(event.encounterId))
     elif event.enter:
