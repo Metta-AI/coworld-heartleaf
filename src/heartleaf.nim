@@ -220,11 +220,35 @@ const
     ## the outermost band is sampled, so houses and lawns deeper in the
     ## map are never reflected into the forest.
   ForestSpriteBase = 30
-    ## Sprite ids 30..35: the untinted forest underlay and its five
-    ## dusk tints, after the home overhang tints (25..29).
+    ## Sprite id of the forest underlay, after the home overhang
+    ## tints (25..29). The underlay ships once, in daylight colors;
+    ## dusk is a veil drawn over it, not five tinted copies.
+  ForestVeilSpriteBase = 31
+    ## Sprite ids 31..35: the five translucent dusk-veil tiles that
+    ## darken the forest through the evening stages.
+  ForestVeilTileW = 512
+  ForestVeilTileH = 256
+    ## One veil tile covers a column of visible forest beside the map:
+    ## wider than the widest forest margin, tiled down the viewport.
+  ForestVeilColors = [
+    ColorRGBA(r: 79, g: 0, b: 0, a: 56),
+    ColorRGBA(r: 43, g: 0, b: 0, a: 138),
+    ColorRGBA(r: 28, g: 0, b: 5, a: 207),
+    ColorRGBA(r: 0, g: 17, b: 25, a: 219),
+    ColorRGBA(r: 0, g: 6, b: 16, a: 224),
+  ]
+    ## Per-stage veil color and alpha, least-squares fitted over the
+    ## forest ring pixels against the old hsvTinted stage copies: for
+    ## each candidate alpha the best veil color is the mean residual,
+    ## and the alpha with the lowest error wins. Early dusk leans warm
+    ## sunset red, late dusk deep blue-teal, and the fit keeps the
+    ## tree texture readable instead of flattening it.
   ForestObjectId = 3
     ## Map-layer object id for the forest underlay, after the bottom
     ## (1) and overhang (2) objects.
+  ForestVeilObjectBase = 4
+    ## Map-layer object ids 4..99 are reserved for the dusk veil
+    ## tiles; a frame uses at most a handful of them.
   DirectorBounceHops = [2, 4, 6, 6, 5, 4, 2, 0, 2, 3, 3, 2, 1, 0]
     ## The little hop a gnome does when its new line lands, in pixels
     ## of lift per frame.
@@ -388,7 +412,6 @@ type
     bottomTints: array[DayTintCount, RgbaSprite]
     overhangTints: array[DayTintCount, RgbaSprite]
     forestSprite: RgbaSprite
-    forestTints: array[DayTintCount, RgbaSprite]
     walkMask: seq[bool]
 
   GnomeSprites = ref object
@@ -827,9 +850,22 @@ proc foldIntoBand(distance, band: int): int =
 
 proc forestJitter(x, y: int): (int, int) =
   ## A tiny deterministic per-pixel offset that decorrelates mirrored
-  ## copies of the edge band so they read as forest, not ripples.
+  ## copies of the edge band so they read as forest, not ripples. The
+  ## offsets are in half-resolution pixels, so they cover two world
+  ## pixels each.
   let hash = uint32(x * 73_856_093) xor uint32(y * 19_349_663)
-  (int((hash shr 8) mod 7) - 3, int((hash shr 16) mod 7) - 3)
+  (int((hash shr 8) mod 3) - 1, int((hash shr 16) mod 3) - 1)
+
+proc halvedRgbaSprite(sprite: RgbaSprite): RgbaSprite =
+  ## Point-samples one RGBA sprite to half resolution, keeping the
+  ## pixel-art palette crisp for nearest-neighbor work.
+  result = newRgbaSprite((sprite.width + 1) div 2, (sprite.height + 1) div 2)
+  for y in 0 ..< result.height:
+    for x in 0 ..< result.width:
+      result.putPixel(x, y, sprite.rgbaSpriteAt(
+        min(x * 2, sprite.width - 1),
+        min(y * 2, sprite.height - 1)
+      ))
 
 proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite =
   ## Extends the map outward with forest built from the map's own edge
@@ -841,20 +877,34 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
   ## competing with it. Sandy path pixels leaving the map fade into
   ## the canopy, so the roads disappear under the trees. The map
   ## interior stays transparent; the real map draws over that area.
+  ##
+  ## The border is generated at half resolution and upscaled 2x
+  ## nearest-neighbor into the shipped sprite: the sprite protocol has
+  ## no draw-time scaling, but the 2x blocks compress to a fraction of
+  ## full-detail forest in the init packet, and deep-background pixel
+  ## art wears the blockiness happily. The wave and fade tunings below
+  ## are the full-resolution values halved, so the border keeps its
+  ## world-space look.
   var base = newRgbaSprite(bottom.width, bottom.height)
   base.blitRgbaSprite(bottom, 0, 0)
   base.blitRgbaSprite(overhang, 0, 0)
   let
-    w = base.width
-    h = base.height
+    half = base.halvedRgbaSprite()
+    hm = margin div 2
+    hb = max(1, band div 2)
+    w = half.width
+    h = half.height
     fallback = rgba(26, 36, 20, 255)
-  result = newRgbaSprite(w + margin * 2, h + margin * 2)
-  for y in 0 ..< result.height:
-    let wy = y - margin
-    for x in 0 ..< result.width:
-      let wx = x - margin
-      if wx >= 0 and wx < w and wy >= 0 and wy < h:
-        continue  # the map itself covers this area
+  var halfForest = newRgbaSprite(w + hm * 2, h + hm * 2)
+  for y in 0 ..< halfForest.height:
+    let wy = y - hm
+    for x in 0 ..< halfForest.width:
+      let wx = x - hm
+      if wx >= 1 and wx < w - 1 and wy >= 1 and wy < h - 1:
+        # The map itself covers this area. The outermost half-pixel
+        # ring keeps map edge colors so the 2x upscale still meets the
+        # map without a transparent seam; the map draws over it.
+        continue
       let
         dx =
           if wx < 0:
@@ -873,10 +923,10 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
         outDist = max(dx, dy)
         # The jitter ramps in from zero so the first rows still join
         # the real map edge seamlessly.
-        jitterRamp = min(outDist, 16)
+        jitterRamp = min(outDist, 8)
         (rawJx, rawJy) = forestJitter(x, y)
-        jx = rawJx * jitterRamp div 16
-        jy = rawJy * jitterRamp div 16
+        jx = rawJx * jitterRamp div 8
+        jy = rawJy * jitterRamp div 8
       var
         sx = wx
         sy = wy
@@ -885,14 +935,14 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
         # field jumbles its reflections instead of repeating in rows.
         # Its wavelength is long, so the wander reads as drifting
         # canopy rather than zigzag hedges.
-        waveAmp = min(2.2, 1.0 + float(outDist) / 220.0)
+        waveAmp = min(2.2, 1.0 + float(outDist) / 110.0)
       if dx > 0:
         # The wave is keyed on the along-edge coordinate so reflection
         # boundaries wander instead of forming straight ripples.
         let
-          wave = int(9.0 * sin(float(wy) * 0.017) * waveAmp +
-            4.0 * sin(float(wy) * 0.045 + 1.7))
-          depth = foldIntoBand(max(0, dx - 1 + wave), band)
+          wave = int(4.5 * sin(float(wy) * 0.034) * waveAmp +
+            2.0 * sin(float(wy) * 0.09 + 1.7))
+          depth = foldIntoBand(max(0, dx - 1 + wave), hb)
         sx =
           if wx < 0:
             depth
@@ -901,9 +951,9 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
         sy = wy + jy
       if dy > 0:
         let
-          wave = int(9.0 * sin(float(wx) * 0.014 + 0.9) * waveAmp +
-            4.0 * sin(float(wx) * 0.039) )
-          depth = foldIntoBand(max(0, dy - 1 + wave), band)
+          wave = int(4.5 * sin(float(wx) * 0.028 + 0.9) * waveAmp +
+            2.0 * sin(float(wx) * 0.078))
+          depth = foldIntoBand(max(0, dy - 1 + wave), hb)
         sy =
           if wy < 0:
             depth
@@ -911,12 +961,12 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
             h - 1 - depth
         if dx == 0:
           sx = wx + jx
-      var color = base.rgbaSpriteAt(clamp(sx, 0, w - 1), clamp(sy, 0, h - 1))
+      var color = half.rgbaSpriteAt(clamp(sx, 0, w - 1), clamp(sy, 0, h - 1))
       if color.a == 0:
         color = fallback
       # Sandy road pixels reflected past the edge sink into the trees.
       if int(color.r) > 160 and int(color.r) - int(color.b) > 50:
-        let fade = min(1.0, float(outDist) / 70.0)
+        let fade = min(1.0, float(outDist) / 35.0)
         color = rgba(
           uint8(float(color.r) + (float(fallback.r) - float(color.r)) * fade),
           uint8(float(color.g) + (float(fallback.g) - float(color.g)) * fade),
@@ -924,12 +974,27 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
           255
         )
       let shade =
-        1.0 - 0.55 * pow(min(1.0, float(outDist) / float(margin)), 0.75)
-      result.putPixel(x, y, rgba(
+        1.0 - 0.55 * pow(min(1.0, float(outDist) / float(hm)), 0.75)
+      halfForest.putPixel(x, y, rgba(
         uint8(float(color.r) * shade),
         uint8(float(color.g) * shade),
         uint8(float(color.b) * shade),
         255
+      ))
+  # 2x nearest-neighbor upscale into the shipped sprite. The strict
+  # interior stays transparent for the map to draw over; the two-pixel
+  # overlap ring under the map edge guards against a hairline gap.
+  result = newRgbaSprite(bottom.width + margin * 2, bottom.height + margin * 2)
+  for y in 0 ..< result.height:
+    let wy = y - margin
+    for x in 0 ..< result.width:
+      let wx = x - margin
+      if wx >= 2 and wx < bottom.width - 2 and
+          wy >= 2 and wy < bottom.height - 2:
+        continue  # the map itself covers this area
+      result.putPixel(x, y, halfForest.rgbaSpriteAt(
+        min(x div 2, halfForest.width - 1),
+        min(y div 2, halfForest.height - 1)
       ))
 
 proc loadGnomeSprites(path: string): seq[GnomeSprites] =
@@ -1111,13 +1176,6 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
     ForestMarginPx,
     ForestBandPx
   )
-  for i in 0 ..< DayTintCount:
-    result.mainMap.forestTints[i] = forestUnderlay(
-      result.mainMap.bottomTints[i],
-      result.mainMap.overhangTints[i],
-      ForestMarginPx,
-      ForestBandPx
-    )
   dumpForestUnderlay(result.mainMap)
   let homeMap = loadWorldMap(homeMapPath, "Home map")
   for i in 0 ..< HouseCount:
@@ -1708,12 +1766,6 @@ proc mainOverhangSpriteId(tintIndex: int): int =
     return OverhangSpriteId
   return MainOverhangTintSpriteBase + tintIndex
 
-proc forestSpriteId(tintIndex: int): int =
-  ## Returns the forest underlay sprite id for one day tint.
-  if tintIndex < 0:
-    return ForestSpriteBase
-  return ForestSpriteBase + 1 + tintIndex
-
 proc homeBottomSpriteId(tintIndex: int): int =
   ## Returns the home map bottom sprite id for one day tint.
   if tintIndex < 0:
@@ -1897,15 +1949,19 @@ proc addSpriteProtocolInit(
     )
   if sim.mainMap.forestSprite.width > 0:
     packet.addRgbaSprite(
-      forestSpriteId(-1),
+      ForestSpriteBase,
       sim.mainMap.forestSprite,
       "forest underlay"
     )
     for i in 0 ..< DayTintCount:
       packet.addRgbaSprite(
-        forestSpriteId(i),
-        sim.mainMap.forestTints[i],
-        "forest underlay tint " & $i
+        ForestVeilSpriteBase + i,
+        solidRgbaSprite(
+          ForestVeilTileW,
+          ForestVeilTileH,
+          ForestVeilColors[i]
+        ),
+        "forest dusk veil " & $i
       )
   packet.addRgbaSprite(
     HomeBottomSpriteId,
@@ -3889,8 +3945,50 @@ proc addDirectorWorldView(
       -cameraY - ForestMarginPx,
       BottomZ,
       MapLayerId,
-      forestSpriteId(tintIndex)
+      ForestSpriteBase
     )
+    if tintIndex >= 0:
+      # At dusk a translucent veil darkens the forest instead of a
+      # tinted second copy; the map keeps its own tinted sprites. The
+      # camera never leaves the map vertically, so visible forest is
+      # the two columns beside it. Veil tiles anchor flush against
+      # the map edges and spill away from the map, off the viewport,
+      # so they never dim the village. They share BottomZ and sort
+      # after the forest object: every tile y is above -ForestVeil-
+      # TileH while the forest sits at -ForestMarginPx or lower, and
+      # they never overlap the map bottom, so order against it cannot
+      # matter.
+      let
+        mapLeft = -cameraX
+        mapRight = mapLeft + sim.mainMap.width
+        veilRows = (viewH + ForestVeilTileH - 1) div ForestVeilTileH
+      var veilIndex = 0
+      for row in 1 .. veilRows:
+        let tileY = viewH - row * ForestVeilTileH
+        var tileX = mapLeft - ForestVeilTileW
+        while tileX + ForestVeilTileW > 0 and veilIndex < 96:
+          packet.addObject(
+            ForestVeilObjectBase + veilIndex,
+            tileX,
+            tileY,
+            BottomZ,
+            MapLayerId,
+            ForestVeilSpriteBase + tintIndex
+          )
+          inc veilIndex
+          tileX -= ForestVeilTileW
+        tileX = mapRight
+        while tileX < paddedW and veilIndex < 96:
+          packet.addObject(
+            ForestVeilObjectBase + veilIndex,
+            tileX,
+            tileY,
+            BottomZ,
+            MapLayerId,
+            ForestVeilSpriteBase + tintIndex
+          )
+          inc veilIndex
+          tileX += ForestVeilTileW
   packet.addObject(
     BottomObjectId,
     -cameraX,
