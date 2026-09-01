@@ -98,7 +98,8 @@ To run the pieces by hand:
 nim r src/heartleaf.nim
 ```
 
-Then open `http://localhost:8080/client/global`.
+Then open `http://localhost:8080/`. The root serves the director cut;
+`/client/global` keeps the plain hand-panned view.
 
 With no `tokens` configured the village starts at once and a gnome appears
 whenever a soul arrives. Without Bedrock credentials, give the game a mock
@@ -121,6 +122,21 @@ nim r players/soul_player/soul_player.nim \
 To call a real model locally, set `BEDROCK_KEY` (or AWS credentials) in the
 game's environment instead of `HEARTLEAF_MOCK_REPLY`. Hosted games get
 Bedrock from the platform automatically.
+
+### Developing
+
+From a clean machine, clone the repository and sync the lock:
+
+```sh
+git clone <this repository>
+cd heartleaf-conversations
+nimby sync nimby.lock -g
+```
+
+`nimby sync` installs the lock's pinned packages and writes `nim.cfg`
+so the compiler finds them; plain `nimby install` does neither. Then the
+run commands above work as written. If a sync is aborted partway, nimby
+can leave a stale lock behind — `rmdir ~/.nimby/nimbylock` clears it.
 
 ## Build A Soul
 
