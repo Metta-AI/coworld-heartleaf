@@ -55,6 +55,10 @@ const
 
 type
   ConnectionPair* = tuple[a, b: int, c: float]
+  ConnectionBurst* = tuple[a, b, tick: int, positive: bool]
+    ## One Connection event landing on one pair at one tick - the
+    ## thing the emotes announce. positive tells whether the event
+    ## raised or lowered the pair's c.
   ConnectionLedger* = object
     c: Table[(int, int), float]
       ## Connection per gnome pair, low seat first. Symmetric: every
@@ -65,6 +69,12 @@ type
     heart: HeartLedger
       ## The spoken-turn exchange window, shared with the heart links
       ## so both folds price exactly the same exchanges.
+    trackBursts: bool
+      ## When on, every nudge is also remembered as a burst.
+    bursts: seq[ConnectionBurst]
+      ## The per-pair event landings, in fold order.
+    eventTick: int
+      ## The record tick of the event being applied, for the bursts.
 
 proc nudge(ledger: var ConnectionLedger, a, b: int, delta: float) =
   ## Moves one pair's c by delta, clamped to [0, 1].
@@ -72,6 +82,16 @@ proc nudge(ledger: var ConnectionLedger, a, b: int, delta: float) =
     return
   let key = (min(a, b), max(a, b))
   ledger.c[key] = clamp(ledger.c.getOrDefault(key) + delta, 0.0, 1.0)
+  if ledger.trackBursts:
+    # One burst per pair per event: the freeloading discount rides
+    # the attendance it discounts, not a second face.
+    if ledger.bursts.len > 0:
+      let last = ledger.bursts[^1]
+      if last.a == key[0] and last.b == key[1] and
+          last.tick == ledger.eventTick:
+        return
+    ledger.bursts.add(
+      (a: key[0], b: key[1], tick: ledger.eventTick, positive: delta > 0.0))
 
 proc spokenTurn*(
   ledger: var ConnectionLedger,
@@ -131,6 +151,7 @@ proc applyConnectionEvent*(
 ) =
   ## Folds one record row into the ledger, maintaining the open
   ## conversation groups the same way heartLinksAt does.
+  ledger.eventTick = event.tick
   if event.dinner:
     ledger.dinner(event.seat, event.dinnerGuests, event.dinnerServed)
   elif event.spokenTurn:
@@ -181,6 +202,40 @@ proc connectionsAt*(
   ## The pair connections at one replay tick, rebuilt purely from the
   ## records inside the replay file, exactly like heartLinksAt.
   foldConnections(timeline.events, tick)
+
+proc foldConnectionBursts*(
+  events: seq[ConversationEvent],
+  tick, window: int
+): seq[ConnectionBurst] =
+  ## The per-pair event landings inside (tick - window, tick], out of
+  ## the same pure fold - the fold state decides which pairs an event
+  ## touches (who was in the conversation, who minted an exchange), so
+  ## the bursts are as scrub-safe as c itself.
+  var
+    ledger: ConnectionLedger
+    groups: Table[int, seq[int]]
+  ledger.trackBursts = true
+  for event in events:
+    if event.tick > tick:
+      break
+    ledger.applyConnectionEvent(groups, event)
+  for burst in ledger.bursts:
+    if burst.tick > tick - window:
+      result.add(burst)
+
+proc connectionBurstsAt*(
+  timeline: ConversationTimeline,
+  tick, window: int
+): seq[ConnectionBurst] =
+  ## The recent event landings at one replay tick, from the records.
+  foldConnectionBursts(timeline.events, tick, window)
+
+proc connectionTier*(c: float): int =
+  ## Which pixel face a bond wears: the straight-mouthed neutral below
+  ## 1/3, the classic smiley below 2/3, the open-mouthed laugh above.
+  if c < 1.0 / 3.0: 0
+  elif c < 2.0 / 3.0: 1
+  else: 2
 
 proc polarConnectionScore*(depths: seq[float]): float =
   ## The decided aggregation over one gnome's live-tie depths:

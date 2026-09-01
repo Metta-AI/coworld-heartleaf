@@ -289,12 +289,9 @@ const
                                 ## clear of the chat-banner glyph ids
   HeartObjectBase = 27_000
   HeartLinkZ = 30_010           ## emotes float above heads and name tags
-  HeartLinkMaxDistance = 190    ## px; emotes only show when the pair is near
-  HeartEmotePeriod = 72         ## ticks per emote cycle (3s at 24 ticks/s)
   HeartEmoteLife = 44           ## ticks one emote lives while rising
-  HeartEmoteStagger = 16        ## ticks between emotes of the same cycle
   HeartEmoteRise = 26           ## px an emote rises over its life
-  HeartEmoteCount = [1, 2, 3]   ## emotes per cycle, by connection tier
+  HeartEmoteSlots = 4           ## concurrent emotes per gnome, newest first
   ConversationRingSpriteBase = 8900
   ConversationRingObjectBase = 26_000
   ConversationRingZ = 55
@@ -520,7 +517,8 @@ type
       ## dinner rows), so the live Connection scores come from the
       ## same pure fold a replay of this game will run.
     heartEmoteBases: array[3, RgbaSprite]
-      ## The emote sprites: neutral, smile, star-eyes, by tier.
+      ## The emote sprites: the pixel faces - neutral, smile, laugh -
+      ## by bond tier.
     heartEmoteFaded: Table[int, RgbaSprite]
       ## Alpha-faded emote variants, cached by tier * 4 + fade.
     directorCamX, directorCamY, directorCamW, directorCamH: float
@@ -1007,7 +1005,7 @@ proc loadFoodSprites(path: string): FoodSprites =
   )
 
 proc loadEmoteSprite(path: string): RgbaSprite =
-  ## Loads one emoji emote PNG (rasterized system emoji) into a sprite.
+  ## Loads one pixel-face emote PNG into a sprite.
   let image = readImage(path)
   result = newRgbaSprite(image.width, image.height)
   for y in 0 ..< image.height:
@@ -2887,13 +2885,12 @@ proc heartNoise(a, b, c: int): float =
   float((h and 1023) - 512) / 512.0
 
 proc heartLinkTier(links: int): int =
-  ## Maps one pair's conversation history to an emote tier: a neutral
-  ## face for a fresh acquaintance, a smile for a friend, star-eyes
-  ## for a strong bond.
+  ## Maps one pair's conversation history to a mood tier for the
+  ## director-card text: acquaintance, friend, strong bond.
   clamp((links - 1) div 4, 0, 2)
 
 proc heartEmoteSprite(sim: SimServer, tier, fade: int): RgbaSprite =
-  ## The tier's emoji emote, alpha-faded for one life stage; cached.
+  ## The tier's pixel face, alpha-faded for one life stage; cached.
   let key = clamp(tier, 0, 2) * 4 + clamp(fade, 0, 3)
   if key in sim.heartEmoteFaded:
     return sim.heartEmoteFaded[key]
@@ -2919,20 +2916,26 @@ proc addHeartEmoteObjects(
   viewportWidth,
   viewportHeight: int
 ) =
-  ## Appends Sims-style emote emojis: each gnome standing near a
-  ## connected partner sends its own emoji drifting up from its head
-  ## and fading. The connection tier picks the face - a plain smile for
-  ## a fresh acquaintance up to heart-eyes for the strongest bonds -
-  ## and how many rise per cycle. In replays the strengths come from a
-  ## pure fold of the conversation records inside the replay file, so
-  ## the animation is identical everywhere.
-  let pairs =
+  ## Appends the event-driven emotes: exactly when one of the six
+  ## Connection events lands for a pair, a pixel face rises over both
+  ## members and fades out. The face is the pair's current bond tier
+  ## from c - the straight-mouthed neutral below 1/3, the classic
+  ## smiley below 2/3, the open-mouthed laugh above - so the ladder
+  ## communicates the bond while the moment communicates the event; a
+  ## negative event shows the same face through the deep alpha-fade
+  ## stages, a dimmed ghost of it. The bursts come out of the same
+  ## pure fold as c, so live play and a scrubbed replay fire the same
+  ## faces at the same recorded ticks.
+  let bursts =
     if sim.conversationTimeline.events.len > 0:
-      sim.conversationTimeline.heartLinksAt(sim.tickCount)
+      sim.conversationTimeline.connectionBurstsAt(
+        sim.tickCount, HeartEmoteLife)
     else:
-      sim.heartLinks
-  if pairs.len == 0:
+      foldConnectionBursts(
+        sim.connectionEvents, sim.tickCount, HeartEmoteLife)
+  if bursts.len == 0:
     return
+  let pairs = sim.connectionPairsNow()
   var byHouse: array[HouseCount, int]
   for h in 0 ..< HouseCount:
     byHouse[h] = -1
@@ -2940,52 +2943,37 @@ proc addHeartEmoteObjects(
     let house = player.homeFlag - HomeMapIndexBase
     if house >= 0 and house < HouseCount:
       byHouse[house] = i
-  var bestTier: array[HouseCount, int]
-  for h in 0 ..< HouseCount:
-    bestTier[h] = -1
-  for pair in pairs:
-    if pair.links <= 0:
-      continue
-    if pair.a < 0 or pair.a >= HouseCount or
-        pair.b < 0 or pair.b >= HouseCount:
-      continue
-    if byHouse[pair.a] < 0 or byHouse[pair.b] < 0:
-      continue
+  var slotUsed: array[HouseCount, int]
+  for bi in countdown(bursts.high, 0):
+    # Newest bursts claim the slots first.
     let
-      a = sim.players[byHouse[pair.a]]
-      b = sim.players[byHouse[pair.b]]
-    if a.mapIndex != mapIndex or b.mapIndex != mapIndex:
+      burst = bursts[bi]
+      tier = connectionTier(pairs.pairConnection(burst.a, burst.b))
+      age = sim.tickCount - burst.tick
+    if age < 0 or age >= HeartEmoteLife:
       continue
-    let
-      dxi = b.x - a.x
-      dyi = b.y - a.y
-    if dxi * dxi + dyi * dyi > HeartLinkMaxDistance * HeartLinkMaxDistance:
-      continue
-    let tier = heartLinkTier(pair.links)
-    bestTier[pair.a] = max(bestTier[pair.a], tier)
-    bestTier[pair.b] = max(bestTier[pair.b], tier)
-  for house in 0 ..< HouseCount:
-    if bestTier[house] < 0 or byHouse[house] < 0:
-      continue
-    let
-      player = sim.players[byHouse[house]]
-      tier = bestTier[house]
-    for k in 0 ..< HeartEmoteCount[tier]:
-      let
-        age = (sim.tickCount + house * 13 + k * HeartEmoteStagger) mod
-          HeartEmotePeriod
-      if age >= HeartEmoteLife:
+    for house in [burst.a, burst.b]:
+      if house < 0 or house >= HouseCount or byHouse[house] < 0:
         continue
+      let player = sim.players[byHouse[house]]
+      if player.mapIndex != mapIndex:
+        continue
+      if slotUsed[house] >= HeartEmoteSlots:
+        continue
+      let k = slotUsed[house]
+      inc slotUsed[house]
       let
         progress = age.float / HeartEmoteLife.float
-        fade = clamp(int(progress * 4.0), 0, 3)
-        cycle = (sim.tickCount + house * 13 + k * HeartEmoteStagger) div
-          HeartEmotePeriod
-        sway = heartNoise(house, k, cycle) * 5.0
+        fade =
+          if burst.positive:
+            clamp(int(progress * 4.0), 0, 3)
+          else:
+            clamp(2 + int(progress * 2.0), 2, 3)
+        sway = heartNoise(house, burst.a * 31 + burst.b, burst.tick) * 5.0
         sprite = sim.heartEmoteSprite(tier, fade)
         spriteId = HeartSpriteBase + clamp(tier, 0, 2) * 4 + fade
         ex = player.x + GnomeSpriteSize div 2 - sprite.width div 2 +
-          int(sway)
+          int(sway) + [0, -12, 12, -24][k]
         ey = player.y - 10 - int(progress * HeartEmoteRise.float)
         screenX = ex - cameraX
         screenY = ey - cameraY
@@ -3005,7 +2993,7 @@ proc addHeartEmoteObjects(
         "heart emote t" & $tier & " f" & $fade
       )
       packet.addObject(
-        HeartObjectBase + house * 4 + k,
+        HeartObjectBase + house * HeartEmoteSlots + k,
         screenX,
         screenY,
         HeartLinkZ,
@@ -3030,9 +3018,10 @@ proc addPlayerObjects(
     packet.addConversationCircles(
       sim, cameraX, cameraY, viewportWidth, viewportHeight
     )
-    packet.addHeartEmoteObjects(
-      sim, cache, mapIndex, cameraX, cameraY, viewportWidth, viewportHeight
-    )
+  # Emotes on every map: the dinner events land inside the houses.
+  packet.addHeartEmoteObjects(
+    sim, cache, mapIndex, cameraX, cameraY, viewportWidth, viewportHeight
+  )
   var bubbleRects: seq[tuple[x, y, w, h: int]]
   for i, player in sim.players:
     if player.mapIndex != mapIndex:

@@ -1879,4 +1879,33 @@ block:
   doAssert timeline.conversationSpans(500).len == 1,
     "dinner rows open no conversation spans"
 
+  # The emote bursts: each event landing, per pair, at its recorded
+  # tick, out of the same fold - so replay emotes are scrub-safe.
+  doAssert timeline.connectionBurstsAt(150, 44) ==
+    @[(a: 0, b: 1, tick: 140, positive: true)],
+    "the exchange bursts once, at its recorded tick, positive"
+  doAssert timeline.connectionBurstsAt(200, 44) ==
+    @[(a: 0, b: 1, tick: 170, positive: false)],
+    "the silent slot bursts negative and the old burst has aged out"
+  let dinnerBursts = timeline.connectionBurstsAt(310, 20)
+  doAssert dinnerBursts == @[
+    (a: 0, b: 1, tick: 300, positive: true),
+    (a: 1, b: 2, tick: 300, positive: true),
+    (a: 0, b: 2, tick: 300, positive: true)
+  ], "one served dinner bursts every pair at the table once"
+  doAssert timeline.connectionBurstsAt(410, 20) ==
+    @[(a: 0, b: 1, tick: 400, positive: false)],
+    "the empty table bursts negative"
+  doAssert timeline.connectionBurstsAt(310, 20) == dinnerBursts,
+    "scrubbing back reproduces the same bursts"
+
+echo "Testing the emote bond tiers"
+block:
+  doAssert connectionTier(0.0) == 0, "strangers wear the neutral face"
+  doAssert connectionTier(0.32) == 0
+  doAssert connectionTier(1.0 / 3.0) == 1, "a third of the way smiles"
+  doAssert connectionTier(0.5) == 1
+  doAssert connectionTier(2.0 / 3.0) == 2, "two thirds up laughs"
+  doAssert connectionTier(1.0) == 2
+
 echo "All tests passed"
