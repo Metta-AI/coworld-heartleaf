@@ -7581,7 +7581,13 @@ when not defined(emscripten):
             ticksThisFrame = 0
           # While a viewer speaks the current line aloud, the show
           # waits: no ticks, so the next card pops when the voice ends.
-          if voiceHolding:
+          # Between queue commitments the hold does not pace ticks: the
+          # fast-forward must reach the next birth even while a stale
+          # line from the played-out conversation is still being
+          # spoken, or the ticks the next commitment's huddle needs
+          # would starve behind one slow clip.
+          if voiceHolding and
+              not (sim.convQueue.len > 0 and not sim.convQueueCommitted):
             ticksThisFrame = 0
           for _ in 0 ..< ticksThisFrame:
             if replay.playing:
