@@ -32,6 +32,14 @@ type
   ConversationGroup* = object
     id*: int
     members*: seq[int]
+  ConversationSpan* = object
+    ## One conversation's whole life, for queue playback: born at its
+    ## first enter event, dead when its membership falls below two.
+    id*: int
+    birthTick*: int
+    deathTick*: int
+    members*: seq[int]
+      ## Every house seat that was ever in the conversation.
   ConversationAnchor* = object
     x*: int
     y*: int
@@ -292,6 +300,69 @@ proc encounterMembersAt*(
   ## Member seats of every conversation that is open at this tick.
   for group in timeline.encounterGroupsAt(tick):
     result.add(group.members)
+
+proc conversationSpans*(
+  timeline: ConversationTimeline,
+  finalTick: int
+): seq[ConversationSpan] =
+  ## Every conversation's birth and death from the records, in birth
+  ## order: the events are chronological, so first-enter order keeps
+  ## same-tick births together in a stable order. A conversation that
+  ## never dissolves dies at finalTick, the recording's end. Groups
+  ## that never seated two gnomes are dropped.
+  var
+    spanAt: Table[int, int]
+      ## encounter id -> index into the accumulating span list.
+    live: Table[int, seq[int]]
+      ## Current members of each conversation that is still open.
+  for event in timeline.events:
+    if event.spokenTurn:
+      continue
+    if event.enter:
+      if event.encounterId in spanAt:
+        if event.encounterId notin live:
+          continue  # a dead id never comes back to life
+        var members = live[event.encounterId]
+        if event.members.len > 0:
+          for seat in event.members:
+            members.addUniqueSeat(seat)
+        else:
+          members.addUniqueSeat(event.seat)
+        live[event.encounterId] = members
+        for seat in members:
+          result[spanAt[event.encounterId]].members.addUniqueSeat(seat)
+      else:
+        var span = ConversationSpan(
+          id: event.encounterId,
+          birthTick: event.tick,
+          deathTick: finalTick
+        )
+        if event.members.len > 0:
+          for seat in event.members:
+            span.members.addUniqueSeat(seat)
+        else:
+          span.members.addUniqueSeat(event.seat)
+        spanAt[event.encounterId] = result.len
+        live[event.encounterId] = span.members
+        result.add(span)
+    else:
+      if event.encounterId notin live:
+        continue
+      var next: seq[int]
+      for member in live[event.encounterId]:
+        if member != event.seat:
+          next.add(member)
+      if next.len >= 2:
+        live[event.encounterId] = next
+      else:
+        result[spanAt[event.encounterId]].deathTick =
+          min(event.tick, finalTick)
+        live.del(event.encounterId)
+  var kept: seq[ConversationSpan]
+  for span in result:
+    if span.members.len >= 2 and span.deathTick > span.birthTick:
+      kept.add(span)
+  result = kept
 
 proc placeConversationAnchor*(
   huddle: seq[Point],
