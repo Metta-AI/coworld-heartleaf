@@ -543,6 +543,10 @@ type
       ## Frames left of the hop a gnome does when its new line lands.
     directorLastMessages: seq[string]
       ## The last spoken line seen per player, to spot new ones.
+    directorShowAccum: int
+      ## Show-pacing frame accumulator: at 1X with the camera on a
+      ## conversation the replay advances one tick per
+      ## DirectorShowFrames frames. Viewer-only, never hashed.
     inferredHuddles: Table[int, tuple[x, y, ttl: int]]
       ## Fallback conversation rings inferred from replay state when no
       ## game.log rides next to the replay (an http replay URI), keyed
@@ -595,9 +599,10 @@ type
 
   PlayerViewerState* = ref object
     initialized: bool
-    directorMode: bool
+    directorMode*: bool
       ## A /director viewer: the automated camera picks the shot;
-      ## player and house selection are ignored.
+      ## player and house selection are ignored. Exported so the
+      ## standalone wasm viewer can opt its single local viewer in.
     selectedPlayerIndex: int
     selectedHouseNumber: int  ## 0 = none, 1..HouseCount = house interior view
     pendingMapClick: bool
@@ -2804,11 +2809,16 @@ proc cliLoadReplayPath(): string =
 
 proc heartNoise(a, b, c: int): float =
   ## Deterministic hash noise in -1.0 .. 1.0, stable across replays.
-  var h = a * 73856093 xor b * 19349663 xor c * 83492791
+  ## Wrapping uint32 math end to end: the same bits on 64-bit native
+  ## and 32-bit wasm, where the signed multiplies used to overflow
+  ## once the emote cycle counter grew past a few dozen.
+  var h = uint32(a) * 73856093'u32 xor
+    uint32(b) * 19349663'u32 xor
+    uint32(c) * 83492791'u32
   h = h xor (h shr 13)
-  h = h *% 1274126177
+  h = h * 1274126177'u32
   h = h xor (h shr 16)
-  float((h and 1023) - 512) / 512.0
+  float(int(h and 1023) - 512) / 512.0
 
 proc heartLinkTier(links: int): int =
   ## Maps one pair's conversation history to an emote tier: a neutral
@@ -5753,6 +5763,70 @@ proc applyReplayCommand*(
   else:
     discard
 
+proc queueReplayCommand*(state: PlayerViewerState, command: char) =
+  ## Queues one transport command as if the viewer had clicked it,
+  ## for hosts whose client cannot deliver keystrokes (the standalone
+  ## wasm viewer polls the browser's keydown queue directly).
+  state.replayCommands.add(command)
+
+proc advanceReplayShow*(
+  sim: SimServer,
+  replay: var ReplayPlayer,
+  directorWatching: bool
+) =
+  ## Advances playback one frame, shared by the websocket replay
+  ## server loop and the standalone viewer: conversation-queue
+  ## bookkeeping, show pacing under a director, the between-
+  ## conversations fast-forward with its boundary clamps, the camera
+  ## tween hold, and the loop restart.
+  if not replay.playing:
+    return
+  # Queue-mode bookkeeping: commit at births, release at deaths,
+  # rewind through same-tick birth groups, resume from the furthest
+  # tick shown.
+  sim.stepConversationQueue(replay)
+  # With a director watching, a conversation on screen slows 1X
+  # playback to show pacing: recorded lines land about five seconds
+  # apart. Other speeds respect the transport.
+  let showPacing = directorWatching and
+    (sim.directorFocusActive or sim.directorDinnerTtl > 0) and
+    replay.replaySpeedIndex() == DefaultSpeedIndex
+  var ticksThisFrame = 0
+  if showPacing:
+    inc sim.directorShowAccum
+    if sim.directorShowAccum >= DirectorShowFrames:
+      sim.directorShowAccum = 0
+      ticksThisFrame = 1
+  else:
+    sim.directorShowAccum = 0
+    ticksThisFrame = replay.replayTicksThisFrame()
+  # Between conversations the queue's playhead fast-forwards briskly
+  # to the next birth; committed playback never runs past its item's
+  # death tick. The clamps land the playhead exactly on each boundary.
+  if sim.convQueue.len > 0:
+    if not sim.convQueueCommitted and
+        replay.replaySpeedIndex() == DefaultSpeedIndex:
+      ticksThisFrame = QueueFastForwardTicks
+    if sim.convQueueCommitted:
+      ticksThisFrame = min(ticksThisFrame, max(0,
+        sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount))
+    elif sim.convQueueIndex < sim.convQueue.len:
+      ticksThisFrame = min(ticksThisFrame, max(0,
+        sim.convQueue[sim.convQueueIndex].birthTick - sim.tickCount))
+  # A camera glide is a held breath: at show speed the replay pauses
+  # until the shot settles, so cuts never swallow lines.
+  if directorWatching and sim.directorTweenLeft > 0 and
+      replay.replaySpeedIndex() == DefaultSpeedIndex:
+    ticksThisFrame = 0
+  for _ in 0 ..< ticksThisFrame:
+    if replay.playing:
+      replay.stepReplay(sim)
+  if replay.looping and not replay.playing and
+      replay.replayMaxTick() > 0:
+    sim.restartConversationQueue()
+    replay.seekReplay(sim, 0)
+    replay.playing = true
+
 when not defined(emscripten):
   proc initAppState() =
     ## Initializes shared websocket state.
@@ -5961,14 +6035,10 @@ proc replayViewerFrame*(
       replay.applyReplaySeek(sim, seekTick)
     for command in commands:
       replay.applyReplayCommand(sim, command)
-    if replay.playing:
-      for _ in 0 ..< replay.replayTicksThisFrame():
-        if replay.playing:
-          replay.stepReplay(sim)
-      if replay.looping and not replay.playing and
-          replay.replayMaxTick() > 0:
-        replay.seekReplay(sim, 0)
-        replay.playing = true
+    sim.advanceReplayShow(
+      replay,
+      directorWatching = state != nil and state.directorMode
+    )
   if replay.circlesTimeline.len > 0:
     # The replay recorded its circles; they beat any re-derivation.
     sim.conversationCircles =
@@ -7117,7 +7187,6 @@ when not defined(emscripten):
     )
     httpServer.waitUntilReady()
     lastTick = getMonoTime()
-    var directorShowAccum = 0
 
     while true:
       var
@@ -7196,59 +7265,12 @@ when not defined(emscripten):
           replay.applyReplaySeek(sim, seekTick)
         for command in commands:
           replay.applyReplayCommand(sim, command)
-        if replay.playing:
-          # Queue-mode bookkeeping: commit at births, release at
-          # deaths, rewind through same-tick birth groups, resume
-          # from the furthest tick shown.
-          sim.stepConversationQueue(replay)
-          # With a director watching, a conversation on screen slows
-          # 1X playback to show pacing: recorded lines land about five
-          # seconds apart. Other speeds respect the transport.
-          var directorWatching = false
-          for state in viewerStates:
-            if state.directorMode:
-              directorWatching = true
-              break
-          let showPacing = directorWatching and
-            (sim.directorFocusActive or sim.directorDinnerTtl > 0) and
-            replay.replaySpeedIndex() == DefaultSpeedIndex
-          var ticksThisFrame = 0
-          if showPacing:
-            inc directorShowAccum
-            if directorShowAccum >= DirectorShowFrames:
-              directorShowAccum = 0
-              ticksThisFrame = 1
-          else:
-            directorShowAccum = 0
-            ticksThisFrame = replay.replayTicksThisFrame()
-          # Between conversations the queue's playhead fast-forwards
-          # briskly to the next birth; committed playback never runs
-          # past its item's death tick. The clamps land the playhead
-          # exactly on each boundary.
-          if sim.convQueue.len > 0:
-            if not sim.convQueueCommitted and
-                replay.replaySpeedIndex() == DefaultSpeedIndex:
-              ticksThisFrame = QueueFastForwardTicks
-            if sim.convQueueCommitted:
-              ticksThisFrame = min(ticksThisFrame, max(0,
-                sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount))
-            elif sim.convQueueIndex < sim.convQueue.len:
-              ticksThisFrame = min(ticksThisFrame, max(0,
-                sim.convQueue[sim.convQueueIndex].birthTick - sim.tickCount))
-          # A camera glide is a held breath: at show speed the replay
-          # pauses until the shot settles, so cuts never swallow lines.
-          if directorWatching and sim.directorTweenLeft > 0 and
-              replay.replaySpeedIndex() == DefaultSpeedIndex:
-            ticksThisFrame = 0
-
-          for _ in 0 ..< ticksThisFrame:
-            if replay.playing:
-              replay.stepReplay(sim)
-          if replay.looping and not replay.playing and
-              replay.replayMaxTick() > 0:
-            sim.restartConversationQueue()
-            replay.seekReplay(sim, 0)
-            replay.playing = true
+        var directorWatching = false
+        for state in viewerStates:
+          if state.directorMode:
+            directorWatching = true
+            break
+        sim.advanceReplayShow(replay, directorWatching)
       if replay.circlesTimeline.len > 0:
         # The replay recorded its circles; they beat any re-derivation.
         sim.conversationCircles =
