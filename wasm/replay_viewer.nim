@@ -10,7 +10,8 @@
 ##              Coworld hosts the same files as index.html?replay=
 ##
 ## Replays load three ways: a CLI path (native), a `?replay=` query
-## parameter fetched over HTTP, or a file dropped onto the window.
+## or `#replay=` fragment parameter fetched over HTTP, or a file
+## dropped onto the window.
 
 import
   std/[os, parseopt, uri],
@@ -34,6 +35,32 @@ type
     state: PlayerViewerState
     inputPackets: seq[string]
     loaded: bool
+    directorMode: bool
+      ## The director cut: automated camera, conversation queue,
+      ## cards, forest border. On by default; `director=0` in the
+      ## URL falls back to the plain wide view.
+
+when defined(emscripten):
+  {.emit: """
+#include <emscripten.h>
+
+EM_JS(int, heartleaf_pop_key, (), {
+  if (!window._heartleafKeys) {
+    window._heartleafKeys = [];
+    window.addEventListener('keydown', function(e) {
+      if (e.key && e.key.length == 1 &&
+          !e.ctrlKey && !e.metaKey && !e.altKey) {
+        window._heartleafKeys.push(e.key.charCodeAt(0));
+        if (window._heartleafKeys.length > 32) {
+          window._heartleafKeys.shift();
+        }
+      }
+    });
+  }
+  return window._heartleafKeys.length ? window._heartleafKeys.shift() : 0;
+});
+""".}
+  proc heartleaf_pop_key(): cint {.importc, nodecl.}
 
 proc addInputPacket(viewer: ReplayViewer, packet: string) =
   ## Queues one local sprite protocol client packet.
@@ -77,7 +104,9 @@ proc loadReplayBytes(viewer: ReplayViewer, name, bytes: string) =
     viewer.sim.attachConversationTimeline(data, name)
     viewer.replay = initReplayPlayer(data)
     viewer.replay.buildReplayKeyframes(config.seed, config.dayTicks)
+    viewer.sim.buildConversationQueue(viewer.replay.replayMaxTick())
     viewer.state = newReplayViewerState()
+    viewer.state.directorMode = viewer.directorMode
     viewer.inputPackets.setLen(0)
     viewer.loaded = true
     viewer.app.resetProtocolState()
@@ -96,12 +125,26 @@ proc loadReplayPath(viewer: ReplayViewer, path: string) =
   except CatchableError as e:
     viewer.app.setStatus("Could not read replay: " & e.msg)
 
-proc replayUrl(windowUrl: string): string =
-  ## Returns the replay query parameter from one URL.
+proc urlParam(windowUrl, name: string): string =
+  ## Returns one parameter from a URL. Both the query string and the
+  ## fragment are honored, the fragment winning: the observatory
+  ## loads the bundle as `index.html?v=2#replay=<urlencoded URL>`.
   let parsed = parseUri(windowUrl)
   for key, value in decodeQuery(parsed.query):
-    if key == "replay":
-      return value
+    if key == name:
+      result = value
+  for key, value in decodeQuery(parsed.anchor):
+    if key == name:
+      result = value
+
+proc replayUrl(windowUrl: string): string =
+  ## Returns the replay parameter from one URL.
+  urlParam(windowUrl, "replay")
+
+proc directorEnabled(windowUrl: string): bool =
+  ## The director cut is the default; `director=0` (or false/off)
+  ## keeps the plain wide view.
+  urlParam(windowUrl, "director") notin ["0", "false", "off"]
 
 proc downloadReplay(viewer: ReplayViewer, url: string) =
   ## Downloads a replay file and loads it when the response arrives.
@@ -134,9 +177,24 @@ proc drainInput(viewer: ReplayViewer) =
     viewer.state.handleReplayViewerPacket(packet)
   viewer.inputPackets.setLen(0)
 
+proc pollBrowserKeys(viewer: ReplayViewer) =
+  ## Feeds browser keydown characters into the replay transport: the
+  ## client library only forwards keystrokes in player mode, so the
+  ## viewer polls its own keydown queue ('n'/'N' step conversations,
+  ## space toggles play, and so on).
+  when defined(emscripten):
+    for _ in 0 ..< 8:
+      let key = heartleaf_pop_key()
+      if key <= 0:
+        break
+      let ch = char(key)
+      if ch >= ' ' and ch <= '~':
+        viewer.state.queueReplayCommand(ch)
+
 proc tick(viewer: ReplayViewer) =
   ## Pumps one replay viewer frame.
   viewer.app.handleInput()
+  viewer.pollBrowserKeys()
   viewer.drainInput()
   let packet = replayViewerFrame(
     viewer.sim,
@@ -167,6 +225,8 @@ proc runReplayViewer*() =
   when not defined(emscripten):
     var lastTick = getMonoTime()
   viewer.installFileDrop()
+  viewer.directorMode = directorEnabled(viewer.app.windowUrl())
+  viewer.state.directorMode = viewer.directorMode
   viewer.loadReplayPath(parseReplayPathArg())
   viewer.downloadReplay(replayUrl(viewer.app.windowUrl()))
   while viewer.app.windowOpen:
