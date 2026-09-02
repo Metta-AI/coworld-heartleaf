@@ -6221,6 +6221,20 @@ when not defined(emscripten):
 })();</script>
 """
 
+  proc respondDirectorPage(request: Request) =
+    ## Serves the shared global client as a director page: the stock
+    ## viewer body with the fit snippet appended, so the automated
+    ## camera's wide shots stay centered after any gesture.
+    var page = bitworldClient.clientStaticBody(
+      bitworldClient.GlobalClientRoute,
+      bitworldClient.GlobalClientRoute
+    )
+    page = page.replace("</body>", DirectorFitSnippet & "</body>")
+    var headers: HttpHeaders
+    headers["Content-Type"] = "text/html"
+    headers["Cache-Control"] = "no-cache"
+    request.respond(200, headers, page)
+
   proc httpHandler(request: Request) =
     ## Handles Heartleaf HTTP and websocket routes.
     if request.serveHealthz():
@@ -6239,18 +6253,7 @@ when not defined(emscripten):
           not request.checkReplayRequest():
         return
       if request.path != GlobalWebSocketPath:
-        # Director pages (the root and the /director alias) keep the
-        # stock viewer auto-fitted: the fit snippet re-arms the fit
-        # after every gesture so the wide shot stays centered.
-        var page = bitworldClient.clientStaticBody(
-          bitworldClient.GlobalClientRoute,
-          bitworldClient.GlobalClientRoute
-        )
-        page = page.replace("</body>", DirectorFitSnippet & "</body>")
-        var headers: HttpHeaders
-        headers["Content-Type"] = "text/html"
-        headers["Cache-Control"] = "no-cache"
-        request.respond(200, headers, page)
+        request.respondDirectorPage()
       else:
         discard bitworldClient.serveClientFile(
           request,
@@ -6261,11 +6264,9 @@ when not defined(emscripten):
         not request.isWebSocketUpgrade():
       if not request.checkReplayRequest():
         return
-      discard bitworldClient.serveClientFile(
-        request,
-        bitworldClient.ReplayClientRoute,
-        bitworldClient.GlobalClientRoute
-      )
+      # Replay viewers are director watchers now, so the /replay page
+      # is the director page too; /client/global keeps the plain view.
+      request.respondDirectorPage()
     elif request.path == WebSocketPath and request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
       let
@@ -6304,8 +6305,18 @@ when not defined(emscripten):
             selectedPlayerIndex: -1,
             directorMode: request.path != GlobalWebSocketPath
           )
-    elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
+    elif request.path in [
+        ReplayWebSocketPath,
+        bitworldClient.ReplayClientRoute,
+        bitworldClient.CoworldReplayClientRoute
+      ] and request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
+      # Replay watchers get the director cut: the automated camera,
+      # the conversation cards, and the queue playback. The Coworld
+      # replay client page has no websocket mapping of its own, so it
+      # connects back to its own path - accept that upgrade here too.
+      # Transport commands still drain for director viewers, so
+      # tools/replay_cmd.nim keeps working on the raw /replay path.
       if not request.checkReplayRequest():
         return
       let websocket = request.upgradeToWebSocket()
@@ -6317,7 +6328,8 @@ when not defined(emscripten):
               appState.replayRestartPending = true
             appState.replayViewerJoined = true
           appState.replayViewers[websocket] = PlayerViewerState(
-            selectedPlayerIndex: -1
+            selectedPlayerIndex: -1,
+            directorMode: true
           )
     elif request.path in [
         bitworldClient.ReplayClientRoute,
@@ -6325,11 +6337,10 @@ when not defined(emscripten):
       ] and request.httpMethod == "GET":
       if not request.checkReplayRequest():
         return
-      discard bitworldClient.serveClientFile(
-        request,
-        request.path,
-        bitworldClient.GlobalClientRoute
-      )
+      # Hosted replays get the director cut too: the observatory loads
+      # this route, and its websocket (the page's own path, upgraded
+      # above) is flagged as a director watcher with the ?uri= applied.
+      request.respondDirectorPage()
     elif bitworldClient.serveClientRoute(
       request,
       bitworldClient.GlobalClientRoute
