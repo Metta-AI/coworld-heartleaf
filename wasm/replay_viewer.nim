@@ -10,7 +10,8 @@
 ##              Coworld hosts the same files as index.html?replay=
 ##
 ## Replays load three ways: a CLI path (native), a `?replay=` query
-## parameter fetched over HTTP, or a file dropped onto the window.
+## or `#replay=` fragment parameter fetched over HTTP, or a file
+## dropped onto the window.
 
 import
   std/[os, parseopt, uri],
@@ -97,11 +98,17 @@ proc loadReplayPath(viewer: ReplayViewer, path: string) =
     viewer.app.setStatus("Could not read replay: " & e.msg)
 
 proc replayUrl(windowUrl: string): string =
-  ## Returns the replay query parameter from one URL.
+  ## Returns the replay parameter from one URL. Both the query string
+  ## (`?replay=`) and the fragment (`#replay=`) are honored, the
+  ## fragment winning: the observatory loads the bundle as
+  ## `index.html?v=2#replay=<urlencoded replay URL>`.
   let parsed = parseUri(windowUrl)
   for key, value in decodeQuery(parsed.query):
     if key == "replay":
-      return value
+      result = value
+  for key, value in decodeQuery(parsed.anchor):
+    if key == "replay":
+      result = value
 
 proc downloadReplay(viewer: ReplayViewer, url: string) =
   ## Downloads a replay file and loads it when the response arrives.

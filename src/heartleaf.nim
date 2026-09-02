@@ -828,7 +828,9 @@ proc foldIntoBand(distance, band: int): int =
 proc forestJitter(x, y: int): (int, int) =
   ## A tiny deterministic per-pixel offset that decorrelates mirrored
   ## copies of the edge band so they read as forest, not ripples.
-  let hash = uint32(x * 73_856_093) xor uint32(y * 19_349_663)
+  # The multiplies wrap in uint32 so the hash is identical on 64-bit
+  # native and 32-bit wasm; in signed int math they overflow wasm32.
+  let hash = (uint32(x) * 73_856_093'u32) xor (uint32(y) * 19_349_663'u32)
   (int((hash shr 8) mod 7) - 3, int((hash shr 16) mod 7) - 3)
 
 proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite =
