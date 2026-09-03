@@ -39,7 +39,6 @@ type
     state: PlayerViewerState
     inputPackets: seq[string]
     loaded: bool
-    loadedFrames: int
     readyPosted: bool
 
 when defined(emscripten):
@@ -50,7 +49,11 @@ EM_JS(void, heartleaf_post_host_message, (char* json), {
   if (window.parent === window) return;
   var message = JSON.parse(UTF8ToString(json));
   message.src = "coworld-replay";
-  window.parent.postMessage(message, "*");
+  if (message.type === "ready") {
+    setTimeout(function() { window.parent.postMessage(message, "*"); }, 0);
+  } else {
+    window.parent.postMessage(message, "*");
+  }
 });
 """.}
   proc heartleaf_post_host_message(json: cstring) {.importc.}
@@ -154,9 +157,12 @@ proc downloadReplay(viewer: ReplayViewer, url: string) =
       })
       return
     let body = response.body
-    # Sniff gzip (1f 8b) / zlib (78) by content; the replay codec inflates.
+    # Sniff gzip / zlib by content; the replay codec inflates.
     let compressed = body.len >= 2 and
-      ((body[0] == '\x1f' and body[1] == '\x8b') or body[0] == '\x78')
+      ((body[0] == '\x1f' and body[1] == '\x8b') or
+        ((ord(body[0]) and 0x0f) == 8 and
+          (ord(body[0]) shr 4) <= 7 and
+          (((ord(body[0]) shl 8) or ord(body[1])) mod 31) == 0))
     tellHost(%*{
       "type": "phase",
       "phase": "replay_fetch_end",
@@ -193,11 +199,9 @@ proc tick(viewer: ReplayViewer) =
   viewer.app.maybeFit()
   viewer.app.draw()
   if viewer.loaded and not viewer.readyPosted:
-    # `ready` goes out one frame after the first loaded frame is drawn.
-    inc viewer.loadedFrames
-    if viewer.loadedFrames == 2:
-      viewer.readyPosted = true
-      tellHost(%*{"type": "ready"})
+    # The browser helper yields once so the first draw can be composited.
+    viewer.readyPosted = true
+    tellHost(%*{"type": "ready"})
 
 proc parseReplayPathArg(): string =
   ## Returns the replay path from the command line, if any.
