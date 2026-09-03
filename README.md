@@ -173,7 +173,9 @@ cd ../bitworld && nim r tools/quick_run.nim ../coworld-heartleaf \
   `players/*_villager/` are example souls.
 - BitWorld is used as a Nimble dependency for shared sprite protocol helpers.
 - `data/` contains map, sprite, font, and Figma resource data.
-- `tests/tests.nim` contains smoke checks (`nim r tests/tests.nim`).
+- `tests/tests.nim` contains smoke checks (`nim r tests/tests.nim`);
+  `tests/routes.nim` pins the viewer front door against a real replay
+  server (`nim c src/heartleaf.nim`, then `nim r tests/routes.nim`).
 
 ## License
 

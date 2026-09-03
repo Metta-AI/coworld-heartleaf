@@ -238,7 +238,7 @@ const
     ## Depth of the map-edge band the forest border is built from. Only
     ## the outermost band is sampled, so houses and lawns deeper in the
     ## map are never reflected into the forest.
-  ForestSpriteBase = 30
+  ForestSpriteBase* = 30
     ## Sprite id of the forest underlay, after the home overhang
     ## tints (25..29). The underlay ships once, in daylight colors;
     ## dusk is a veil drawn over it, not five tinted copies.
@@ -262,7 +262,7 @@ const
     ## and the alpha with the lowest error wins. Early dusk leans warm
     ## sunset red, late dusk deep blue-teal, and the fit keeps the
     ## tree texture readable instead of flattening it.
-  ForestObjectId = 3
+  ForestObjectId* = 3
     ## Map-layer object id for the forest underlay, after the bottom
     ## (1) and overhang (2) objects.
   ForestVeilObjectBase = 4
