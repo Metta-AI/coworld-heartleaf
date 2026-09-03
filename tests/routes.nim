@@ -1,9 +1,8 @@
 ## Route-level checks of the viewer front door against a real replay
 ## server: the routes the Softmax platform opens (`/client/global` for
 ## live spectating, `/client/replay` for hosted replays) and the local
-## root all serve the director page, the `/global` and `/replay`
-## websockets stream the director cut, and the explicit `/plain` opt-in
-## keeps the stock hand-panned view on both the page and its socket.
+## root all serve the director page, and every viewer websocket streams
+## the director cut. There is one view; the `/plain` opt-in is gone.
 ##
 ## Runs the server binary named by HEARTLEAF_SERVER (default out/heartleaf,
 ## built with `nim c src/heartleaf.nim`) from the repository root.
@@ -26,9 +25,8 @@ const
     "/client/global", "/clients/global",
     "/client/replay", "/clients/replay", "/replay"
   ]
-  PlainPages = ["/plain", "/client/plain"]
+  RemovedPlainPages = ["/plain", "/client/plain"]
   DirectorSockets = ["/global", "/replay", "/clients/global", "/director"]
-  PlainSockets = ["/plain", "/client/plain"]
   FixtureSeed = 4242
   FixtureTicks = 120
 
@@ -138,24 +136,24 @@ proc main() =
     doAssert StockPageMarker in body, path & " should serve the viewer page"
     doAssert DirectorMarker in body, path & " should carry the fit snippet"
 
-  echo "Testing the plain opt-in stays plain"
-  for path in PlainPages:
+  echo "Testing the removed plain routes no longer serve a viewer"
+  # The plain view is gone, so these are just unknown paths now. The
+  # server has no 404 branch: unknown paths fall through to its
+  # catch-all, which answers 200 with a plain-text banner. What this
+  # pins is that neither path serves a viewer page any more.
+  for path in RemovedPlainPages:
     let (status, body) = fetch(path)
     doAssert status == 200, path & " should answer 200, got " & $status
-    doAssert StockPageMarker in body, path & " should serve the viewer page"
-    doAssert DirectorMarker notin body, path & " must not carry the snippet"
+    doAssert StockPageMarker notin body,
+      path & " must no longer serve the viewer page"
+    doAssert DirectorMarker notin body,
+      path & " must no longer serve the director page"
 
-  echo "Testing the director websockets stream the director cut"
+  echo "Testing the viewer websockets stream the director cut"
   for path in DirectorSockets:
     let seen = watch(path, 5.0, stopOnForest = true)
     doAssert seen.frames > 0, path & " should stream at least one frame"
     doAssert seen.forest, path & " should place the forest underlay"
-
-  echo "Testing the plain websockets stay plain"
-  for path in PlainSockets:
-    let seen = watch(path, 1.5, stopOnForest = false)
-    doAssert seen.frames > 0, path & " should stream at least one frame"
-    doAssert not seen.forest, path & " must not place the forest underlay"
 
   echo "Route tests passed"
 

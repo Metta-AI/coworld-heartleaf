@@ -98,10 +98,9 @@ To run the pieces by hand:
 nim r src/heartleaf.nim
 ```
 
-Then open `http://localhost:8080/`. The root, `/client/global`, and
-`/client/replay` all serve the director cut, which is what the hosted
-platform opens; `/plain` (or `/client/plain`) is the explicit opt-in for
-the plain hand-panned view when debugging.
+Then open `http://localhost:8080/`. There is one view: the root,
+`/director`, `/global`, `/client/global`, `/client/replay` and `/replay`
+all serve the director cut, which is what the hosted platform opens.
 
 With no `tokens` configured the village starts at once and a gnome appears
 whenever a soul arrives. Without Bedrock credentials, give the game a mock
@@ -127,18 +126,28 @@ Bedrock from the platform automatically.
 
 ### Developing
 
-From a clean machine, clone the repository and sync the lock:
+From a clean machine, clone the repository and sync the lock into a
+workspace in the parent directory:
 
 ```sh
 git clone <this repository>
-cd heartleaf-conversations
-nimby sync nimby.lock -g
+cd <parent of the checkout>
+nimby create
+nimby sync heartleaf-conversations/nimby.lock
 ```
 
-`nimby sync` installs the lock's pinned packages and writes `nim.cfg`
-so the compiler finds them; plain `nimby install` does neither. Then the
-run commands above work as written. If a sync is aborted partway, nimby
-can leave a stale lock behind — `rmdir ~/.nimby/nimbylock` clears it.
+Nimby 0.2 refuses to create a workspace inside a git checkout, and Nim
+finds `nim.cfg` by walking up from the file it compiles, so the
+workspace has to be the parent directory: the pinned packages land
+beside the repository and the compiler finds them from inside it.
+`nimby sync` installs the lock's pinned packages; plain `nimby install`
+does not. Then the run commands above work as written. If a sync is
+aborted partway, nimby can leave a stale lock behind — `rmdir
+~/.nimby/nimbylock` clears it.
+
+CI does the same thing: `treeform/setup-nim-action@v6` puts Nim and
+nimby on PATH, then each job runs `nimby create` and `nimby sync` in the
+parent of the checkout.
 
 ## Build A Soul
 
