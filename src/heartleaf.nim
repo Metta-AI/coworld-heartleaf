@@ -200,6 +200,11 @@ const
     ## Extra viewport width on each side of the director's crop. The
     ## conversation cards live in these margins, outside the map.
   DirectorCardWidth = 158
+  DirectorFrameAspectNum = 16
+  DirectorFrameAspectDen = 9
+    ## The frame shape tall director shots widen toward, over the
+    ## backdrop, until the page reports its real window shape, so a
+    ## wide window shows forest instead of black bars.
   DirectorCardPad = 5
   DirectorCardGapY = 6
   DirectorCardPortraitSize = 36
@@ -230,6 +235,11 @@ const
   OverlayScoreColumns = 3
   OverlayScoreCellWidth = 104
   OverlayScoreCellHeight = 54
+  BackdropSpriteId = 30
+    ## The forest backdrop PNG drawn behind the main map in the
+    ## director view.
+  BackdropObjectId = 3
+    ## Map-layer object id for the backdrop, before the map bottom.
   BottomSpriteId = 1
   OverhangSpriteId = 2
   HomeBottomSpriteId = 4
@@ -375,6 +385,8 @@ type
   WorldMap = ref object
     width, height: int
     bottomSprite: RgbaSprite
+    backdropSprite: RgbaSprite
+      ## The forest PNG drawn behind the map in the director view.
     overhangSprite: RgbaSprite
     bottomTints: array[DayTintCount, RgbaSprite]
     overhangTints: array[DayTintCount, RgbaSprite]
@@ -587,6 +599,9 @@ type
     directorMode: bool
       ## A /director viewer: the automated camera picks the shot;
       ## player and house selection are ignored.
+    frameWidth, frameHeight: int
+      ## The director viewer's window size in CSS pixels, reported by
+      ## the page as an "aspect:WxH" chat message; 0 until it arrives.
     selectedPlayerIndex: int
     selectedHouseNumber: int  ## 0 = none, 1..HouseCount = house interior view
     pendingMapClick: bool
@@ -956,6 +971,7 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   result.homeResourceRects = loadResourceRects(homeResourcePath)
   result.homeResources = loadHomeResources(result.homeResourceRects)
   result.mainMap = loadWorldMap(mapPath, "Map")
+  result.mainMap.backdropSprite = loadEmoteSprite(dataRoot / "backdrop.png")
   let homeMap = loadWorldMap(homeMapPath, "Home map")
   for i in 0 ..< HouseCount:
     result.homeMaps[i] = homeMap
@@ -1726,6 +1742,11 @@ proc addSpriteProtocolInit(
       sim.mainMap.overhangTints[i],
       MainOverhangLabelPrefix & " tint " & $i
     )
+  packet.addRgbaSprite(
+    BackdropSpriteId,
+    sim.mainMap.backdropSprite,
+    "map backdrop"
+  )
   packet.addRgbaSprite(
     HomeBottomSpriteId,
     sim.homeMaps[0].bottomSprite,
@@ -3517,7 +3538,7 @@ proc addDirectorConversationCards(
   packet: var seq[uint8],
   sim: SimServer,
   cache: var seq[SpriteCacheEntry],
-  cropX, cropY, cropW, cropH, paddedWidth: int
+  cropX, cropY, cropW, cropH, paddedWidth, backdropPad: int
 ) =
   ## Draws one parchment card per active spoken line, stacked in the
   ## margins beside the map crop: speakers left of the shot's center
@@ -3598,9 +3619,10 @@ proc addDirectorConversationCards(
     moods[heartLinkTier(links)] & sim.players[other].playerName
   for (column, columnX, topInset) in [
     # The score panel overlays the window's top left, so the left
-    # column starts below it. The columns hug the map crop.
-    (left, 4, viewHeight div 4),
-    (right, paddedWidth - DirectorCardWidth - 4, 8)
+    # column starts below it. The columns hug the map crop, inside
+    # the backdrop-only viewport padding.
+    (left, backdropPad + 4, viewHeight div 4),
+    (right, paddedWidth - backdropPad - DirectorCardWidth - 4, 8)
   ]:
     if column.len == 0:
       continue
@@ -3670,7 +3692,8 @@ proc addDirectorConversationCards(
 proc addDirectorWorldView(
   packet: var seq[uint8],
   sim: SimServer,
-  cache: var seq[SpriteCacheEntry]
+  cache: var seq[SpriteCacheEntry],
+  frameWidth, frameHeight: int
 ) =
   ## Appends the main map cropped to the director camera. The browser
   ## client scales the declared viewport to fit its window, so a
@@ -3681,9 +3704,33 @@ proc addDirectorWorldView(
     cameraY = int(sim.directorCamY)
     viewW = max(1, int(sim.directorCamW))
     viewH = max(1, int(sim.directorCamH))
-    cameraX = int(sim.directorCamX) - DirectorCardMarginPx
-    paddedW = viewW + DirectorCardMarginPx * 2
+    (frameNum, frameDen) =
+      if frameWidth > 0 and frameHeight > 0:
+        (frameWidth, frameHeight)
+      else:
+        (DirectorFrameAspectNum, DirectorFrameAspectDen)
+    # Backdrop-only padding widens tall shots toward the frame shape,
+    # never past the backdrop's edge; the cards keep hugging the crop.
+    backdropPad = clamp(
+      (viewH * frameNum div frameDen -
+        viewW - DirectorCardMarginPx * 2) div 2,
+      0,
+      (sim.mainMap.backdropSprite.width - sim.mainMap.width) div 2
+    )
+    cameraX = int(sim.directorCamX) - DirectorCardMarginPx - backdropPad
+    paddedW = viewW + (DirectorCardMarginPx + backdropPad) * 2
   packet.addViewport(MapLayerId, paddedW, viewH)
+  # The forest backdrop sits behind the map, centered on it, so the
+  # village reads as a clearing instead of floating on black. It
+  # shares BottomZ; its smaller y draws it before the map bottom.
+  packet.addObject(
+    BackdropObjectId,
+    -cameraX - (sim.mainMap.backdropSprite.width - sim.mainMap.width) div 2,
+    -cameraY - (sim.mainMap.backdropSprite.height - sim.mainMap.height) div 2,
+    BottomZ,
+    MapLayerId,
+    BackdropSpriteId
+  )
   packet.addObject(
     BottomObjectId,
     -cameraX,
@@ -3736,7 +3783,8 @@ proc addDirectorWorldView(
       cameraY,
       viewW,
       viewH,
-      paddedW
+      paddedW,
+      backdropPad
     )
   packet.addClockObjects(sim)
 
@@ -4288,7 +4336,12 @@ proc buildGlobalPacket*(
     # camera picks the shot for everyone watching.
     nextState.pendingMapClick = false
     nextState.selectedPlayerIndex = -1
-    result.addDirectorWorldView(sim, nextState.spriteCache)
+    result.addDirectorWorldView(
+      sim,
+      nextState.spriteCache,
+      nextState.frameWidth,
+      nextState.frameHeight
+    )
     result.addGlobalScorePanel(sim, nextState.spriteCache, -1)
     if replayControls:
       result.addReplayControls(
@@ -5645,8 +5698,19 @@ proc applyReplayViewerMessage(state: PlayerViewerState, data: string) =
         else:
           state.scrubbingReplay = false
     of SpriteClientChatMessage:
-      for ch in item.text:
-        state.replayCommands.add(ch)
+      if item.text.startsWith("aspect:"):
+        # The director page reports its window shape so the shot can
+        # widen over the backdrop to that shape instead of a guess.
+        let parts = item.text[7 .. ^1].split('x')
+        if parts.len == 2:
+          try:
+            state.frameWidth = parseInt(parts[0])
+            state.frameHeight = parseInt(parts[1])
+          except ValueError:
+            discard
+      else:
+        for ch in item.text:
+          state.replayCommands.add(ch)
     of SpriteClientInputMessage, SpriteClientReadyMessage,
         SpriteClientDebugSpriteMessage, SpriteClientSpritesOffMessage:
       discard
@@ -6011,6 +6075,20 @@ when not defined(emscripten):
   addEventListener("pointerup",rearm);
   addEventListener("wheel",rearm);
   setInterval(rearm,1000);
+  // Report the window shape as a chat message ("aspect:WxH"), so the
+  // server widens tall shots over the backdrop to this window instead
+  // of a guessed 16:9. Same 0x81 text packet the player entry sends.
+  var told="";
+  function tell(){
+    var t="aspect:"+viewWidth()+"x"+viewHeight();
+    if(t===told||!socket||socket.readyState!==WebSocket.OPEN)return;
+    var b=new Uint8Array(t.length+3);
+    b[0]=0x81;writeU16(b,1,t.length);
+    for(var i=0;i<t.length;i++)b[3+i]=t.charCodeAt(i);
+    sendPacket(b);told=t;
+  }
+  addEventListener("resize",function(){told="";tell();});
+  setInterval(tell,1000);
 })();</script>
 """
 
