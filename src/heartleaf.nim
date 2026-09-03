@@ -57,6 +57,25 @@ const
   GlobalWebSocketPath = "/global"
   ReplayWebSocketPath = "/replay"
   DirectorWebSocketPath = "/director"
+  PlainWebSocketPath = "/plain"
+  PlainClientRoute = "/client/plain"
+  DirectorPageRoutes = [
+    "/",
+    GlobalWebSocketPath,
+    DirectorWebSocketPath,
+    bitworldClient.GlobalClientRoute,
+    bitworldClient.CoworldGlobalClientRoute
+  ]
+    ## Every live-viewer page and websocket path serves the director
+    ## cut. The Softmax platform opens `/client/global` and probes the
+    ## `/global` websocket, so those are the hosted front door; the
+    ## page connects its websocket to `/global` while `/`, `/director`
+    ## and `/clients/global` connect back to their own path, and each
+    ## of those upgrades lands in this same set.
+  PlainViewRoutes = [PlainWebSocketPath, PlainClientRoute]
+    ## The stock hand-panned global view, kept for debugging on paths
+    ## the platform never opens. Neither page has a websocket mapping
+    ## in the shared client, so each connects back to its own path.
   MaxWebSocketFrameBytes = 900_000
   MapLayerId = 0
   UiLayerId = 1
@@ -6305,6 +6324,7 @@ when not defined(emscripten):
     return true
 
   const DirectorFitSnippet = """
+<!-- director -->
 <script>(function(){
   // The director cut frames every shot itself, so the page must stay
   // auto-fitted. The stock viewer drops auto-fit on the first click or
@@ -6340,30 +6360,34 @@ when not defined(emscripten):
     elif request.path == WebSocketPath and request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
       request.respondPlain(426, "websocket required\n")
-    elif request.path in ["/", GlobalWebSocketPath, DirectorWebSocketPath] and
+    elif request.path in DirectorPageRoutes and
         request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
-      # The root and /director serve the same viewer page; the page
-      # connects its websocket back to its own path, which lands in
-      # the upgrade branch below and flags the viewer as a director
+      # The root, /director, and the platform's /client/global all
+      # serve the director page; each page's websocket lands in the
+      # upgrade branch below and flags the viewer as a director
       # watcher. The director cut is the main page.
-      if request.path != GlobalWebSocketPath and
-          not request.checkReplayRequest():
+      if not request.checkReplayRequest():
         return
-      if request.path != GlobalWebSocketPath:
-        request.respondDirectorPage()
-      else:
-        discard bitworldClient.serveClientFile(
-          request,
-          bitworldClient.GlobalClientRoute,
-          bitworldClient.GlobalClientRoute
-        )
+      request.respondDirectorPage()
+    elif request.path in PlainViewRoutes and
+        request.httpMethod == "GET" and
+        not request.isWebSocketUpgrade():
+      # The explicit opt-in for hand-panning: the stock page without
+      # the fit snippet, whose websocket (its own path) stays plain.
+      if not request.checkReplayRequest():
+        return
+      discard bitworldClient.serveClientFile(
+        request,
+        bitworldClient.GlobalClientRoute,
+        bitworldClient.GlobalClientRoute
+      )
     elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
       if not request.checkReplayRequest():
         return
       # Replay viewers are director watchers now, so the /replay page
-      # is the director page too; /client/global keeps the plain view.
+      # is the director page too; /plain keeps the plain view.
       request.respondDirectorPage()
     elif request.path == WebSocketPath and request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
@@ -6385,11 +6409,13 @@ when not defined(emscripten):
         withLock appState.lock:
           appState.playerSlots[websocket] = slot
           appState.playerUsernames[websocket] = username
-    elif request.path in ["/", GlobalWebSocketPath, DirectorWebSocketPath] and
+    elif (request.path in DirectorPageRoutes or
+        request.path in PlainViewRoutes) and
         request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
-      if request.path != GlobalWebSocketPath and
-          not request.checkReplayRequest():
+      # Live viewers: the platform's /global probe and every director
+      # page get the director cut; only the /plain opt-in stays plain.
+      if not request.checkReplayRequest():
         return
       let websocket = request.upgradeToWebSocket()
       {.gcsafe.}:
@@ -6401,7 +6427,7 @@ when not defined(emscripten):
             appState.replayViewerJoined = true
           appState.globalViewers[websocket] = PlayerViewerState(
             selectedPlayerIndex: -1,
-            directorMode: request.path != GlobalWebSocketPath
+            directorMode: request.path notin PlainViewRoutes
           )
     elif request.path in [
         ReplayWebSocketPath,

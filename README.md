@@ -98,8 +98,10 @@ To run the pieces by hand:
 nim r src/heartleaf.nim
 ```
 
-Then open `http://localhost:8080/`. The root serves the director cut;
-`/client/global` keeps the plain hand-panned view.
+Then open `http://localhost:8080/`. The root, `/client/global`, and
+`/client/replay` all serve the director cut, which is what the hosted
+platform opens; `/plain` (or `/client/plain`) is the explicit opt-in for
+the plain hand-panned view when debugging.
 
 With no `tokens` configured the village starts at once and a gnome appears
 whenever a soul arrives. Without Bedrock credentials, give the game a mock
