@@ -149,12 +149,14 @@ const
   DirectorTweenRate = 0.10
     ## Fraction of the remaining distance the camera covers each frame
     ## while it follows a focused ring's small drift.
-  DirectorTweenFrames = 48
+  DirectorTweenFrames* = 48
     ## Frames one camera glide takes - out to the wide shot, or in to
     ## the next ring. Two seconds at the 24fps loop, eased at both
-    ## ends, so a cut reads as a camera move instead of a snap. The
-    ## show holds its breath while a glide runs: no replay ticks land
-    ## and the delay-chat cursor stays put until the camera rests.
+    ## ends, so a cut reads as a camera move instead of a snap, at
+    ## every transport speed. The show holds its breath while a glide
+    ## starts: no replay ticks land for directorTweenHoldFrames frames
+    ## (the whole glide at 1X) and the delay-chat cursor stays put
+    ## until the camera rests.
   DirectorStickPx = 80
     ## How far a circle's center may drift between frames and still be
     ## recognized as the conversation the director is focused on.
@@ -3469,6 +3471,17 @@ proc addGlobalWorldView(
   )
   packet.addClockObjects(sim)
 
+proc directorTweenHoldFrames*(speedIndex: int): int =
+  ## Frames of a camera glide during which the replay lands no ticks
+  ## at one transport speed: the whole glide at 1X and slower, and a
+  ## slice of it in proportion to the speed above - 24 frames at 2X,
+  ## 12 at 4X, 3 at 16X - so a cut costs the same share of the show's
+  ## pace at every speed, and the faster transports keep their pace
+  ## while the glide eases on over its full run.
+  DirectorTweenFrames div max(1, PlaybackSpeedTicks[
+    clamp(speedIndex, 0, PlaybackSpeedTicks.high)
+  ])
+
 proc startDirectorTween(sim: SimServer) =
   ## Begins a timed camera glide from the current crop. The target is
   ## recomputed every frame, so a glide can chase a drifting ring and
@@ -5982,10 +5995,14 @@ proc advanceReplayShow*(
     elif sim.convQueueIndex < sim.convQueue.len:
       ticksThisFrame = min(ticksThisFrame, max(0,
         sim.convQueue[sim.convQueueIndex].birthTick - sim.tickCount))
-  # A camera glide is a held breath: at show speed the replay pauses
-  # until the shot settles, so cuts never swallow lines.
-  if directorWatching and sim.directorTweenLeft > 0 and
-      replay.replaySpeedIndex() == DefaultSpeedIndex:
+  # A camera glide is a held breath: the replay lands no ticks while
+  # the cut starts, so a cut never swallows a line. At 1X the hold
+  # spans the whole glide; faster transports hold for its first
+  # frames in proportion (directorTweenHoldFrames) and then let the
+  # ticks resume under the easing glide, so a cut is never a snap at
+  # any speed and never stalls a fast transport for two seconds.
+  if directorWatching and sim.directorTweenLeft > DirectorTweenFrames -
+      directorTweenHoldFrames(replay.replaySpeedIndex()):
     ticksThisFrame = 0
   for _ in 0 ..< ticksThisFrame:
     if replay.playing:

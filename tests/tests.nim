@@ -1877,4 +1877,78 @@ block:
   doAssert sim.conversationQueueLabel() == "CONV 3/3",
     "played out, the label holds the last position"
 
+echo "Testing director cuts glide at every transport speed"
+block:
+  # The tick hold scales with the transport: the whole 48-frame glide
+  # at 1X and slower, a proportional slice of it above.
+  doAssert directorTweenHoldFrames(0) == DirectorTweenFrames, "1/4X"
+  doAssert directorTweenHoldFrames(DefaultSpeedIndex) == DirectorTweenFrames
+  doAssert directorTweenHoldFrames(3) == DirectorTweenFrames div 2, "2X"
+  doAssert directorTweenHoldFrames(5) == DirectorTweenFrames div 4, "4X"
+  doAssert directorTweenHoldFrames(7) == DirectorTweenFrames div 16, "16X"
+  # The headless director loop over the fixture at 4X and 16X: the
+  # crop never moves more than a tenth of itself between two frames,
+  # cuts still happen, and each cut holds the ticks for its share of
+  # the glide (a rewind through the same-tick group chains a glide
+  # out into a glide in, so the longest hold may be two shares).
+  for speed in ['4', '6']:
+    let
+      data = loadReplay("tests/fixtures/luna_9gnomes.bitreplay")
+      config = data.replaySimConfig()
+    var sim = initSimServer(config.seed, config.dayTicks)
+    sim.attachConversationTimeline(data, "")
+    var replay = initReplayPlayer(data)
+    replay.buildReplayKeyframes(config.seed, config.dayTicks)
+    sim.buildConversationQueue(replay.replayMaxTick())
+    var state = newReplayViewerState()
+    state.directorMode = true
+    replay.applyReplayCommand(sim, speed)
+    replay.looping = false
+    let
+      maxTick = replay.replayMaxTick()
+      holdFrames = directorTweenHoldFrames(replay.replaySpeedIndex())
+    var
+      frames = 0
+      worst = 0.0
+      cuts = 0
+      wide = true
+      mapH = 0.0
+      lastCrop = sim.directorCrop()
+      lastTick = sim.tickCount
+      holdRun = 0
+      longestHold = 0
+    while frames < 100_000:
+      inc frames
+      discard replayViewerFrame(sim, replay, state, true)
+      let crop = sim.directorCrop()
+      if frames == 1:
+        mapH = crop.h  # the opening wide shot frames the whole map
+      else:
+        worst = max(worst, directorCropJump(lastCrop, crop))
+      lastCrop = crop
+      if wide and crop.h < mapH * 0.9:
+        inc cuts
+        wide = false
+      elif not wide and crop.h >= mapH * 0.9:
+        wide = true
+      if sim.tickCount == lastTick:
+        inc holdRun
+      else:
+        longestHold = max(longestHold, holdRun)
+        holdRun = 0
+        lastTick = sim.tickCount
+      if not replay.playing and sim.tickCount >= maxTick:
+        break
+    doAssert sim.tickCount == maxTick,
+      "the show at speed " & speed & " runs to the end of the recording"
+    doAssert cuts >= 1, "the show at speed " & speed & " cut into a ring"
+    doAssert worst <= 0.1, "at speed " & speed & " the crop moved " &
+      $worst & " of itself in one frame"
+    doAssert longestHold >= holdFrames - 1,
+      "at speed " & speed & " a cut held the ticks for " & $longestHold &
+      " frames, under its " & $holdFrames & "-frame share"
+    doAssert longestHold <= holdFrames * 2 + 1,
+      "at speed " & speed & " the ticks froze for " & $longestHold &
+      " frames, more than two " & $holdFrames & "-frame shares"
+
 echo "All tests passed"
