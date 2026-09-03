@@ -126,9 +126,37 @@
       }
 
       // --- Gnome voices ----------------------------------------------
-      // The browser reads each banner line aloud. Every seat gets its
-      // own pitch and pace, high and quick enough to sound gnome-sized.
-      // If the browser has no voices, fall back to syllable babble.
+      // A replay recorded with voices carries one clip per spoken line
+      // (see VoiceClip in src/replays.nim). The viewer hands the clip
+      // over as base64 and it plays from a data: URL: no server, no
+      // synthesizer, no key. The music ducks while a gnome speaks, and
+      // a new line cuts the previous clip so voices never overlap.
+      var clipPlayer = null;
+      function stopClip() {
+        if (!clipPlayer) return;
+        clipPlayer.onended = null;
+        clipPlayer.pause();
+        clipPlayer = null;
+        if (musicGain) musicGain.gain.value = on ? 0.5 : 0;
+      }
+
+      window.heartleafVoice = function(seat, codec, base64) {
+        if (!on) return;
+        stopClip();
+        var mime = codec === "mp3" ? "audio/mpeg" : "audio/mp4";
+        var player = new Audio("data:" + mime + ";base64," + base64);
+        player.volume = 0.9;
+        player.onended = function() { if (clipPlayer === player) stopClip(); };
+        player.onerror = function() { if (clipPlayer === player) stopClip(); };
+        clipPlayer = player;
+        if (musicGain) musicGain.gain.value = 0.2;
+        player.play().catch(function() { if (clipPlayer === player) stopClip(); });
+      };
+
+      // Lines with no baked clip: the browser reads them aloud. Every
+      // seat gets its own pitch and pace, high and quick enough to
+      // sound gnome-sized. If the browser has no voices, fall back to
+      // syllable babble.
       var voices = [];
       function loadVoices() { voices = speechSynthesis.getVoices(); }
       if (window.speechSynthesis) {
@@ -138,6 +166,7 @@
 
       window.heartleafTalk = function(seat, len, text) {
         if (!on || !ctx) return;
+        stopClip();
         if (window.speechSynthesis && voices.length > 0 && text) {
           if (speechSynthesis.pending) speechSynthesis.cancel();
           var u = new SpeechSynthesisUtterance(text);
@@ -184,6 +213,7 @@
         } else {
           button.classList.remove("on");
           if (window.speechSynthesis) speechSynthesis.cancel();
+          stopClip();
         }
         if (ctx) musicGain.gain.value = on ? 0.5 : 0;
       });
