@@ -13,6 +13,11 @@
   <body>
     <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
     <script>
+      // Readiness protocol: tell the embedding Observatory page the viewer is
+      // alive before the WASM runtime loads; Nim posts the rest.
+      if (window.parent !== window) {
+        window.parent.postMessage({ src: "coworld-replay", type: "loading" }, "*");
+      }
       var Module = {
         canvas: (function() {
           var canvas = document.getElementById("canvas");

@@ -9,11 +9,16 @@
 ##              replay_viewer.html?replay=<url-or-relative-path>
 ##              Coworld hosts the same files as index.html?replay=
 ##
-## Replays load three ways: a CLI path (native), a `?replay=` query
-## parameter fetched over HTTP, or a file dropped onto the window.
+## Replays load three ways: a CLI path (native), a `#replay=` fragment
+## or legacy `?replay=` query parameter fetched over HTTP, or a file
+## dropped onto the window.
+##
+## When embedded by Observatory the viewer posts readiness-protocol
+## messages (`src: "coworld-replay"`) to the parent window; see
+## coworld's docs/STATIC_REPLAY_VIEWERS.md.
 
 import
-  std/[os, parseopt, uri],
+  std/[json, os, parseopt, uri],
   windy,
   bitworld/spriteprotocol,
   heartleaf, replays,
@@ -34,6 +39,29 @@ type
     state: PlayerViewerState
     inputPackets: seq[string]
     loaded: bool
+    readyPosted: bool
+
+when defined(emscripten):
+  {.emit: """
+#include <emscripten.h>
+
+EM_JS(void, heartleaf_post_host_message, (char* json), {
+  if (window.parent === window) return;
+  var message = JSON.parse(UTF8ToString(json));
+  message.src = "coworld-replay";
+  if (message.type === "ready") {
+    setTimeout(function() { window.parent.postMessage(message, "*"); }, 0);
+  } else {
+    window.parent.postMessage(message, "*");
+  }
+});
+""".}
+  proc heartleaf_post_host_message(json: cstring) {.importc.}
+
+proc tellHost(message: JsonNode) =
+  ## Posts one readiness-protocol message to the embedding page (browser only).
+  when defined(emscripten):
+    heartleaf_post_host_message(cstring($message))
 
 proc addInputPacket(viewer: ReplayViewer, packet: string) =
   ## Queues one local sprite protocol client packet.
@@ -82,10 +110,12 @@ proc loadReplayBytes(viewer: ReplayViewer, name, bytes: string) =
     viewer.loaded = true
     viewer.app.resetProtocolState()
     viewer.app.setStatus("")
+    tellHost(%*{"type": "phase", "phase": "replay_parsed"})
   except CatchableError as e:
     viewer.loaded = false
     viewer.app.setStatus("Could not load replay: " & e.msg)
     echo "Could not load replay ", name, ": ", e.msg
+    tellHost(%*{"type": "error", "message": "Could not load replay: " & e.msg})
 
 proc loadReplayPath(viewer: ReplayViewer, path: string) =
   ## Loads a native replay file from disk.
@@ -97,29 +127,49 @@ proc loadReplayPath(viewer: ReplayViewer, path: string) =
     viewer.app.setStatus("Could not read replay: " & e.msg)
 
 proc replayUrl(windowUrl: string): string =
-  ## Returns the replay query parameter from one URL.
+  ## Returns the replay URL from `#replay=` first, then the legacy `?replay=` query.
   let parsed = parseUri(windowUrl)
-  for key, value in decodeQuery(parsed.query):
-    if key == "replay":
-      return value
+  for params in [parsed.anchor, parsed.query]:
+    for key, value in decodeQuery(params):
+      if key == "replay":
+        return value
 
 proc downloadReplay(viewer: ReplayViewer, url: string) =
   ## Downloads a replay file and loads it when the response arrives.
   if url.len == 0:
     return
   viewer.app.setStatus("Downloading replay")
+  tellHost(%*{"type": "phase", "phase": "replay_fetch_start"})
   let request = startHttpRequest(url)
   request.onError = proc(message: string) =
     viewer.loaded = false
     viewer.app.setStatus("Could not download replay: " & message)
+    tellHost(%*{"type": "error", "message": "Could not download replay: " & message})
   request.onResponse = proc(response: HttpResponse) =
     if response.code < 200 or response.code >= 300:
       viewer.loaded = false
       viewer.app.setStatus(
         "Could not download replay: HTTP " & $response.code
       )
+      tellHost(%*{
+        "type": "error",
+        "message": "Could not download replay: HTTP " & $response.code
+      })
       return
-    viewer.loadReplayBytes(url, response.body)
+    let body = response.body
+    # Sniff gzip / zlib by content; the replay codec inflates.
+    let compressed = body.len >= 2 and
+      ((body[0] == '\x1f' and body[1] == '\x8b') or
+        ((ord(body[0]) and 0x0f) == 8 and
+          (ord(body[0]) shr 4) <= 7 and
+          (((ord(body[0]) shl 8) or ord(body[1])) mod 31) == 0))
+    tellHost(%*{
+      "type": "phase",
+      "phase": "replay_fetch_end",
+      "bytes": body.len,
+      "compressed": compressed
+    })
+    viewer.loadReplayBytes(url, body)
 
 proc installFileDrop(viewer: ReplayViewer) =
   ## Hooks browser and desktop file drops into replay loading.
@@ -148,6 +198,10 @@ proc tick(viewer: ReplayViewer) =
     viewer.app.parseMessage(blobFromBytes(packet))
   viewer.app.maybeFit()
   viewer.app.draw()
+  if viewer.loaded and not viewer.readyPosted:
+    # The browser helper yields once so the first draw can be composited.
+    viewer.readyPosted = true
+    tellHost(%*{"type": "ready"})
 
 proc parseReplayPathArg(): string =
   ## Returns the replay path from the command line, if any.
@@ -164,6 +218,7 @@ proc parseReplayPathArg(): string =
 proc runReplayViewer*() =
   ## Runs the standalone replay viewer until the window closes.
   let viewer = initReplayViewer()
+  tellHost(%*{"type": "phase", "phase": "bundle_ready"})
   when not defined(emscripten):
     var lastTick = getMonoTime()
   viewer.installFileDrop()
