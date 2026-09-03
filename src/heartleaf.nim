@@ -82,8 +82,10 @@ const
   ReplayScrubberY = 26
   ReplayTickTextY = 11
   ReplayConvTextY = 18
-    ## The "CONV N/M" queue position label sits under the tick counter,
-    ## in the same clear run between the transport buttons and speeds.
+    ## The queue position label sits under the tick counter, in the
+    ## same clear run between the transport buttons and speeds: "CONV
+    ## k/M" while conversation k is on air, "CONV -> k/M" while the
+    ## playhead travels toward its birth (see conversationQueueLabel).
   TransportButtonsX = 10
   TransportRowY = 11
   TransportButtonWidth = 12
@@ -572,12 +574,12 @@ type
       ## The replay's conversations in birth order, for the
       ## conversation-queue show. Viewer-only, never hashed; empty in
       ## live play and on replays without conversation records.
-    convQueueIndex: int
+    convQueueIndex*: int
       ## The queue item now playing (while committed) or next up.
     convQueueLast: int
       ## The most recently committed item, for the prev-conv restart;
       ## -1 before anything has played.
-    convQueueCommitted: bool
+    convQueueCommitted*: bool
       ## Whether playback is committed to convQueue[convQueueIndex]:
       ## the shot and the feed belong to that conversation until its
       ## death tick. Between commitments nothing airs.
@@ -4318,6 +4320,24 @@ proc addReplayMismatchWarning(
     ReplayMismatchSpriteId
   )
 
+proc conversationQueueLabel*(sim: SimServer): string =
+  ## The transport card's queue position. While playback is committed
+  ## it names the conversation on air, "CONV k/M". While the playhead
+  ## travels toward the next birth it reads "CONV -> k/M": the
+  ## conversation it is heading for, marked as ahead, so a
+  ## fast-forward never reads as that conversation already playing.
+  ## Past the last death, with nothing ahead, it holds at "CONV M/M".
+  ## Empty without a queue.
+  if sim.convQueue.len == 0:
+    return ""
+  let total = sim.convQueue.len
+  if sim.convQueueCommitted:
+    "CONV " & $(sim.convQueueIndex + 1) & "/" & $total
+  elif sim.convQueueIndex >= total:
+    "CONV " & $total & "/" & $total
+  else:
+    "CONV -> " & $(sim.convQueueIndex + 1) & "/" & $total
+
 proc addReplayControls(
   packet: var seq[uint8],
   sim: SimServer,
@@ -4386,19 +4406,19 @@ proc addReplayControls(
     ReplayTickSpriteId
   )
   if sim.convQueue.len > 0:
-    # The queue position label, under the tick counter: the cursor in
-    # the birth-ordered conversation list.
+    # The queue position label, under the tick counter: the
+    # conversation on air, or the one the playhead travels toward.
     let
+      convLabel = sim.conversationQueueLabel()
       convText = sim.globalPanelTextSprite(
-        "CONV " & $min(sim.convQueueIndex + 1, sim.convQueue.len) &
-          "/" & $sim.convQueue.len,
+        convLabel,
         rgba(GlobalPanelTextR, GlobalPanelTextG, GlobalPanelTextB, 255)
       )
     packet.addRgbaSpriteCached(
       cache,
       ReplayConvSpriteId,
       convText,
-      "replay conv position"
+      "replay conv " & convLabel
     )
     packet.addObject(
       ReplayConvObjectId,

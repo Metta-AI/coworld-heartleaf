@@ -1803,4 +1803,78 @@ block:
   doAssert live.keepOut[0].h == panel.h div 2,
     "the cards' footprint scales with the crop height"
 
+echo "Testing the CONV label follows the commitment, not the travel"
+block:
+  # The fixture: nine gnomes, three conversations born together at
+  # tick 360 - a same-tick group the queue plays through rewinds -
+  # with later joins to the first at 647 and 719; the recording ends
+  # at 2447 with all three still open.
+  let
+    data = loadReplay("tests/fixtures/luna_9gnomes.bitreplay")
+    config = data.replaySimConfig()
+  var sim = initSimServer(config.seed, config.dayTicks)
+  sim.attachConversationTimeline(data, "")
+  var replay = initReplayPlayer(data)
+  replay.buildReplayKeyframes(config.seed, config.dayTicks)
+  sim.buildConversationQueue(replay.replayMaxTick())
+  doAssert sim.convQueue.len == 3, "the fixture holds three conversations"
+  for span in sim.convQueue:
+    doAssert span.birthTick == 360, "all three are born at tick 360"
+  var state = newReplayViewerState()
+  state.directorMode = true
+  replay.looping = false
+  doAssert sim.conversationQueueLabel() == "CONV -> 1/3",
+    "before the first birth the label points at the conversation ahead"
+  # The 1X fast-forward covers eight ticks a frame and the clamp lands
+  # the playhead exactly on the birth; the queue commits on the frame
+  # after that.
+  var frames = 0
+  while sim.tickCount < 352 and frames < 1000:
+    discard replayViewerFrame(sim, replay, state, true)
+    inc frames
+  doAssert sim.tickCount == 352 and not sim.convQueueCommitted
+  doAssert sim.conversationQueueLabel() == "CONV -> 1/3",
+    "one frame short of the birth the label still reads as travel"
+  discard replayViewerFrame(sim, replay, state, true)
+  doAssert sim.tickCount == 360 and not sim.convQueueCommitted
+  doAssert sim.conversationQueueLabel() == "CONV -> 1/3",
+    "on the birth tick itself, before the commit, it still reads ahead"
+  discard replayViewerFrame(sim, replay, state, true)
+  doAssert sim.convQueueCommitted and sim.convQueueIndex == 0
+  doAssert sim.conversationQueueLabel() == "CONV 1/3",
+    "committed, the label reads the conversation on air"
+  # The later joins at 647 and 719 grow the first conversation; the
+  # label holds through them (show pacing: a tick every five frames
+  # once the camera settles).
+  while sim.tickCount < 720 and frames < 20_000:
+    discard replayViewerFrame(sim, replay, state, true)
+    inc frames
+  doAssert sim.tickCount >= 720, "playback reaches past the last join"
+  doAssert sim.convQueueCommitted and sim.convQueueIndex == 0
+  doAssert sim.conversationQueueLabel() == "CONV 1/3",
+    "a join is not a new conversation"
+  # Next conversation: the queue rewinds to the shared birth tick and
+  # the label follows the commitment.
+  replay.applyReplayCommand(sim, 'n')
+  doAssert sim.tickCount == 360 and sim.convQueueCommitted
+  doAssert sim.conversationQueueLabel() == "CONV 2/3"
+  replay.applyReplayCommand(sim, 'n')
+  doAssert sim.conversationQueueLabel() == "CONV 3/3"
+  # A scrub into dead time travels again, toward the next birth; a
+  # scrub inside a span commits there.
+  replay.applyReplaySeek(sim, 100)
+  doAssert not sim.convQueueCommitted
+  doAssert sim.conversationQueueLabel() == "CONV -> 1/3",
+    "scrubbed into dead time the label reads ahead again"
+  replay.applyReplaySeek(sim, 500)
+  doAssert sim.convQueueCommitted and sim.convQueueIndex == 0
+  doAssert sim.conversationQueueLabel() == "CONV 1/3",
+    "scrubbed into a span the label reads that conversation"
+  # Past the last death nothing is ahead: the label holds at the end.
+  replay.applyReplayCommand(sim, 'e')
+  doAssert sim.tickCount == replay.replayMaxTick()
+  doAssert not sim.convQueueCommitted
+  doAssert sim.conversationQueueLabel() == "CONV 3/3",
+    "played out, the label holds the last position"
+
 echo "All tests passed"

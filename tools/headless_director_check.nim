@@ -5,7 +5,8 @@
 ## reports the largest camera move between two consecutive frames,
 ## as a fraction of the crop, so a cut that snaps instead of gliding
 ## shows up as a number instead of a feeling; --trace prints every
-## frame where the crop moved by more than a tenth of itself.
+## frame where the crop moved by more than a tenth of itself, and
+## every change of the transport card's CONV label.
 ##
 ##   nim r tools/headless_director_check.nim <replay> [speedCommand] [--trace]
 ##
@@ -52,6 +53,7 @@ proc main() =
   var
     frames = 0
     lastReport = 0
+    lastLabel = ""
     worstJump = 0.0
     worstFrame = 0
     worstTick = 0
@@ -73,6 +75,10 @@ proc main() =
           &"crop {crop.x:.0f},{crop.y:.0f} {crop.w:.0f}x{crop.h:.0f}"
     lastCrop = crop
     haveLast = true
+    let label = sim.conversationQueueLabel()
+    if trace and label != lastLabel:
+      echo "frame ", frames, " tick ", sim.tickCount, " label '", label, "'"
+      lastLabel = label
     if sim.tickCount >= lastReport + 250:
       lastReport = sim.tickCount
       echo "frame ", frames, " tick ", sim.tickCount
