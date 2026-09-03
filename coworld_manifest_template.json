@@ -8,7 +8,8 @@
   "game": {
     "name": "heartleaf",
     "replay_viewer": {
-      "bundle": "build/static-replay-viewer"
+      "bundle": "build/static-replay-viewer",
+      "replay_compression": "gzip"
     },
     "description": "A cozy BitWorld garden dinner game where players grow food, collect vegetables, and gather in the evening. Every gnome is played by the game itself from the soul file its player uploads.",
     "owner": "treeform@softmax.com",
