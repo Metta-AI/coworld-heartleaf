@@ -16,13 +16,18 @@ jobs:
       - uses: actions/checkout@v5
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev libevdev-dev
-      - name: Install Nim with nimby
+      - uses: treeform/setup-nim-action@v6
+        with:
+          nim-version: 2.2.10
+      - name: Install locked dependencies
+        shell: bash
         run: |
-          curl -fsSL -o /usr/local/bin/nimby \
-            https://github.com/treeform/nimby/releases/download/0.1.26/nimby-Linux-X64
-          chmod +x /usr/local/bin/nimby
-          nimby use 2.2.4
-          echo "$HOME/.nimby/nim/bin" >> "$GITHUB_PATH"
-      - run: nimby sync nimby.lock -g
+          # Nimby 0.2 refuses to create a workspace inside a git
+          # checkout, and Nim finds nim.cfg by walking up from the file
+          # it compiles, so the workspace has to be the parent of the
+          # checkout: the packages land beside this repository.
+          cd ..
+          nimby create
+          nimby sync "$GITHUB_WORKSPACE/nimby.lock"
       - run: nim check src/heartleaf.nim
       - run: nim r tests/tests.nim
