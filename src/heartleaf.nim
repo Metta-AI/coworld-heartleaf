@@ -72,7 +72,7 @@ const
   ReplayMismatchLayerKind = 5
   MapLayerFlags = 1
   UiLayerFlags = 2
-  ReplayPanelHeight = 42
+  ReplayPanelHeight* = 42
     ## Tall enough for the parchment card's leafy border around the
     ## transport row and the scrubber.
   ReplayScrubberWidth = 288
@@ -82,8 +82,10 @@ const
   ReplayScrubberY = 26
   ReplayTickTextY = 11
   ReplayConvTextY = 18
-    ## The "CONV N/M" queue position label sits under the tick counter,
-    ## in the same clear run between the transport buttons and speeds.
+    ## The queue position label sits under the tick counter, in the
+    ## same clear run between the transport buttons and speeds: "CONV
+    ## k/M" while conversation k is on air, "CONV -> k/M" while the
+    ## playhead travels toward its birth (see conversationQueueLabel).
   TransportButtonsX = 10
   TransportRowY = 11
   TransportButtonWidth = 12
@@ -147,12 +149,14 @@ const
   DirectorTweenRate = 0.10
     ## Fraction of the remaining distance the camera covers each frame
     ## while it follows a focused ring's small drift.
-  DirectorTweenFrames = 48
+  DirectorTweenFrames* = 48
     ## Frames one camera glide takes - out to the wide shot, or in to
     ## the next ring. Two seconds at the 24fps loop, eased at both
-    ## ends, so a cut reads as a camera move instead of a snap. The
-    ## show holds its breath while a glide runs: no replay ticks land
-    ## and the delay-chat cursor stays put until the camera rests.
+    ## ends, so a cut reads as a camera move instead of a snap, at
+    ## every transport speed. The show holds its breath while a glide
+    ## starts: no replay ticks land for directorTweenHoldFrames frames
+    ## (the whole glide at 1X) and the delay-chat cursor stays put
+    ## until the camera rests.
   DirectorStickPx = 80
     ## How far a circle's center may drift between frames and still be
     ## recognized as the conversation the director is focused on.
@@ -179,7 +183,7 @@ const
   QueueFastForwardTicks = 8
     ## Ticks per frame the conversation-queue playhead covers between
     ## conversations: a brisk automatic ~8X toward the next birth.
-  DirectorCardMarginPx = 170
+  DirectorCardMarginPx* = 170
     ## Extra viewport width on each side of the director's crop. The
     ## conversation cards live in these margins, outside the map.
   DirectorCardWidth = 158
@@ -228,6 +232,17 @@ const
   DirectorBounceHops = [2, 4, 6, 6, 5, 4, 2, 0, 2, 3, 3, 2, 1, 0]
     ## The little hop a gnome does when its new line lands, in pixels
     ## of lift per frame.
+  DirectorUiReferenceRows* = 300
+    ## The browser draws the parchment UI cards (the score panel, the
+    ## transport card) on window-anchored layers at up to 3x, over the
+    ## director viewport it fits to the window; the server never
+    ## learns the window size. The name-label layout assumes the
+    ## shortest common window, 900 px tall, where the viewport's
+    ## height spans 300 UI-scale pixels: one UI pixel covers
+    ## viewH / 300 viewport pixels. A taller window leaves the reserved
+    ## bands roomier than the cards; a shorter one may still clip.
+  LabelClearGap* = 2
+    ## Pixels a name label keeps from a reserved rect it slid off.
   ClockPadX = 2
   ClockPadY = 1
   ClockGlyphGap = 1
@@ -543,6 +558,10 @@ type
       ## Frames left of the hop a gnome does when its new line lands.
     directorLastMessages: seq[string]
       ## The last spoken line seen per player, to spot new ones.
+    directorShowAccum: int
+      ## Show-pacing frame accumulator: at 1X with the camera on a
+      ## conversation the replay advances one tick per
+      ## DirectorShowFrames frames. Viewer-only, never hashed.
     inferredHuddles: Table[int, tuple[x, y, ttl: int]]
       ## Fallback conversation rings inferred from replay state when no
       ## game.log rides next to the replay (an http replay URI), keyed
@@ -557,12 +576,12 @@ type
       ## The replay's conversations in birth order, for the
       ## conversation-queue show. Viewer-only, never hashed; empty in
       ## live play and on replays without conversation records.
-    convQueueIndex: int
+    convQueueIndex*: int
       ## The queue item now playing (while committed) or next up.
     convQueueLast: int
       ## The most recently committed item, for the prev-conv restart;
       ## -1 before anything has played.
-    convQueueCommitted: bool
+    convQueueCommitted*: bool
       ## Whether playback is committed to convQueue[convQueueIndex]:
       ## the shot and the feed belong to that conversation until its
       ## death tick. Between commitments nothing airs.
@@ -578,6 +597,14 @@ type
       ## While positive, the director camera belongs to this
       ## encounter: no dwell rotation, no tour, until the queue
       ## releases it.
+
+  LabelLayout* = object
+    ## Where name labels may sit in one view: inside the clear rect and
+    ## off every reserved rect, all in viewport pixels. An inactive
+    ## layout (the default) leaves labels where their gnome puts them.
+    active*: bool
+    clear*: Rect
+    keepOut*: seq[Rect]
 
   KeyframeState = object
     ## Dynamic simulation state stored in one replay keyframe. Static
@@ -595,9 +622,10 @@ type
 
   PlayerViewerState* = ref object
     initialized: bool
-    directorMode: bool
+    directorMode*: bool
       ## A /director viewer: the automated camera picks the shot;
-      ## player and house selection are ignored.
+      ## player and house selection are ignored. Exported so the
+      ## standalone wasm viewer can opt its single local viewer in.
     selectedPlayerIndex: int
     selectedHouseNumber: int  ## 0 = none, 1..HouseCount = house interior view
     pendingMapClick: bool
@@ -1477,6 +1505,28 @@ proc selectedGlobalPlayerIndex(state: PlayerViewerState, sim: SimServer): int =
   if result >= sim.players.len:
     return -1
 
+proc globalScorePanelCardSize(
+  sim: SimServer
+): tuple[width, height, rows: int] =
+  ## The parchment card the score panel draws on, sized to the rows it
+  ## can show; zero rows when there is nothing to draw.
+  var maxRight = 0
+  for i, player in sim.players:
+    let rowY = GlobalPanelPad + i * GlobalPanelRowHeight
+    if GlobalPanelCardPadY * 2 + rowY + GlobalPanelRowHeight >
+        GlobalPanelHeight:
+      break
+    result.rows = i + 1
+    maxRight = max(maxRight, GlobalPanelNameX +
+      sim.textFont.textWidth(player.attributedDisplayName()))
+    maxRight = max(maxRight, GlobalPanelScoreX +
+      sim.textFont.textWidth(player.score.globalPanelScoreText()))
+  if result.rows == 0:
+    return
+  result.width = min(GlobalPanelWidth, GlobalPanelCardPadX * 2 + maxRight + 1)
+  result.height = GlobalPanelCardPadY * 2 + GlobalPanelPad +
+    result.rows * GlobalPanelRowHeight
+
 proc addGlobalScorePanel(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1488,25 +1538,9 @@ proc addGlobalScorePanel(
   if sim.players.len == 0:
     return
   # Size the card to its rows before drawing anything.
-  var
-    rows = 0
-    maxRight = 0
-  for i, player in sim.players:
-    let rowY = GlobalPanelPad + i * GlobalPanelRowHeight
-    if GlobalPanelCardPadY * 2 + rowY + GlobalPanelRowHeight >
-        GlobalPanelHeight:
-      break
-    rows = i + 1
-    maxRight = max(maxRight, GlobalPanelNameX +
-      sim.textFont.textWidth(player.attributedDisplayName()))
-    maxRight = max(maxRight, GlobalPanelScoreX +
-      sim.textFont.textWidth(player.score.globalPanelScoreText()))
+  let (cardWidth, cardHeight, rows) = sim.globalScorePanelCardSize()
   if rows == 0:
     return
-  let
-    cardWidth = min(GlobalPanelWidth, GlobalPanelCardPadX * 2 + maxRight + 1)
-    cardHeight = GlobalPanelCardPadY * 2 + GlobalPanelPad +
-      rows * GlobalPanelRowHeight
   var card: RgbaSprite
   if sim.chatBanner.width > 0:
     card = sim.chatBanner.nineSliceSprite(
@@ -1580,6 +1614,67 @@ proc addGlobalScorePanel(
       nameSpriteId
     )
 
+proc rectsOverlap(a, b: Rect): bool =
+  ## Returns true when two rectangles share any pixel.
+  a.x < b.x + b.w and b.x < a.x + a.w and
+    a.y < b.y + b.h and b.y < a.y + a.h
+
+proc rectInside(inner, outer: Rect): bool =
+  ## Returns true when one rectangle lies wholly inside another.
+  inner.x >= outer.x and inner.y >= outer.y and
+    inner.x + inner.w <= outer.x + outer.w and
+    inner.y + inner.h <= outer.y + outer.h
+
+proc placeLabel*(
+  layout: LabelLayout,
+  x, y, w, h: int
+): tuple[x, y: int] =
+  ## Slides one label rect so it stays inside the layout's clear rect
+  ## and off every reserved rect, the way a speech bubble slides back
+  ## inside the viewport: first into the clear rect, then, for each
+  ## reserved rect it still touches, to that rect's nearest clear
+  ## side. A label that fits nowhere keeps its place; an inactive
+  ## layout changes nothing.
+  result = (x, y)
+  if not layout.active:
+    return
+  let clear = layout.clear
+  if w > clear.w or h > clear.h:
+    return
+  result.x = clamp(x, clear.x, clear.x + clear.w - w)
+  result.y = clamp(y, clear.y, clear.y + clear.h - h)
+  var moved = true
+  # Every move settles one reserved rect; the loop only repeats when a
+  # move landed on another one, so a few rounds always settle it.
+  for _ in 0 ..< layout.keepOut.len + 1:
+    if not moved:
+      break
+    moved = false
+    for reserved in layout.keepOut:
+      let here = Rect(x: result.x, y: result.y, w: w, h: h)
+      if not rectsOverlap(here, reserved):
+        continue
+      let candidates = [
+        (x: result.x, y: reserved.y - h - LabelClearGap),
+        (x: result.x, y: reserved.y + reserved.h + LabelClearGap),
+        (x: reserved.x - w - LabelClearGap, y: result.y),
+        (x: reserved.x + reserved.w + LabelClearGap, y: result.y)
+      ]
+      var
+        best = -1
+        bestCost = high(int)
+      for i, candidate in candidates:
+        if not rectInside(
+            Rect(x: candidate.x, y: candidate.y, w: w, h: h), clear):
+          continue
+        let cost = abs(candidate.x - result.x) + abs(candidate.y - result.y)
+        if cost < bestCost:
+          bestCost = cost
+          best = i
+      if best >= 0:
+        result = candidates[best]
+        moved = true
+
 proc addNameTag(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1590,13 +1685,20 @@ proc addNameTag(
   screenY,
   z,
   viewportWidth,
-  viewportHeight: int
+  viewportHeight: int,
+  layout = LabelLayout()
 ): int =
-  ## Appends a player name tag and returns its top y coordinate.
+  ## Appends a player name tag and returns its top y coordinate. An
+  ## active layout keeps the tag inside its clear rect and off its
+  ## reserved rects.
   let
     tag = sim.nameTagSprite(player.playerName)
-    x = screenX + GnomeSpriteSize div 2 - tag.width div 2
-    y = screenY - tag.height - NameGapY
+    (x, y) = layout.placeLabel(
+      screenX + GnomeSpriteSize div 2 - tag.width div 2,
+      screenY - tag.height - NameGapY,
+      tag.width,
+      tag.height
+    )
     spriteId = NameSpriteBase + playerIndex
   if not rectVisible(
     x,
@@ -2945,9 +3047,11 @@ proc addPlayerObjects(
   viewportWidth,
   viewportHeight: int,
   highlightIndex = -1,
-  includeBubbles = true
+  includeBubbles = true,
+  labelLayout = LabelLayout()
 ) =
-  ## Appends all player sprite objects for one map.
+  ## Appends all player sprite objects for one map. An active label
+  ## layout keeps the name tags clear of the view's reserved rects.
   if mapIndex == MainMapIndex:
     packet.addConversationCircles(
       sim, cameraX, cameraY, viewportWidth, viewportHeight
@@ -3000,7 +3104,8 @@ proc addPlayerObjects(
       screenY,
       NameZ,
       viewportWidth,
-      viewportHeight
+      viewportHeight,
+      labelLayout
     )
     if includeBubbles:
       packet.addSpeechBubble(
@@ -3366,6 +3471,17 @@ proc addGlobalWorldView(
   )
   packet.addClockObjects(sim)
 
+proc directorTweenHoldFrames*(speedIndex: int): int =
+  ## Frames of a camera glide during which the replay lands no ticks
+  ## at one transport speed: the whole glide at 1X and slower, and a
+  ## slice of it in proportion to the speed above - 24 frames at 2X,
+  ## 12 at 4X, 3 at 16X - so a cut costs the same share of the show's
+  ## pace at every speed, and the faster transports keep their pace
+  ## while the glide eases on over its full run.
+  DirectorTweenFrames div max(1, PlaybackSpeedTicks[
+    clamp(speedIndex, 0, PlaybackSpeedTicks.high)
+  ])
+
 proc startDirectorTween(sim: SimServer) =
   ## Begins a timed camera glide from the current crop. The target is
   ## recomputed every frame, so a glide can chase a drifting ring and
@@ -3602,6 +3718,26 @@ proc updateDirectorCamera*(sim: SimServer) =
     sim.directorCamY += (targetY - sim.directorCamY) * DirectorTweenRate
     sim.directorCamW += (targetW - sim.directorCamW) * DirectorTweenRate
     sim.directorCamH += (targetH - sim.directorCamH) * DirectorTweenRate
+
+proc directorCrop*(sim: SimServer): tuple[x, y, w, h: float] =
+  ## The director camera's current crop of the main map, in world
+  ## pixels, for the headless checks and tests.
+  (sim.directorCamX, sim.directorCamY, sim.directorCamW, sim.directorCamH)
+
+proc directorCropJump*(
+  before, after: tuple[x, y, w, h: float]
+): float =
+  ## How far the crop moved between two frames, as a fraction of the
+  ## crop itself: the largest of the position shifts against the
+  ## crop's size and the size changes against the size. A glide keeps
+  ## this small every frame; a snap shows up as a value near one.
+  let
+    w = max(1.0, max(before.w, after.w))
+    h = max(1.0, max(before.h, after.h))
+  max(
+    max(abs(after.x - before.x) / w, abs(after.y - before.y) / h),
+    max(abs(after.w - before.w) / w, abs(after.h - before.h) / h)
+  )
 
 proc wrapCardLines(sim: SimServer, text: string, maxWidth: int): seq[string] =
   ## Word-wraps one spoken line to a pixel width in the Tiny5 font.
@@ -3853,10 +3989,45 @@ proc addDirectorConversationCards(
       )
       y += sprite.height + DirectorCardGapY
 
+proc directorLabelLayout*(
+  sim: SimServer,
+  viewW, viewH, paddedW, forestPad: int,
+  replayControls: bool
+): LabelLayout =
+  ## The director view's name-label layout, in viewport pixels. Labels
+  ## stay inside the map crop - the margins beside it belong to the
+  ## conversation cards - and off the parchment UI cards the browser
+  ## overlays on its window: the score panel at the top left and, with
+  ## replay controls showing, the transport card at the bottom center.
+  ## Those cards live on window-anchored layers the server never
+  ## sees, so their footprint on the crop is the one they have in the
+  ## DirectorUiReferenceRows window, the viewport filling its height.
+  result.active = true
+  result.clear = Rect(
+    x: DirectorCardMarginPx + forestPad, y: 0, w: viewW, h: viewH
+  )
+  let uiScale = float(viewH) / float(DirectorUiReferenceRows)
+  if replayControls:
+    let
+      cardW = int(float(ViewportWidth) * uiScale)
+      cardH = int(float(ReplayPanelHeight) * uiScale)
+    result.keepOut.add(Rect(
+      x: (paddedW - cardW) div 2, y: viewH - cardH, w: cardW, h: cardH
+    ))
+  let panel = sim.globalScorePanelCardSize()
+  if panel.rows > 0:
+    result.keepOut.add(Rect(
+      x: 0,
+      y: 0,
+      w: int(float(panel.width) * uiScale),
+      h: int(float(panel.height) * uiScale)
+    ))
+
 proc addDirectorWorldView(
   packet: var seq[uint8],
   sim: SimServer,
-  cache: var seq[SpriteCacheEntry]
+  cache: var seq[SpriteCacheEntry],
+  replayControls = false
 ) =
   ## Appends the main map cropped to the director camera. The browser
   ## client scales the declared viewport to fit its window, so a
@@ -3901,6 +4072,8 @@ proc addDirectorWorldView(
   )
   packet.addGardenObjects(sim, cameraX, cameraY, paddedW, viewH)
   packet.addTrailObjects(sim, cache, cameraX, cameraY)
+  # Name labels slide clear of the UI cards and the card margins, so
+  # a gnome walking under the transport card keeps its name on screen.
   packet.addPlayerObjects(
     sim,
     cache,
@@ -3909,7 +4082,10 @@ proc addDirectorWorldView(
     cameraY,
     paddedW,
     viewH,
-    includeBubbles = false
+    includeBubbles = false,
+    labelLayout = sim.directorLabelLayout(
+      viewW, viewH, paddedW, forestPad, replayControls
+    )
   )
   packet.addHouseGnomeObjects(sim, cache, cameraX, cameraY)
   packet.addObject(
@@ -4157,6 +4333,24 @@ proc addReplayMismatchWarning(
     ReplayMismatchSpriteId
   )
 
+proc conversationQueueLabel*(sim: SimServer): string =
+  ## The transport card's queue position. While playback is committed
+  ## it names the conversation on air, "CONV k/M". While the playhead
+  ## travels toward the next birth it reads "CONV -> k/M": the
+  ## conversation it is heading for, marked as ahead, so a
+  ## fast-forward never reads as that conversation already playing.
+  ## Past the last death, with nothing ahead, it holds at "CONV M/M".
+  ## Empty without a queue.
+  if sim.convQueue.len == 0:
+    return ""
+  let total = sim.convQueue.len
+  if sim.convQueueCommitted:
+    "CONV " & $(sim.convQueueIndex + 1) & "/" & $total
+  elif sim.convQueueIndex >= total:
+    "CONV " & $total & "/" & $total
+  else:
+    "CONV -> " & $(sim.convQueueIndex + 1) & "/" & $total
+
 proc addReplayControls(
   packet: var seq[uint8],
   sim: SimServer,
@@ -4225,19 +4419,19 @@ proc addReplayControls(
     ReplayTickSpriteId
   )
   if sim.convQueue.len > 0:
-    # The queue position label, under the tick counter: the cursor in
-    # the birth-ordered conversation list.
+    # The queue position label, under the tick counter: the
+    # conversation on air, or the one the playhead travels toward.
     let
+      convLabel = sim.conversationQueueLabel()
       convText = sim.globalPanelTextSprite(
-        "CONV " & $min(sim.convQueueIndex + 1, sim.convQueue.len) &
-          "/" & $sim.convQueue.len,
+        convLabel,
         rgba(GlobalPanelTextR, GlobalPanelTextG, GlobalPanelTextB, 255)
       )
     packet.addRgbaSpriteCached(
       cache,
       ReplayConvSpriteId,
       convText,
-      "replay conv position"
+      "replay conv " & convLabel
     )
     packet.addObject(
       ReplayConvObjectId,
@@ -4496,7 +4690,7 @@ proc buildGlobalPacket*(
     # camera picks the shot for everyone watching.
     nextState.pendingMapClick = false
     nextState.selectedPlayerIndex = -1
-    result.addDirectorWorldView(sim, nextState.spriteCache)
+    result.addDirectorWorldView(sim, nextState.spriteCache, replayControls)
     result.addGlobalScorePanel(sim, nextState.spriteCache, -1)
     if replayControls:
       result.addReplayControls(
@@ -5751,6 +5945,74 @@ proc applyReplayCommand*(
   else:
     discard
 
+proc queueReplayCommand*(state: PlayerViewerState, command: char) =
+  ## Queues one transport command as if the viewer had clicked it,
+  ## for hosts whose client cannot deliver keystrokes (the standalone
+  ## wasm viewer polls the browser's keydown queue directly).
+  state.replayCommands.add(command)
+
+proc advanceReplayShow*(
+  sim: SimServer,
+  replay: var ReplayPlayer,
+  directorWatching: bool
+) =
+  ## Advances playback one frame, shared by the websocket replay
+  ## server loop and the standalone viewer: conversation-queue
+  ## bookkeeping, show pacing under a director, the between-
+  ## conversations fast-forward with its boundary clamps, the camera
+  ## tween hold, and the loop restart.
+  if not replay.playing:
+    return
+  # Queue-mode bookkeeping: commit at births, release at deaths,
+  # rewind through same-tick birth groups, resume from the furthest
+  # tick shown.
+  sim.stepConversationQueue(replay)
+  # With a director watching, a conversation on screen slows 1X
+  # playback to show pacing: recorded lines land about five seconds
+  # apart. Other speeds respect the transport.
+  let showPacing = directorWatching and
+    (sim.directorFocusActive or sim.directorDinnerTtl > 0) and
+    replay.replaySpeedIndex() == DefaultSpeedIndex
+  var ticksThisFrame = 0
+  if showPacing:
+    inc sim.directorShowAccum
+    if sim.directorShowAccum >= DirectorShowFrames:
+      sim.directorShowAccum = 0
+      ticksThisFrame = 1
+  else:
+    sim.directorShowAccum = 0
+    ticksThisFrame = replay.replayTicksThisFrame()
+  # Between conversations the queue's playhead fast-forwards briskly
+  # to the next birth; committed playback never runs past its item's
+  # death tick. The clamps land the playhead exactly on each boundary.
+  if sim.convQueue.len > 0:
+    if not sim.convQueueCommitted and
+        replay.replaySpeedIndex() == DefaultSpeedIndex:
+      ticksThisFrame = QueueFastForwardTicks
+    if sim.convQueueCommitted:
+      ticksThisFrame = min(ticksThisFrame, max(0,
+        sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount))
+    elif sim.convQueueIndex < sim.convQueue.len:
+      ticksThisFrame = min(ticksThisFrame, max(0,
+        sim.convQueue[sim.convQueueIndex].birthTick - sim.tickCount))
+  # A camera glide is a held breath: the replay lands no ticks while
+  # the cut starts, so a cut never swallows a line. At 1X the hold
+  # spans the whole glide; faster transports hold for its first
+  # frames in proportion (directorTweenHoldFrames) and then let the
+  # ticks resume under the easing glide, so a cut is never a snap at
+  # any speed and never stalls a fast transport for two seconds.
+  if directorWatching and sim.directorTweenLeft > DirectorTweenFrames -
+      directorTweenHoldFrames(replay.replaySpeedIndex()):
+    ticksThisFrame = 0
+  for _ in 0 ..< ticksThisFrame:
+    if replay.playing:
+      replay.stepReplay(sim)
+  if replay.looping and not replay.playing and
+      replay.replayMaxTick() > 0:
+    sim.restartConversationQueue()
+    replay.seekReplay(sim, 0)
+    replay.playing = true
+
 when not defined(emscripten):
   proc initAppState() =
     ## Initializes shared websocket state.
@@ -5959,14 +6221,10 @@ proc replayViewerFrame*(
       replay.applyReplaySeek(sim, seekTick)
     for command in commands:
       replay.applyReplayCommand(sim, command)
-    if replay.playing:
-      for _ in 0 ..< replay.replayTicksThisFrame():
-        if replay.playing:
-          replay.stepReplay(sim)
-      if replay.looping and not replay.playing and
-          replay.replayMaxTick() > 0:
-        replay.seekReplay(sim, 0)
-        replay.playing = true
+    sim.advanceReplayShow(
+      replay,
+      directorWatching = state != nil and state.directorMode
+    )
   if replay.circlesTimeline.len > 0:
     # The replay recorded its circles; they beat any re-derivation.
     sim.conversationCircles =
@@ -7115,7 +7373,6 @@ when not defined(emscripten):
     )
     httpServer.waitUntilReady()
     lastTick = getMonoTime()
-    var directorShowAccum = 0
 
     while true:
       var
@@ -7194,59 +7451,12 @@ when not defined(emscripten):
           replay.applyReplaySeek(sim, seekTick)
         for command in commands:
           replay.applyReplayCommand(sim, command)
-        if replay.playing:
-          # Queue-mode bookkeeping: commit at births, release at
-          # deaths, rewind through same-tick birth groups, resume
-          # from the furthest tick shown.
-          sim.stepConversationQueue(replay)
-          # With a director watching, a conversation on screen slows
-          # 1X playback to show pacing: recorded lines land about five
-          # seconds apart. Other speeds respect the transport.
-          var directorWatching = false
-          for state in viewerStates:
-            if state.directorMode:
-              directorWatching = true
-              break
-          let showPacing = directorWatching and
-            (sim.directorFocusActive or sim.directorDinnerTtl > 0) and
-            replay.replaySpeedIndex() == DefaultSpeedIndex
-          var ticksThisFrame = 0
-          if showPacing:
-            inc directorShowAccum
-            if directorShowAccum >= DirectorShowFrames:
-              directorShowAccum = 0
-              ticksThisFrame = 1
-          else:
-            directorShowAccum = 0
-            ticksThisFrame = replay.replayTicksThisFrame()
-          # Between conversations the queue's playhead fast-forwards
-          # briskly to the next birth; committed playback never runs
-          # past its item's death tick. The clamps land the playhead
-          # exactly on each boundary.
-          if sim.convQueue.len > 0:
-            if not sim.convQueueCommitted and
-                replay.replaySpeedIndex() == DefaultSpeedIndex:
-              ticksThisFrame = QueueFastForwardTicks
-            if sim.convQueueCommitted:
-              ticksThisFrame = min(ticksThisFrame, max(0,
-                sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount))
-            elif sim.convQueueIndex < sim.convQueue.len:
-              ticksThisFrame = min(ticksThisFrame, max(0,
-                sim.convQueue[sim.convQueueIndex].birthTick - sim.tickCount))
-          # A camera glide is a held breath: at show speed the replay
-          # pauses until the shot settles, so cuts never swallow lines.
-          if directorWatching and sim.directorTweenLeft > 0 and
-              replay.replaySpeedIndex() == DefaultSpeedIndex:
-            ticksThisFrame = 0
-
-          for _ in 0 ..< ticksThisFrame:
-            if replay.playing:
-              replay.stepReplay(sim)
-          if replay.looping and not replay.playing and
-              replay.replayMaxTick() > 0:
-            sim.restartConversationQueue()
-            replay.seekReplay(sim, 0)
-            replay.playing = true
+        var directorWatching = false
+        for state in viewerStates:
+          if state.directorMode:
+            directorWatching = true
+            break
+        sim.advanceReplayShow(replay, directorWatching)
       if replay.circlesTimeline.len > 0:
         # The replay recorded its circles; they beat any re-derivation.
         sim.conversationCircles =

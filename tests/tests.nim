@@ -1740,4 +1740,215 @@ block:
   doAssert timeline.heartLinksAt(300) == @[(a: 0, b: 1, links: 2)],
     "the answered turn mints again; scrubbing anywhere reproduces it"
 
+echo "Testing director name labels stay clear of the UI cards"
+block:
+  # The layout math, in viewport pixels: a crop 400 wide that starts
+  # at x=100 (the card margin on its left), a transport card across
+  # the bottom center and a score panel in the top left corner.
+  var layout = LabelLayout(
+    active: true,
+    clear: Rect(x: 100, y: 0, w: 400, h: 300)
+  )
+  layout.keepOut.add(Rect(x: 200, y: 260, w: 200, h: 40))
+  layout.keepOut.add(Rect(x: 0, y: 0, w: 150, h: 90))
+  doAssert layout.placeLabel(300, 100, 30, 8) == (x: 300, y: 100),
+    "a label in the clear stays where its gnome puts it"
+  doAssert layout.placeLabel(90, 100, 30, 8) == (x: 100, y: 100),
+    "a label over the left margin slides back onto the crop"
+  doAssert layout.placeLabel(490, 100, 30, 8) == (x: 470, y: 100),
+    "a label over the right margin slides back onto the crop"
+  doAssert layout.placeLabel(300, 280, 30, 8) ==
+    (x: 300, y: 260 - 8 - LabelClearGap),
+    "a label under the transport card lifts above it"
+  doAssert layout.placeLabel(130, 10, 30, 8) ==
+    (x: 150 + LabelClearGap, y: 10),
+    "a label under the score panel's edge slides off its nearest side"
+  doAssert layout.placeLabel(100, 80, 30, 8) ==
+    (x: 100, y: 90 + LabelClearGap),
+    "a label under the score panel's bottom drops below it"
+  doAssert layout.placeLabel(300, 280, 500, 8) == (x: 300, y: 280),
+    "a label wider than the clear rect is left alone"
+  doAssert LabelLayout().placeLabel(90, 280, 30, 8) == (x: 90, y: 280),
+    "an inactive layout changes nothing: the global and player views"
+  # The director view's own layout: the crop is the clear rect, the
+  # transport card sits at the bottom center of the padded viewport
+  # and the score panel at its top left, both at the reference scale
+  # where one UI pixel is one viewport pixel.
+  let sim = initSimServer()
+  doAssert sim.addPlayer("alice", 0) == 0
+  let director = sim.directorLabelLayout(
+    viewW = 250, viewH = DirectorUiReferenceRows, paddedW = 590,
+    forestPad = 0, replayControls = true
+  )
+  doAssert director.active
+  doAssert director.clear ==
+    Rect(x: DirectorCardMarginPx, y: 0, w: 250, h: DirectorUiReferenceRows),
+    "labels stay on the crop, off the card margins"
+  doAssert director.keepOut.len == 2
+  let transport = director.keepOut[0]
+  doAssert transport.w == ViewportWidth and transport.h == ReplayPanelHeight,
+    "the transport card keeps its size at the reference scale"
+  doAssert transport.y + transport.h == DirectorUiReferenceRows,
+    "the transport card hugs the bottom of the viewport"
+  doAssert transport.x == (590 - ViewportWidth) div 2,
+    "the transport card is centered on the padded viewport"
+  let panel = director.keepOut[1]
+  doAssert panel.x == 0 and panel.y == 0 and panel.w > 0 and panel.h > 0,
+    "the score panel sits in the top left corner"
+  let live = sim.directorLabelLayout(
+    250, DirectorUiReferenceRows div 2, 590, 0, replayControls = false
+  )
+  doAssert live.keepOut.len == 1,
+    "a live game has no transport card to keep clear of"
+  doAssert live.keepOut[0].h == panel.h div 2,
+    "the cards' footprint scales with the crop height"
+
+echo "Testing the CONV label follows the commitment, not the travel"
+block:
+  # The fixture: nine gnomes, three conversations born together at
+  # tick 360 - a same-tick group the queue plays through rewinds -
+  # with later joins to the first at 647 and 719; the recording ends
+  # at 2447 with all three still open.
+  let
+    data = loadReplay("tests/fixtures/luna_9gnomes.bitreplay")
+    config = data.replaySimConfig()
+  var sim = initSimServer(config.seed, config.dayTicks)
+  sim.attachConversationTimeline(data, "")
+  var replay = initReplayPlayer(data)
+  replay.buildReplayKeyframes(config.seed, config.dayTicks)
+  sim.buildConversationQueue(replay.replayMaxTick())
+  doAssert sim.convQueue.len == 3, "the fixture holds three conversations"
+  for span in sim.convQueue:
+    doAssert span.birthTick == 360, "all three are born at tick 360"
+  var state = newReplayViewerState()
+  state.directorMode = true
+  replay.looping = false
+  doAssert sim.conversationQueueLabel() == "CONV -> 1/3",
+    "before the first birth the label points at the conversation ahead"
+  # The 1X fast-forward covers eight ticks a frame and the clamp lands
+  # the playhead exactly on the birth; the queue commits on the frame
+  # after that.
+  var frames = 0
+  while sim.tickCount < 352 and frames < 1000:
+    discard replayViewerFrame(sim, replay, state, true)
+    inc frames
+  doAssert sim.tickCount == 352 and not sim.convQueueCommitted
+  doAssert sim.conversationQueueLabel() == "CONV -> 1/3",
+    "one frame short of the birth the label still reads as travel"
+  discard replayViewerFrame(sim, replay, state, true)
+  doAssert sim.tickCount == 360 and not sim.convQueueCommitted
+  doAssert sim.conversationQueueLabel() == "CONV -> 1/3",
+    "on the birth tick itself, before the commit, it still reads ahead"
+  discard replayViewerFrame(sim, replay, state, true)
+  doAssert sim.convQueueCommitted and sim.convQueueIndex == 0
+  doAssert sim.conversationQueueLabel() == "CONV 1/3",
+    "committed, the label reads the conversation on air"
+  # The later joins at 647 and 719 grow the first conversation; the
+  # label holds through them (show pacing: a tick every five frames
+  # once the camera settles).
+  while sim.tickCount < 720 and frames < 20_000:
+    discard replayViewerFrame(sim, replay, state, true)
+    inc frames
+  doAssert sim.tickCount >= 720, "playback reaches past the last join"
+  doAssert sim.convQueueCommitted and sim.convQueueIndex == 0
+  doAssert sim.conversationQueueLabel() == "CONV 1/3",
+    "a join is not a new conversation"
+  # Next conversation: the queue rewinds to the shared birth tick and
+  # the label follows the commitment.
+  replay.applyReplayCommand(sim, 'n')
+  doAssert sim.tickCount == 360 and sim.convQueueCommitted
+  doAssert sim.conversationQueueLabel() == "CONV 2/3"
+  replay.applyReplayCommand(sim, 'n')
+  doAssert sim.conversationQueueLabel() == "CONV 3/3"
+  # A scrub into dead time travels again, toward the next birth; a
+  # scrub inside a span commits there.
+  replay.applyReplaySeek(sim, 100)
+  doAssert not sim.convQueueCommitted
+  doAssert sim.conversationQueueLabel() == "CONV -> 1/3",
+    "scrubbed into dead time the label reads ahead again"
+  replay.applyReplaySeek(sim, 500)
+  doAssert sim.convQueueCommitted and sim.convQueueIndex == 0
+  doAssert sim.conversationQueueLabel() == "CONV 1/3",
+    "scrubbed into a span the label reads that conversation"
+  # Past the last death nothing is ahead: the label holds at the end.
+  replay.applyReplayCommand(sim, 'e')
+  doAssert sim.tickCount == replay.replayMaxTick()
+  doAssert not sim.convQueueCommitted
+  doAssert sim.conversationQueueLabel() == "CONV 3/3",
+    "played out, the label holds the last position"
+
+echo "Testing director cuts glide at every transport speed"
+block:
+  # The tick hold scales with the transport: the whole 48-frame glide
+  # at 1X and slower, a proportional slice of it above.
+  doAssert directorTweenHoldFrames(0) == DirectorTweenFrames, "1/4X"
+  doAssert directorTweenHoldFrames(DefaultSpeedIndex) == DirectorTweenFrames
+  doAssert directorTweenHoldFrames(3) == DirectorTweenFrames div 2, "2X"
+  doAssert directorTweenHoldFrames(5) == DirectorTweenFrames div 4, "4X"
+  doAssert directorTweenHoldFrames(7) == DirectorTweenFrames div 16, "16X"
+  # The headless director loop over the fixture at 4X and 16X: the
+  # crop never moves more than a tenth of itself between two frames,
+  # cuts still happen, and each cut holds the ticks for its share of
+  # the glide (a rewind through the same-tick group chains a glide
+  # out into a glide in, so the longest hold may be two shares).
+  for speed in ['4', '6']:
+    let
+      data = loadReplay("tests/fixtures/luna_9gnomes.bitreplay")
+      config = data.replaySimConfig()
+    var sim = initSimServer(config.seed, config.dayTicks)
+    sim.attachConversationTimeline(data, "")
+    var replay = initReplayPlayer(data)
+    replay.buildReplayKeyframes(config.seed, config.dayTicks)
+    sim.buildConversationQueue(replay.replayMaxTick())
+    var state = newReplayViewerState()
+    state.directorMode = true
+    replay.applyReplayCommand(sim, speed)
+    replay.looping = false
+    let
+      maxTick = replay.replayMaxTick()
+      holdFrames = directorTweenHoldFrames(replay.replaySpeedIndex())
+    var
+      frames = 0
+      worst = 0.0
+      cuts = 0
+      wide = true
+      mapH = 0.0
+      lastCrop = sim.directorCrop()
+      lastTick = sim.tickCount
+      holdRun = 0
+      longestHold = 0
+    while frames < 100_000:
+      inc frames
+      discard replayViewerFrame(sim, replay, state, true)
+      let crop = sim.directorCrop()
+      if frames == 1:
+        mapH = crop.h  # the opening wide shot frames the whole map
+      else:
+        worst = max(worst, directorCropJump(lastCrop, crop))
+      lastCrop = crop
+      if wide and crop.h < mapH * 0.9:
+        inc cuts
+        wide = false
+      elif not wide and crop.h >= mapH * 0.9:
+        wide = true
+      if sim.tickCount == lastTick:
+        inc holdRun
+      else:
+        longestHold = max(longestHold, holdRun)
+        holdRun = 0
+        lastTick = sim.tickCount
+      if not replay.playing and sim.tickCount >= maxTick:
+        break
+    doAssert sim.tickCount == maxTick,
+      "the show at speed " & speed & " runs to the end of the recording"
+    doAssert cuts >= 1, "the show at speed " & speed & " cut into a ring"
+    doAssert worst <= 0.1, "at speed " & speed & " the crop moved " &
+      $worst & " of itself in one frame"
+    doAssert longestHold >= holdFrames - 1,
+      "at speed " & speed & " a cut held the ticks for " & $longestHold &
+      " frames, under its " & $holdFrames & "-frame share"
+    doAssert longestHold <= holdFrames * 2 + 1,
+      "at speed " & speed & " the ticks froze for " & $longestHold &
+      " frames, more than two " & $holdFrames & "-frame shares"
+
 echo "All tests passed"
