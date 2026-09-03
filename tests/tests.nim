@@ -1740,4 +1740,67 @@ block:
   doAssert timeline.heartLinksAt(300) == @[(a: 0, b: 1, links: 2)],
     "the answered turn mints again; scrubbing anywhere reproduces it"
 
+echo "Testing director name labels stay clear of the UI cards"
+block:
+  # The layout math, in viewport pixels: a crop 400 wide that starts
+  # at x=100 (the card margin on its left), a transport card across
+  # the bottom center and a score panel in the top left corner.
+  var layout = LabelLayout(
+    active: true,
+    clear: Rect(x: 100, y: 0, w: 400, h: 300)
+  )
+  layout.keepOut.add(Rect(x: 200, y: 260, w: 200, h: 40))
+  layout.keepOut.add(Rect(x: 0, y: 0, w: 150, h: 90))
+  doAssert layout.placeLabel(300, 100, 30, 8) == (x: 300, y: 100),
+    "a label in the clear stays where its gnome puts it"
+  doAssert layout.placeLabel(90, 100, 30, 8) == (x: 100, y: 100),
+    "a label over the left margin slides back onto the crop"
+  doAssert layout.placeLabel(490, 100, 30, 8) == (x: 470, y: 100),
+    "a label over the right margin slides back onto the crop"
+  doAssert layout.placeLabel(300, 280, 30, 8) ==
+    (x: 300, y: 260 - 8 - LabelClearGap),
+    "a label under the transport card lifts above it"
+  doAssert layout.placeLabel(130, 10, 30, 8) ==
+    (x: 150 + LabelClearGap, y: 10),
+    "a label under the score panel's edge slides off its nearest side"
+  doAssert layout.placeLabel(100, 80, 30, 8) ==
+    (x: 100, y: 90 + LabelClearGap),
+    "a label under the score panel's bottom drops below it"
+  doAssert layout.placeLabel(300, 280, 500, 8) == (x: 300, y: 280),
+    "a label wider than the clear rect is left alone"
+  doAssert LabelLayout().placeLabel(90, 280, 30, 8) == (x: 90, y: 280),
+    "an inactive layout changes nothing: the global and player views"
+  # The director view's own layout: the crop is the clear rect, the
+  # transport card sits at the bottom center of the padded viewport
+  # and the score panel at its top left, both at the reference scale
+  # where one UI pixel is one viewport pixel.
+  let sim = initSimServer()
+  doAssert sim.addPlayer("alice", 0) == 0
+  let director = sim.directorLabelLayout(
+    viewW = 250, viewH = DirectorUiReferenceRows, paddedW = 590,
+    forestPad = 0, replayControls = true
+  )
+  doAssert director.active
+  doAssert director.clear ==
+    Rect(x: DirectorCardMarginPx, y: 0, w: 250, h: DirectorUiReferenceRows),
+    "labels stay on the crop, off the card margins"
+  doAssert director.keepOut.len == 2
+  let transport = director.keepOut[0]
+  doAssert transport.w == ViewportWidth and transport.h == ReplayPanelHeight,
+    "the transport card keeps its size at the reference scale"
+  doAssert transport.y + transport.h == DirectorUiReferenceRows,
+    "the transport card hugs the bottom of the viewport"
+  doAssert transport.x == (590 - ViewportWidth) div 2,
+    "the transport card is centered on the padded viewport"
+  let panel = director.keepOut[1]
+  doAssert panel.x == 0 and panel.y == 0 and panel.w > 0 and panel.h > 0,
+    "the score panel sits in the top left corner"
+  let live = sim.directorLabelLayout(
+    250, DirectorUiReferenceRows div 2, 590, 0, replayControls = false
+  )
+  doAssert live.keepOut.len == 1,
+    "a live game has no transport card to keep clear of"
+  doAssert live.keepOut[0].h == panel.h div 2,
+    "the cards' footprint scales with the crop height"
+
 echo "All tests passed"

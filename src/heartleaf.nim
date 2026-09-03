@@ -72,7 +72,7 @@ const
   ReplayMismatchLayerKind = 5
   MapLayerFlags = 1
   UiLayerFlags = 2
-  ReplayPanelHeight = 42
+  ReplayPanelHeight* = 42
     ## Tall enough for the parchment card's leafy border around the
     ## transport row and the scrubber.
   ReplayScrubberWidth = 288
@@ -179,7 +179,7 @@ const
   QueueFastForwardTicks = 8
     ## Ticks per frame the conversation-queue playhead covers between
     ## conversations: a brisk automatic ~8X toward the next birth.
-  DirectorCardMarginPx = 170
+  DirectorCardMarginPx* = 170
     ## Extra viewport width on each side of the director's crop. The
     ## conversation cards live in these margins, outside the map.
   DirectorCardWidth = 158
@@ -228,6 +228,17 @@ const
   DirectorBounceHops = [2, 4, 6, 6, 5, 4, 2, 0, 2, 3, 3, 2, 1, 0]
     ## The little hop a gnome does when its new line lands, in pixels
     ## of lift per frame.
+  DirectorUiReferenceRows* = 300
+    ## The browser draws the parchment UI cards (the score panel, the
+    ## transport card) on window-anchored layers at up to 3x, over the
+    ## director viewport it fits to the window; the server never
+    ## learns the window size. The name-label layout assumes the
+    ## shortest common window, 900 px tall, where the viewport's
+    ## height spans 300 UI-scale pixels: one UI pixel covers
+    ## viewH / 300 viewport pixels. A taller window leaves the reserved
+    ## bands roomier than the cards; a shorter one may still clip.
+  LabelClearGap* = 2
+    ## Pixels a name label keeps from a reserved rect it slid off.
   ClockPadX = 2
   ClockPadY = 1
   ClockGlyphGap = 1
@@ -582,6 +593,14 @@ type
       ## While positive, the director camera belongs to this
       ## encounter: no dwell rotation, no tour, until the queue
       ## releases it.
+
+  LabelLayout* = object
+    ## Where name labels may sit in one view: inside the clear rect and
+    ## off every reserved rect, all in viewport pixels. An inactive
+    ## layout (the default) leaves labels where their gnome puts them.
+    active*: bool
+    clear*: Rect
+    keepOut*: seq[Rect]
 
   KeyframeState = object
     ## Dynamic simulation state stored in one replay keyframe. Static
@@ -1482,6 +1501,28 @@ proc selectedGlobalPlayerIndex(state: PlayerViewerState, sim: SimServer): int =
   if result >= sim.players.len:
     return -1
 
+proc globalScorePanelCardSize(
+  sim: SimServer
+): tuple[width, height, rows: int] =
+  ## The parchment card the score panel draws on, sized to the rows it
+  ## can show; zero rows when there is nothing to draw.
+  var maxRight = 0
+  for i, player in sim.players:
+    let rowY = GlobalPanelPad + i * GlobalPanelRowHeight
+    if GlobalPanelCardPadY * 2 + rowY + GlobalPanelRowHeight >
+        GlobalPanelHeight:
+      break
+    result.rows = i + 1
+    maxRight = max(maxRight, GlobalPanelNameX +
+      sim.textFont.textWidth(player.attributedDisplayName()))
+    maxRight = max(maxRight, GlobalPanelScoreX +
+      sim.textFont.textWidth(player.score.globalPanelScoreText()))
+  if result.rows == 0:
+    return
+  result.width = min(GlobalPanelWidth, GlobalPanelCardPadX * 2 + maxRight + 1)
+  result.height = GlobalPanelCardPadY * 2 + GlobalPanelPad +
+    result.rows * GlobalPanelRowHeight
+
 proc addGlobalScorePanel(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1493,25 +1534,9 @@ proc addGlobalScorePanel(
   if sim.players.len == 0:
     return
   # Size the card to its rows before drawing anything.
-  var
-    rows = 0
-    maxRight = 0
-  for i, player in sim.players:
-    let rowY = GlobalPanelPad + i * GlobalPanelRowHeight
-    if GlobalPanelCardPadY * 2 + rowY + GlobalPanelRowHeight >
-        GlobalPanelHeight:
-      break
-    rows = i + 1
-    maxRight = max(maxRight, GlobalPanelNameX +
-      sim.textFont.textWidth(player.attributedDisplayName()))
-    maxRight = max(maxRight, GlobalPanelScoreX +
-      sim.textFont.textWidth(player.score.globalPanelScoreText()))
+  let (cardWidth, cardHeight, rows) = sim.globalScorePanelCardSize()
   if rows == 0:
     return
-  let
-    cardWidth = min(GlobalPanelWidth, GlobalPanelCardPadX * 2 + maxRight + 1)
-    cardHeight = GlobalPanelCardPadY * 2 + GlobalPanelPad +
-      rows * GlobalPanelRowHeight
   var card: RgbaSprite
   if sim.chatBanner.width > 0:
     card = sim.chatBanner.nineSliceSprite(
@@ -1585,6 +1610,67 @@ proc addGlobalScorePanel(
       nameSpriteId
     )
 
+proc rectsOverlap(a, b: Rect): bool =
+  ## Returns true when two rectangles share any pixel.
+  a.x < b.x + b.w and b.x < a.x + a.w and
+    a.y < b.y + b.h and b.y < a.y + a.h
+
+proc rectInside(inner, outer: Rect): bool =
+  ## Returns true when one rectangle lies wholly inside another.
+  inner.x >= outer.x and inner.y >= outer.y and
+    inner.x + inner.w <= outer.x + outer.w and
+    inner.y + inner.h <= outer.y + outer.h
+
+proc placeLabel*(
+  layout: LabelLayout,
+  x, y, w, h: int
+): tuple[x, y: int] =
+  ## Slides one label rect so it stays inside the layout's clear rect
+  ## and off every reserved rect, the way a speech bubble slides back
+  ## inside the viewport: first into the clear rect, then, for each
+  ## reserved rect it still touches, to that rect's nearest clear
+  ## side. A label that fits nowhere keeps its place; an inactive
+  ## layout changes nothing.
+  result = (x, y)
+  if not layout.active:
+    return
+  let clear = layout.clear
+  if w > clear.w or h > clear.h:
+    return
+  result.x = clamp(x, clear.x, clear.x + clear.w - w)
+  result.y = clamp(y, clear.y, clear.y + clear.h - h)
+  var moved = true
+  # Every move settles one reserved rect; the loop only repeats when a
+  # move landed on another one, so a few rounds always settle it.
+  for _ in 0 ..< layout.keepOut.len + 1:
+    if not moved:
+      break
+    moved = false
+    for reserved in layout.keepOut:
+      let here = Rect(x: result.x, y: result.y, w: w, h: h)
+      if not rectsOverlap(here, reserved):
+        continue
+      let candidates = [
+        (x: result.x, y: reserved.y - h - LabelClearGap),
+        (x: result.x, y: reserved.y + reserved.h + LabelClearGap),
+        (x: reserved.x - w - LabelClearGap, y: result.y),
+        (x: reserved.x + reserved.w + LabelClearGap, y: result.y)
+      ]
+      var
+        best = -1
+        bestCost = high(int)
+      for i, candidate in candidates:
+        if not rectInside(
+            Rect(x: candidate.x, y: candidate.y, w: w, h: h), clear):
+          continue
+        let cost = abs(candidate.x - result.x) + abs(candidate.y - result.y)
+        if cost < bestCost:
+          bestCost = cost
+          best = i
+      if best >= 0:
+        result = candidates[best]
+        moved = true
+
 proc addNameTag(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1595,13 +1681,20 @@ proc addNameTag(
   screenY,
   z,
   viewportWidth,
-  viewportHeight: int
+  viewportHeight: int,
+  layout = LabelLayout()
 ): int =
-  ## Appends a player name tag and returns its top y coordinate.
+  ## Appends a player name tag and returns its top y coordinate. An
+  ## active layout keeps the tag inside its clear rect and off its
+  ## reserved rects.
   let
     tag = sim.nameTagSprite(player.playerName)
-    x = screenX + GnomeSpriteSize div 2 - tag.width div 2
-    y = screenY - tag.height - NameGapY
+    (x, y) = layout.placeLabel(
+      screenX + GnomeSpriteSize div 2 - tag.width div 2,
+      screenY - tag.height - NameGapY,
+      tag.width,
+      tag.height
+    )
     spriteId = NameSpriteBase + playerIndex
   if not rectVisible(
     x,
@@ -2950,9 +3043,11 @@ proc addPlayerObjects(
   viewportWidth,
   viewportHeight: int,
   highlightIndex = -1,
-  includeBubbles = true
+  includeBubbles = true,
+  labelLayout = LabelLayout()
 ) =
-  ## Appends all player sprite objects for one map.
+  ## Appends all player sprite objects for one map. An active label
+  ## layout keeps the name tags clear of the view's reserved rects.
   if mapIndex == MainMapIndex:
     packet.addConversationCircles(
       sim, cameraX, cameraY, viewportWidth, viewportHeight
@@ -3005,7 +3100,8 @@ proc addPlayerObjects(
       screenY,
       NameZ,
       viewportWidth,
-      viewportHeight
+      viewportHeight,
+      labelLayout
     )
     if includeBubbles:
       packet.addSpeechBubble(
@@ -3878,10 +3974,45 @@ proc addDirectorConversationCards(
       )
       y += sprite.height + DirectorCardGapY
 
+proc directorLabelLayout*(
+  sim: SimServer,
+  viewW, viewH, paddedW, forestPad: int,
+  replayControls: bool
+): LabelLayout =
+  ## The director view's name-label layout, in viewport pixels. Labels
+  ## stay inside the map crop - the margins beside it belong to the
+  ## conversation cards - and off the parchment UI cards the browser
+  ## overlays on its window: the score panel at the top left and, with
+  ## replay controls showing, the transport card at the bottom center.
+  ## Those cards live on window-anchored layers the server never
+  ## sees, so their footprint on the crop is the one they have in the
+  ## DirectorUiReferenceRows window, the viewport filling its height.
+  result.active = true
+  result.clear = Rect(
+    x: DirectorCardMarginPx + forestPad, y: 0, w: viewW, h: viewH
+  )
+  let uiScale = float(viewH) / float(DirectorUiReferenceRows)
+  if replayControls:
+    let
+      cardW = int(float(ViewportWidth) * uiScale)
+      cardH = int(float(ReplayPanelHeight) * uiScale)
+    result.keepOut.add(Rect(
+      x: (paddedW - cardW) div 2, y: viewH - cardH, w: cardW, h: cardH
+    ))
+  let panel = sim.globalScorePanelCardSize()
+  if panel.rows > 0:
+    result.keepOut.add(Rect(
+      x: 0,
+      y: 0,
+      w: int(float(panel.width) * uiScale),
+      h: int(float(panel.height) * uiScale)
+    ))
+
 proc addDirectorWorldView(
   packet: var seq[uint8],
   sim: SimServer,
-  cache: var seq[SpriteCacheEntry]
+  cache: var seq[SpriteCacheEntry],
+  replayControls = false
 ) =
   ## Appends the main map cropped to the director camera. The browser
   ## client scales the declared viewport to fit its window, so a
@@ -3926,6 +4057,8 @@ proc addDirectorWorldView(
   )
   packet.addGardenObjects(sim, cameraX, cameraY, paddedW, viewH)
   packet.addTrailObjects(sim, cache, cameraX, cameraY)
+  # Name labels slide clear of the UI cards and the card margins, so
+  # a gnome walking under the transport card keeps its name on screen.
   packet.addPlayerObjects(
     sim,
     cache,
@@ -3934,7 +4067,10 @@ proc addDirectorWorldView(
     cameraY,
     paddedW,
     viewH,
-    includeBubbles = false
+    includeBubbles = false,
+    labelLayout = sim.directorLabelLayout(
+      viewW, viewH, paddedW, forestPad, replayControls
+    )
   )
   packet.addHouseGnomeObjects(sim, cache, cameraX, cameraY)
   packet.addObject(
@@ -4521,7 +4657,7 @@ proc buildGlobalPacket*(
     # camera picks the shot for everyone watching.
     nextState.pendingMapClick = false
     nextState.selectedPlayerIndex = -1
-    result.addDirectorWorldView(sim, nextState.spriteCache)
+    result.addDirectorWorldView(sim, nextState.spriteCache, replayControls)
     result.addGlobalScorePanel(sim, nextState.spriteCache, -1)
     if replayControls:
       result.addReplayControls(
