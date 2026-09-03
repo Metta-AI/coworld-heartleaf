@@ -9,7 +9,8 @@ import
     villager, executor, report, prompt, pacing, bedrock_client, brains,
     encounters],
   replays,
-  ../tools/llm_chart
+  ../tools/llm_chart,
+  voiced_replay
 
 echo "Testing assets"
 doAssert fileExists("data/map.aseprite"), "map asset should exist"
@@ -1739,5 +1740,106 @@ block:
     "a silent slot mints nothing"
   doAssert timeline.heartLinksAt(300) == @[(a: 0, b: 1, links: 2)],
     "the answered turn mints again; scrubbing anywhere reproduces it"
+
+echo "Testing voice rows ride inside the replay"
+block:
+  # The record format: one debug-sprite row per baked clip, on the
+  # channel the conversation rows use, keyed by seat and text.
+  const TestSeed = 11
+  let replayPath = getTempDir() / "heartleaf-voice-rows.bitreplay"
+  var
+    recSim = initSimServer(TestSeed)
+    writer = openReplayWriter(replayPath, $(%*{"seed": TestSeed}))
+  doAssert recSim.addPlayer("alice", 0) == 0
+  writer.writeJoin(tickTime(0), 0, "alice", 0, "")
+  writer.lastMasks.add(0)
+  for tick in 0 ..< 10:
+    if tick == 3:
+      recSim.applyPlayerChat(0, "the well is dry")
+      writer.writeChat(tickTime(recSim.tickCount), 0, "the well is dry")
+    recSim.step(@[decodeInputMask(0)])
+    writer.writeHash(uint32(recSim.tickCount), recSim.gameHash())
+  writer.writeConversationRecord(tickTime(5), $(%*{
+    "kind": "convo-enter", "tick": 5, "seat": 0,
+    "text": "enter id=1 members=Ivan, Anton"
+  }))
+  let fakeClip = "not aac \x00\x01\x02\xff but bytes"
+  writer.writeVoiceRecord(
+    tickTime(9), 9, 0, "the well is dry", "m4a", fakeClip
+  )
+  writer.closeReplayWriter()
+
+  let data = loadReplay(replayPath)
+  let clips = data.replayVoiceClips()
+  doAssert clips.len == 1, "one baked clip"
+  var clip: VoiceClip
+  doAssert clips.findVoiceClip(0, "the well is dry", clip),
+    "the clip is found by seat and text"
+  doAssert clip.codec == "m4a" and clip.tick == 9
+  doAssert clip.voiceClipBytes() == fakeClip, "the bytes round trip"
+  doAssert voiceContentType(clip.codec) == "audio/mp4"
+  doAssert not clips.findVoiceClip(1, "the well is dry", clip),
+    "another seat is another voice"
+  doAssert not clips.findVoiceClip(0, "the well is wet", clip),
+    "another text is another line"
+  doAssert initReplayPlayer(data).voiceClips.len == 1,
+    "the player loads the clips"
+  doAssert "\"kind\":\"voice\"" notin data.conversationLogText(),
+    "voice rows stay out of the conversation log"
+  doAssert parseConversationTimeline(data.conversationLogText()).events.len == 1,
+    "the conversation row beside the clip still reads"
+  doAssert data.replayCirclesTimeline().len == 0,
+    "voice rows are not circle rows"
+
+  # Enriching a recording after the fact: copy every record, add a
+  # clip, and the copy still validates tick for tick.
+  var copy = data
+  copy.addVoiceRecord(9, 0, "a second line", "mp3", "mp3 bytes")
+  let copyPath = getTempDir() / "heartleaf-voice-rows-copy.bitreplay"
+  writeReplayData(copyPath, copy)
+  let reread = loadReplay(copyPath)
+  doAssert reread.joins.len == 1 and reread.chats.len == 1 and
+    reread.hashes.len == 10, "every record kind is copied"
+  doAssert reread.replayVoiceClips().len == 2, "the added clip is there"
+  doAssert reread.replayVoiceClips().findVoiceClip(0, "a second line", clip)
+  doAssert voiceContentType(clip.codec) == "audio/mpeg"
+  var
+    playSim = initSimServer(TestSeed)
+    replay = initReplayPlayer(reread)
+  while replay.playing and replay.hashIndex < reread.hashes.len:
+    replay.stepReplay(playSim)
+  doAssert not replay.hashValidationFailed, "the copy validates"
+  doAssert playSim.gameHash() == data.hashes[^1].hash
+
+  removeFile(replayPath)
+  removeFile(copyPath)
+
+echo "Testing every heard line of a recording gets a clip"
+block:
+  # replaySpokenLines finds the lines the delay-chat feed will show by
+  # playing the recording; the baker voices exactly those.
+  let replayPath = getTempDir() / "heartleaf-voiced-village.bitreplay"
+  let lines = writeVoicedTestReplay(replayPath)
+  doAssert lines.len > 0, "some scripted line is heard by a neighbour"
+  let data = loadReplay(replayPath)
+  doAssert data.replayVoiceClips().len > 0
+  var clip: VoiceClip
+  for line in lines:
+    doAssert data.replayVoiceClips().findVoiceClip(line.seat, line.text, clip),
+      "a clip for " & line.text
+    doAssert clip.voiceClipBytes() == fakeVoiceBytes(line.seat, line.text)
+  doAssert data.replaySpokenLines() == lines,
+    "the baked recording plays the same lines"
+  var unheard = 0
+  for chat in data.chats:
+    var heard = false
+    for line in lines:
+      if line.text == chat.message:
+        heard = true
+    if not heard:
+      inc unheard
+  echo "Voiced village: ", lines.len, " heard lines, ", unheard,
+    " unheard chats without clips"
+  removeFile(replayPath)
 
 echo "All tests passed"

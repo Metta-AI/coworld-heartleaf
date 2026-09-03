@@ -26,6 +26,28 @@ const
   RepoDir = currentSourcePath().parentDir().parentDir()
   BitworldClientDir = RepoDir.parentDir() / "bitworld" / "client"
 
+when defined(emscripten):
+  {.emit: """
+#include <emscripten.h>
+void heartleaf_talk(int seat, int len, const char* text) {
+  EM_ASM({
+    if (window.heartleafTalk) window.heartleafTalk($0, $1, UTF8ToString($2));
+  }, seat, len, text);
+}
+void heartleaf_voice(int seat, const char* codec, const char* base64) {
+  EM_ASM({
+    if (window.heartleafVoice)
+      window.heartleafVoice($0, UTF8ToString($1), UTF8ToString($2));
+  }, seat, codec, base64);
+}
+""".}
+  proc heartleafTalk(
+    seat, length: cint, text: cstring
+  ) {.importc: "heartleaf_talk", nodecl.}
+  proc heartleafVoice(
+    seat: cint, codec, base64: cstring
+  ) {.importc: "heartleaf_voice", nodecl.}
+
 type
   ReplayViewer = ref object
     app: GlobalApp
@@ -34,6 +56,8 @@ type
     state: PlayerViewerState
     inputPackets: seq[string]
     loaded: bool
+    lastChat: tuple[index, gnomeIndex, messageLen: int]
+      ## The banner line last sounded, so each line babbles once.
 
 proc addInputPacket(viewer: ReplayViewer, packet: string) =
   ## Queues one local sprite protocol client packet.
@@ -134,10 +158,33 @@ proc drainInput(viewer: ReplayViewer) =
     viewer.state.handleReplayViewerPacket(packet)
   viewer.inputPackets.setLen(0)
 
+proc soundNewChat(viewer: ReplayViewer) =
+  ## Tells the page when the chat banner starts a new line. A clip
+  ## baked into the replay is handed over as-is (the page decodes and
+  ## plays it: no server, no synthesizer); a line with no baked clip
+  ## gets the page's own speech fallback. Web builds only; native
+  ## stays silent.
+  when defined(emscripten):
+    let now = viewer.sim.chatFeedNowPlaying()
+    if now != viewer.lastChat:
+      viewer.lastChat = now
+      if now.index >= 0:
+        let text = viewer.sim.chatFeedNowText()
+        var clip: VoiceClip
+        if viewer.replay.voiceClips.findVoiceClip(now.gnomeIndex, text, clip):
+          heartleafVoice(
+            cint(now.gnomeIndex), cstring(clip.codec), cstring(clip.base64)
+          )
+        else:
+          heartleafTalk(
+            cint(now.gnomeIndex), cint(now.messageLen), cstring(text)
+          )
+
 proc tick(viewer: ReplayViewer) =
   ## Pumps one replay viewer frame.
   viewer.app.handleInput()
   viewer.drainInput()
+  viewer.soundNewChat()
   let packet = replayViewerFrame(
     viewer.sim,
     viewer.replay,

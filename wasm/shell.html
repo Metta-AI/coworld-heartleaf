@@ -12,6 +12,213 @@
   </head>
   <body>
     <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    <button id="radio" title="music and gnome voices">&#9834; sound</button>
+    <style>
+      #radio {
+        position:absolute; top:8px; right:8px; z-index:10;
+        font:12px monospace; color:#cfc7a8; background:#2a2620;
+        border:1px solid #4a4436; border-radius:4px; padding:4px 8px;
+        cursor:pointer; opacity:0.8;
+      }
+      #radio.on { color:#ffe9a0; border-color:#8a7c4e; }
+    </style>
+    <script>
+    // The gnome radio: whimsical plucked-string village music and
+    // gnomes that read their lines aloud. The strings are Karplus-
+    // Strong synthesis (a physical model of a plucked string, banjo-
+    // like); the voices are the browser's speech synthesis. No audio
+    // files, nothing external.
+    (function() {
+      var ctx = null, master = null, musicGain = null, on = false;
+      var button = document.getElementById("radio");
+
+      function ensureContext() {
+        if (ctx) return;
+        ctx = new (window.AudioContext || window.webkitAudioContext)();
+        master = ctx.createGain();
+        master.gain.value = 0.6;
+        master.connect(ctx.destination);
+        musicGain = ctx.createGain();
+        musicGain.gain.value = 0.5;
+        musicGain.connect(master);
+        buildStrings();
+        startMusic();
+      }
+
+      // --- Karplus-Strong plucked strings ----------------------------
+      // One sampled pluck per scale note, computed at startup: a burst
+      // of noise fed through a delay line with gentle damping. Sounds
+      // like a small banjo or mountain dulcimer.
+      var ROOT = 220; // A3
+      var SCALE = [1, 9/8, 5/4, 3/2, 5/3, 2, 9/4, 5/2, 3, 10/3, 4];
+      var strings = [];
+
+      function pluckBuffer(freq, seconds, damp) {
+        var rate = ctx.sampleRate;
+        var n = Math.floor(rate * seconds);
+        var period = Math.max(2, Math.round(rate / freq));
+        var buf = ctx.createBuffer(1, n, rate);
+        var out = buf.getChannelData(0);
+        var line = new Float32Array(period);
+        for (var i = 0; i < period; i++) line[i] = Math.random() * 2 - 1;
+        var p = 0;
+        for (var i = 0; i < n; i++) {
+          var next = (p + 1) % period;
+          line[p] = damp * 0.5 * (line[p] + line[next]);
+          out[i] = line[p];
+          p = next;
+        }
+        return buf;
+      }
+
+      function buildStrings() {
+        for (var d = 0; d < SCALE.length; d++)
+          strings[d] = pluckBuffer(ROOT * SCALE[d], 1.4, 0.996);
+      }
+
+      function pluck(degree, when, gain) {
+        var src = ctx.createBufferSource();
+        src.buffer = strings[degree % strings.length];
+        var g = ctx.createGain();
+        g.gain.value = gain;
+        src.connect(g); g.connect(musicGain);
+        src.start(when);
+      }
+
+      // --- The village tune ------------------------------------------
+      // A waltz of banjo rolls: each bar rolls the chord low-high-mid
+      // while the melody walks a phrase grammar on top, so the tune
+      // wanders without repeating exactly.
+      var BEAT = 0.4;
+      var CHORDS = [[0, 2, 4], [3, 5, 7], [1, 4, 6], [4, 6, 8]];
+      var PHRASES = [
+        [4, 5, 7, 5], [7, 8, 7, 5], [5, 4, 2, 4], [2, 4, 5, 4],
+        [7, 5, 4, 5], [8, 7, 5, 4], [4, 2, 1, 2], [5, 7, 8, 10]
+      ];
+      var phrase = 0, chord = 0, nextBar = 0;
+
+      function scheduleBar(when) {
+        var c = CHORDS[chord % CHORDS.length];
+        // The roll: six eighth-notes walking the chord, banjo style.
+        var roll = [c[0], c[1], c[2], c[1], c[2], c[1]];
+        for (var i = 0; i < 6; i++)
+          pluck(roll[i], when + i * BEAT / 2, 0.20 + (i === 0 ? 0.1 : 0));
+        // The melody: one phrase note per beat above the roll.
+        var notes = PHRASES[phrase % PHRASES.length];
+        for (var b = 0; b < 3; b++) {
+          if (b === 2 && Math.random() < 0.25) continue; // breathe
+          pluck(notes[(b + phrase) % 4], when + b * BEAT + 0.01, 0.42);
+        }
+        if (phrase % 2 === 1) chord++;
+        phrase += (Math.random() < 0.75) ? 1 : 3;
+      }
+
+      function startMusic() {
+        nextBar = ctx.currentTime + 0.1;
+        (function pump() {
+          if (!ctx) return;
+          while (nextBar < ctx.currentTime + 1.2) {
+            scheduleBar(nextBar);
+            nextBar += BEAT * 3;
+          }
+          setTimeout(pump, 250);
+        })();
+      }
+
+      // --- Gnome voices ----------------------------------------------
+      // A replay recorded with voices carries one clip per spoken line
+      // (see VoiceClip in src/replays.nim). The viewer hands the clip
+      // over as base64 and it plays from a data: URL: no server, no
+      // synthesizer, no key. The music ducks while a gnome speaks, and
+      // a new line cuts the previous clip so voices never overlap.
+      var clipPlayer = null;
+      function stopClip() {
+        if (!clipPlayer) return;
+        clipPlayer.onended = null;
+        clipPlayer.pause();
+        clipPlayer = null;
+        if (musicGain) musicGain.gain.value = on ? 0.5 : 0;
+      }
+
+      window.heartleafVoice = function(seat, codec, base64) {
+        if (!on) return;
+        stopClip();
+        var mime = codec === "mp3" ? "audio/mpeg" : "audio/mp4";
+        var player = new Audio("data:" + mime + ";base64," + base64);
+        player.volume = 0.9;
+        player.onended = function() { if (clipPlayer === player) stopClip(); };
+        player.onerror = function() { if (clipPlayer === player) stopClip(); };
+        clipPlayer = player;
+        if (musicGain) musicGain.gain.value = 0.2;
+        player.play().catch(function() { if (clipPlayer === player) stopClip(); });
+      };
+
+      // Lines with no baked clip: the browser reads them aloud. Every
+      // seat gets its own pitch and pace, high and quick enough to
+      // sound gnome-sized. If the browser has no voices, fall back to
+      // syllable babble.
+      var voices = [];
+      function loadVoices() { voices = speechSynthesis.getVoices(); }
+      if (window.speechSynthesis) {
+        loadVoices();
+        speechSynthesis.onvoiceschanged = loadVoices;
+      }
+
+      window.heartleafTalk = function(seat, len, text) {
+        if (!on || !ctx) return;
+        stopClip();
+        if (window.speechSynthesis && voices.length > 0 && text) {
+          if (speechSynthesis.pending) speechSynthesis.cancel();
+          var u = new SpeechSynthesisUtterance(text);
+          u.voice = voices[seat % voices.length];
+          u.pitch = 1.25 + ((seat * 5) % 9) * 0.08; // 1.25 - 1.9
+          u.rate = 1.15 + ((seat * 3) % 5) * 0.05;
+          u.volume = 0.9;
+          speechSynthesis.speak(u);
+          return;
+        }
+        babble(seat, len);
+      };
+
+      function babble(seat, len) {
+        var base = 170 * Math.pow(2, ((seat % 9) * 3 % 12) / 12);
+        var syllables = Math.max(2, Math.min(11, Math.round(len / 6)));
+        var t = ctx.currentTime + 0.03;
+        for (var i = 0; i < syllables; i++) {
+          var freq = base * (1 + (Math.random() - 0.5) * 0.22) *
+            (i === syllables - 1 ? 0.9 : 1);
+          var dur = 0.05 + Math.random() * 0.05;
+          var osc = ctx.createOscillator();
+          osc.type = "square";
+          osc.frequency.setValueAtTime(freq * 1.5, t);
+          osc.frequency.exponentialRampToValueAtTime(freq, t + dur);
+          var g = ctx.createGain();
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(0.055, t + 0.012);
+          g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+          var lp = ctx.createBiquadFilter();
+          lp.type = "lowpass"; lp.frequency.value = 1600;
+          osc.connect(g); g.connect(lp); lp.connect(master);
+          osc.start(t); osc.stop(t + dur + 0.02);
+          t += dur + 0.02 + Math.random() * 0.03;
+        }
+      }
+
+      button.addEventListener("click", function() {
+        on = !on;
+        if (on) {
+          ensureContext();
+          if (ctx.state === "suspended") ctx.resume();
+          button.classList.add("on");
+        } else {
+          button.classList.remove("on");
+          if (window.speechSynthesis) speechSynthesis.cancel();
+          stopClip();
+        }
+        if (ctx) musicGain.gain.value = on ? 0.5 : 0;
+      });
+    })();
+    </script>
     <script>
       var Module = {
         canvas: (function() {

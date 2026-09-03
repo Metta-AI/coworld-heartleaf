@@ -10,10 +10,12 @@ import
   std/[httpclient, json, os, osproc, strutils, times],
   whisky,
   heartleaf/souls,
-  players/soul_player/soul_player
+  players/soul_player/soul_player,
+  voiced_replay
 
 const
   Port = 18961
+  VoicePort = 18962
   Url = "ws://localhost:" & $Port & "/player?slot=0&token=a"
   SoulText = "#!test-model\nYour name is {name}. You test things.\n"
 
@@ -23,18 +25,74 @@ proc serverExe(): string =
     return configured
   "out" / "heartleaf"
 
-proc waitForHealth() =
+proc waitForHealth(port = Port) =
   ## Polls /healthz until the server answers.
   let client = newHttpClient(timeout = 1000)
   defer: client.close()
   for _ in 0 ..< 100:
     try:
-      if client.getContent("http://localhost:" & $Port & "/healthz") == "healthy":
+      if client.getContent("http://localhost:" & $port & "/healthz") == "healthy":
         return
     except CatchableError:
       discard
     sleep(100)
   raise newException(CatchableError, "server never became healthy")
+
+proc testBakedVoices() =
+  ## A replay server with no synthesizer serves the clips baked into
+  ## its replay: /voice.m4a answers the line on air with the recorded
+  ## bytes, and a stale serial is refused.
+  echo "Testing baked voice clips are served with no synthesizer"
+  let replayPath = getTempDir() / "heartleaf-integration-voiced.bitreplay"
+  let lines = writeVoicedTestReplay(replayPath)
+  doAssert lines.len > 0, "the voiced village has heard lines"
+  putEnv("HEARTLEAF_VOICE_SYNTH", "none")
+  let server = startProcess(
+    serverExe(),
+    args = ["--port:" & $VoicePort, "--load-replay:" & replayPath],
+    options = {poStdErrToStdOut, poUsePath}
+  )
+  defer:
+    server.terminate()
+    discard server.waitForExit(5000)
+    delEnv("HEARTLEAF_VOICE_SYNTH")
+    removeFile(replayPath)
+  waitForHealth(VoicePort)
+  let base = "http://localhost:" & $VoicePort
+  let client = newHttpClient(timeout = 5000)
+  defer: client.close()
+  # The replay plays unpaced with nobody watching; the first heard
+  # line reaches the banner within a few seconds of its tick.
+  var
+    served = false
+    tries = 0
+  let deadline = epochTime() + 120.0
+  while epochTime() < deadline and not served:
+    sleep(200)
+    let now = parseJson(client.getContent(base & "/nowplaying"))
+    let
+      serial = now["serial"].getInt()
+      seat = now["seat"].getInt()
+      text = now["text"].getStr()
+    if serial == 0 or text.len == 0:
+      continue
+    let response = client.get(base & "/voice.m4a?serial=" & $serial)
+    if response.status.startsWith("409"):
+      inc tries
+      doAssert tries < 20, "the line keeps moving on before the clip is asked"
+      continue
+    doAssert response.status.startsWith("200"),
+      "the baked clip is served: " & response.status & " " & response.body
+    doAssert response.contentType == "audio/mp4", response.contentType
+    doAssert toString(response.headers["x-heartleaf-voice"]) == "baked",
+      "the clip came from the replay, not a synthesizer"
+    doAssert response.body == fakeVoiceBytes(seat, text),
+      "the served bytes are the clip baked for this seat and text"
+    let stale = client.get(base & "/voice.m4a?serial=" & $(serial + 1000))
+    doAssert stale.status.startsWith("409"), "a stale serial is refused"
+    served = true
+  doAssert served, "a heard line never reached the banner"
+  echo "Baked voice served for ", lines.len, " voiced lines"
 
 proc collect(ws: WebSocket, seconds: float): seq[string] =
   ## Every text frame received within the window; pings are answered.
@@ -161,6 +219,7 @@ proc main() =
   doAssert fresh.readyText() == "log-cursor game=1 sequence=0"
 
   removeDir(dir)
+  testBakedVoices()
   echo "Integration tests passed"
 
 main()
