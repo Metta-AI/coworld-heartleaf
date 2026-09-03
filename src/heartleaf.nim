@@ -727,7 +727,8 @@ proc addSpriteProtocolInit(
   sim: SimServer,
   viewportWidth,
   viewportHeight: int,
-  globalPanel = false
+  globalPanel = false,
+  encoded = true
 )
 proc flippedHorizontal(sprite: RgbaSprite): RgbaSprite
 proc conversationRingSprite(phase: int): RgbaSprite
@@ -1224,14 +1225,65 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   )
   echo "init packet bytes: ", result.playerInitPacket.len
 
+proc playerInitPacketBytes*(sim: SimServer): seq[uint8] =
+  ## Returns the static sprite protocol init packet every viewer receives
+  ## first, so tools can account for its per-sprite cost.
+  sim.playerInitPacket
+
+proc buildInitPacket*(sim: SimServer, encoded = true): seq[uint8] =
+  ## Builds the global viewer init packet. `encoded = false` builds it
+  ## with legacy raw-RGBA Define Sprite messages, for size comparisons
+  ## and for checking that the encoded packet decodes to the same pixels.
+  result.addSpriteProtocolInit(
+    sim,
+    ViewportWidth,
+    ViewportHeight,
+    true,
+    encoded
+  )
+
 proc addRgbaSprite(
   packet: var seq[uint8],
   spriteId: int,
   sprite: RgbaSprite,
-  label: string
+  label: string,
+  encoded = true
 ) =
-  ## Appends one RGBA sprite definition.
-  packet.addSprite(spriteId, sprite.width, sprite.height, sprite.pixels, label)
+  ## Appends one RGBA sprite definition. Encoded sprites travel as
+  ## Define Encoded Sprite messages: indexed (palette + deflated index
+  ## plane) when the art has at most 256 colors, deflated RGBA otherwise.
+  if encoded:
+    packet.addEncodedSprite(
+      spriteId, sprite.width, sprite.height, sprite.pixels, label
+    )
+  else:
+    packet.addSprite(spriteId, sprite.width, sprite.height, sprite.pixels, label)
+
+proc addTintedSprite(
+  packet: var seq[uint8],
+  spriteId, baseSpriteId: int,
+  base, tinted: RgbaSprite,
+  label: string,
+  encoded = true
+) =
+  ## Appends one tinted copy of an already-defined indexed sprite as a
+  ## palette swap: the client keeps the base sprite's index plane, so
+  ## the tint costs one palette instead of a second full image. Falls
+  ## back to a normal encoded sprite when the tint is not a per-color
+  ## recoloring of the base.
+  if encoded and
+      base.width == tinted.width and base.height == tinted.height:
+    discard packet.addPaletteSwapSprite(
+      spriteId,
+      baseSpriteId,
+      tinted.width,
+      tinted.height,
+      base.pixels,
+      tinted.pixels,
+      label
+    )
+  else:
+    packet.addRgbaSprite(spriteId, tinted, label, encoded)
 
 proc addRgbaSpriteCached(
   packet: var seq[uint8],
@@ -1924,9 +1976,12 @@ proc addSpriteProtocolInit(
   sim: SimServer,
   viewportWidth,
   viewportHeight: int,
-  globalPanel = false
+  globalPanel = false,
+  encoded = true
 ) =
-  ## Appends static sprite protocol setup for one viewer.
+  ## Appends static sprite protocol setup for one viewer. Sprites go out
+  ## as Define Encoded Sprite messages unless `encoded` is false; the
+  ## dusk tints of the maps ride as palette swaps of their base sprite.
   packet.addViewport(MapLayerId, viewportWidth, viewportHeight)
   packet.addViewport(UiLayerId, InventoryUiWidth, InventoryUiHeight)
   packet.addViewport(ClockLayerId, ClockUiWidth, ClockUiHeight)
@@ -1948,29 +2003,38 @@ proc addSpriteProtocolInit(
   packet.addRgbaSprite(
     BottomSpriteId,
     sim.mainMap.bottomSprite,
-    MainBottomLabelPrefix
+    MainBottomLabelPrefix,
+    encoded
   )
   packet.addRgbaSprite(
     OverhangSpriteId,
     sim.mainMap.overhangSprite,
-    MainOverhangLabelPrefix
+    MainOverhangLabelPrefix,
+    encoded
   )
   for i in 0 ..< DayTintCount:
-    packet.addRgbaSprite(
+    packet.addTintedSprite(
       mainBottomSpriteId(i),
+      BottomSpriteId,
+      sim.mainMap.bottomSprite,
       sim.mainMap.bottomTints[i],
-      MainBottomLabelPrefix & " tint " & $i
+      MainBottomLabelPrefix & " tint " & $i,
+      encoded
     )
-    packet.addRgbaSprite(
+    packet.addTintedSprite(
       mainOverhangSpriteId(i),
+      OverhangSpriteId,
+      sim.mainMap.overhangSprite,
       sim.mainMap.overhangTints[i],
-      MainOverhangLabelPrefix & " tint " & $i
+      MainOverhangLabelPrefix & " tint " & $i,
+      encoded
     )
   if sim.mainMap.forestSprite.width > 0:
     packet.addRgbaSprite(
       ForestSpriteBase,
       sim.mainMap.forestSprite,
-      "forest underlay"
+      "forest underlay",
+      encoded
     )
     for i in 0 ..< DayTintCount:
       packet.addRgbaSprite(
@@ -1980,78 +2044,97 @@ proc addSpriteProtocolInit(
           ForestVeilTileH,
           ForestVeilColors[i]
         ),
-        "forest dusk veil " & $i
+        "forest dusk veil " & $i,
+        encoded
       )
   packet.addRgbaSprite(
     HomeBottomSpriteId,
     sim.homeMaps[0].bottomSprite,
-    HomeBottomLabelPrefix
+    HomeBottomLabelPrefix,
+    encoded
   )
   packet.addRgbaSprite(
     HomeOverhangSpriteId,
     sim.homeMaps[0].overhangSprite,
-    HomeOverhangLabelPrefix
+    HomeOverhangLabelPrefix,
+    encoded
   )
   for i in 0 ..< DayTintCount:
-    packet.addRgbaSprite(
+    packet.addTintedSprite(
       homeBottomSpriteId(i),
+      HomeBottomSpriteId,
+      sim.homeMaps[0].bottomSprite,
       sim.homeMaps[0].bottomTints[i],
-      HomeBottomLabelPrefix & " tint " & $i
+      HomeBottomLabelPrefix & " tint " & $i,
+      encoded
     )
-    packet.addRgbaSprite(
+    packet.addTintedSprite(
       homeOverhangSpriteId(i),
+      HomeOverhangSpriteId,
+      sim.homeMaps[0].overhangSprite,
       sim.homeMaps[0].overhangTints[i],
-      HomeOverhangLabelPrefix & " tint " & $i
+      HomeOverhangLabelPrefix & " tint " & $i,
+      encoded
     )
   for ch in ClockGlyphs:
     packet.addRgbaSprite(
       ch.clockGlyphSpriteId(),
       sim.clockGlyphSprite(ch),
-      ClockLabelPrefix & $ch
+      ClockLabelPrefix & $ch,
+      encoded
     )
   for foodIndex, icon in sim.foods.icons:
-    packet.addRgbaSprite(foodSpriteId(foodIndex), icon, foodIndex.foodName())
+    packet.addRgbaSprite(
+      foodSpriteId(foodIndex), icon, foodIndex.foodName(), encoded
+    )
   packet.addRgbaSprite(
     FoodMarkerSpriteId,
     sim.foods.marker,
-    GardenMarkerLabel
+    GardenMarkerLabel,
+    encoded
   )
   for gnomeIndex, gnome in sim.gnomes:
     for direction in Direction:
       packet.addRgbaSprite(
         playerSpriteId(gnomeIndex, direction),
         gnome.frames[direction],
-        GnomeLabelPrefix & $gnomeIndex & " " & direction.directionLabel()
+        GnomeLabelPrefix & $gnomeIndex & " " & direction.directionLabel(),
+        encoded
       )
   if sim.chatBanner.width > 0:
     packet.addRgbaSprite(
       ChatBannerSpriteId,
       sim.chatBanner,
-      "chat banner"
+      "chat banner",
+      encoded
     )
   for i, portrait in sim.portraits:
     packet.addRgbaSprite(
       PortraitSpriteBase + i,
       portrait,
-      "portrait " & $i
+      "portrait " & $i,
+      encoded
     )
     packet.addRgbaSprite(
       PortraitFlipSpriteBase + i,
       portrait.flippedHorizontal(),
-      "portrait flip " & $i
+      "portrait flip " & $i,
+      encoded
     )
   for code in FirstPrintableAscii .. LastPrintableAscii:
     let ch = char(code)
     packet.addRgbaSprite(
       ch.bannerGlyphSpriteId(),
       sim.bannerGlyphSprite(ch),
-      "banner glyph " & $ch
+      "banner glyph " & $ch,
+      encoded
     )
   for phase in 0 ..< ConversationRingPhases:
     packet.addRgbaSprite(
       ConversationRingSpriteBase + phase,
       conversationRingSprite(phase),
-      "conversation ring " & $phase
+      "conversation ring " & $phase,
+      encoded
     )
 
 proc worldClampPixel(value, maxValue: int): int =

@@ -1740,4 +1740,70 @@ block:
   doAssert timeline.heartLinksAt(300) == @[(a: 0, b: 1, links: 2)],
     "the answered turn mints again; scrubbing anywhere reproduces it"
 
+echo "Testing encoded init packet"
+block:
+  # The init packet ships Define Encoded Sprite messages (indexed art,
+  # palette-swap tints, deflated RGBA for the forest). Decoding it must
+  # give the same pixels, in the same order, as the legacy raw-RGBA
+  # Snappy packet, at a fraction of the bytes.
+  let sim = initSimServer()
+  let
+    encoded = sim.playerInitPacketBytes()
+    legacy = sim.buildInitPacket(encoded = false)
+  doAssert encoded == sim.buildInitPacket(), "init packet is deterministic"
+  doAssert encoded.len < 2_000_000,
+    "encoded init packet should be well under 2MB, got " & $encoded.len
+  doAssert encoded.len * 4 < legacy.len,
+    "encoded init packet should be at least 4x smaller than legacy"
+
+  proc decodeSprites(packet: seq[uint8]): seq[(int, string, DecodedSprite)] =
+    var decoded = initTable[int, DecodedSprite]()
+    for message in packet.parseSpritePacket():
+      if message.kind != spkSprite:
+        continue
+      var source: DecodedSprite
+      let sourceId = message.sprite.paletteSwapSourceId()
+      if sourceId >= 0 and decoded.hasKey(sourceId):
+        source = decoded[sourceId]
+      let sprite = message.sprite.decodeSprite(source)
+      decoded[message.sprite.id] = sprite
+      result.add((message.sprite.id, message.sprite.label, sprite))
+
+  let
+    encodedSprites = encoded.decodeSprites()
+    legacySprites = legacy.decodeSprites()
+  doAssert encodedSprites.len == legacySprites.len
+  doAssert encodedSprites.len > 300, "init packet defines every static sprite"
+  var
+    swaps = 0
+    indexed = 0
+    deflated = 0
+  for message in encoded.parseSpritePacket():
+    if message.kind != spkSprite:
+      continue
+    case message.sprite.encoding
+    of SpriteEncodingPaletteSwap: inc swaps
+    of SpriteEncodingIndexed: inc indexed
+    of SpriteEncodingRgbaDeflate: inc deflated
+    else: doAssert false, "unexpected init sprite encoding"
+  # Four map sprites (main and home, bottom and overhang) times the five
+  # dusk tint stages.
+  doAssert swaps == 4 * 5, "every map dusk tint is a palette swap"
+  doAssert deflated >= 1, "the forest underlay has too many colors to index"
+  doAssert indexed > swaps + deflated
+  for i in 0 ..< encodedSprites.len:
+    let
+      (encodedId, encodedLabel, encodedSprite) = encodedSprites[i]
+      (legacyId, legacyLabel, legacySprite) = legacySprites[i]
+    doAssert encodedId == legacyId
+    doAssert encodedLabel == legacyLabel
+    doAssert encodedSprite.width == legacySprite.width
+    doAssert encodedSprite.height == legacySprite.height
+    doAssert encodedSprite.pixels == legacySprite.pixels,
+      "sprite " & $encodedId & " (" & encodedLabel & ") must decode pixel-identical"
+  # Non-init packets still parse: the layer and viewport setup precedes
+  # the sprites and every message type in the packet is known.
+  doAssert encoded.spritePacketViewports().len == 4
+  echo "  init packet bytes: encoded ", encoded.len, " legacy ", legacy.len
+
 echo "All tests passed"

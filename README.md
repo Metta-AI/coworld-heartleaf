@@ -140,6 +140,17 @@ so the compiler finds them; plain `nimby install` does neither. Then the
 run commands above work as written. If a sync is aborted partway, nimby
 can leave a stale lock behind — `rmdir ~/.nimby/nimbylock` clears it.
 
+This branch requires the bitworld `compressed-sprites` branch: commit
+`3bd3782f8a1934eb1bf0f8db818f111eec5222c8` of
+`https://github.com/SolbiatiAlessandro/bitworld` (a fork of
+Metta-AI/bitworld at `64af6cc` plus the Define Encoded Sprite message).
+`nimby.lock` pins it. The init packet is built with `addEncodedSprite`
+and `addPaletteSwapSprite` from that branch, so an older bitworld does not
+compile this server, and an older bitworld browser client closes the
+websocket on the `0x08` sprite message. `nim r tools/init_packet_report.nim`
+prints the per-sprite byte accounting (`--legacy` shows the raw-RGBA
+packet for comparison).
+
 ## Build A Soul
 
 A soul is a markdown file. The first line is `#!` followed by the Bedrock
