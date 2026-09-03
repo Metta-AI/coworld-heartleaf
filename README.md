@@ -141,7 +141,7 @@ run commands above work as written. If a sync is aborted partway, nimby
 can leave a stale lock behind — `rmdir ~/.nimby/nimbylock` clears it.
 
 This branch requires the bitworld `compressed-sprites` branch: commit
-`3bd3782f8a1934eb1bf0f8db818f111eec5222c8` of
+`aea8544158a4ddb5da9698fca8e6d59097f3eccd` of
 `https://github.com/SolbiatiAlessandro/bitworld` (a fork of
 Metta-AI/bitworld at `64af6cc` plus the Define Encoded Sprite message).
 `nimby.lock` pins it. The init packet is built with `addEncodedSprite`
