@@ -98,7 +98,10 @@ To run the pieces by hand:
 nim r src/heartleaf.nim
 ```
 
-Then open `http://localhost:8080/client/global`.
+Then open `http://localhost:8080/`. The root, `/client/global`, and
+`/client/replay` all serve the director cut, which is what the hosted
+platform opens; `/plain` (or `/client/plain`) is the explicit opt-in for
+the plain hand-panned view when debugging.
 
 With no `tokens` configured the village starts at once and a gnome appears
 whenever a soul arrives. Without Bedrock credentials, give the game a mock
@@ -121,6 +124,32 @@ nim r players/soul_player/soul_player.nim \
 To call a real model locally, set `BEDROCK_KEY` (or AWS credentials) in the
 game's environment instead of `HEARTLEAF_MOCK_REPLY`. Hosted games get
 Bedrock from the platform automatically.
+
+### Developing
+
+From a clean machine, clone the repository and sync the lock:
+
+```sh
+git clone <this repository>
+cd heartleaf-conversations
+nimby sync nimby.lock -g
+```
+
+`nimby sync` installs the lock's pinned packages and writes `nim.cfg`
+so the compiler finds them; plain `nimby install` does neither. Then the
+run commands above work as written. If a sync is aborted partway, nimby
+can leave a stale lock behind — `rmdir ~/.nimby/nimbylock` clears it.
+
+This branch requires the bitworld `compressed-sprites` branch: commit
+`aea8544158a4ddb5da9698fca8e6d59097f3eccd` of
+`https://github.com/SolbiatiAlessandro/bitworld` (a fork of
+Metta-AI/bitworld at `64af6cc` plus the Define Encoded Sprite message).
+`nimby.lock` pins it. The init packet is built with `addEncodedSprite`
+and `addPaletteSwapSprite` from that branch, so an older bitworld does not
+compile this server, and an older bitworld browser client closes the
+websocket on the `0x08` sprite message. `nim r tools/init_packet_report.nim`
+prints the per-sprite byte accounting (`--legacy` shows the raw-RGBA
+packet for comparison).
 
 ## Build A Soul
 
@@ -155,7 +184,9 @@ cd ../bitworld && nim r tools/quick_run.nim ../coworld-heartleaf \
   `players/*_villager/` are example souls.
 - BitWorld is used as a Nimble dependency for shared sprite protocol helpers.
 - `data/` contains map, sprite, font, and Figma resource data.
-- `tests/tests.nim` contains smoke checks (`nim r tests/tests.nim`).
+- `tests/tests.nim` contains smoke checks (`nim r tests/tests.nim`);
+  `tests/routes.nim` pins the viewer front door against a real replay
+  server (`nim c src/heartleaf.nim`, then `nim r tests/routes.nim`).
 
 ## License
 

@@ -5,6 +5,13 @@
 ##
 ## Runs the server binary named by HEARTLEAF_SERVER (default out/heartleaf,
 ## built with `nim c src/heartleaf.nim`) from the repository root.
+##
+## Movement ticks are not paced to the wall clock (see runFrameLimiter in
+## src/heartleaf.nim), so with the mock model a whole game runs in a
+## fraction of a second. The server configures two seats and the test
+## sends seat 1's soul only when it wants the games to run: until then
+## the village waits for that soul, game 1 stands at its first turn, and
+## the handshake on seat 0 can be observed at leisure.
 
 import
   std/[httpclient, json, os, osproc, strutils, times],
@@ -14,8 +21,11 @@ import
 
 const
   Port = 18961
-  Url = "ws://localhost:" & $Port & "/player?slot=0&token=a"
+  Tokens = ["a", "b"]
   SoulText = "#!test-model\nYour name is {name}. You test things.\n"
+
+proc playerUrl(seat: int): string =
+  "ws://localhost:" & $Port & "/player?slot=" & $seat & "&token=" & Tokens[seat]
 
 proc serverExe(): string =
   let configured = getEnv("HEARTLEAF_SERVER")
@@ -69,9 +79,11 @@ proc main() =
     serverExe(),
     args = [
       "--port:" & $Port,
+      # maxGames 0 plays games until the test stops the server: a server
+      # that quits on its own drops whatever it queued on the way out.
       "--config:" & $(%*{
-        "tokens": ["a"], "maxTicks": 300, "maxGames": 2, "daySeconds": 30,
-        "soulTimeoutSeconds": 30, "seed": 3,
+        "tokens": Tokens, "maxTicks": 300, "maxGames": 0, "daySeconds": 30,
+        "soulTimeoutSeconds": 120, "seed": 3,
         "mockReply": """{"action": "keep_gathering_plants"}"""
       })
     ],
@@ -83,7 +95,7 @@ proc main() =
   waitForHealth()
 
   echo "Testing acceptance, then nothing until log-ready"
-  var first = newWebSocket(Url)
+  var first = newWebSocket(playerUrl(0))
   first.send(SoulText, TextMessage)
   let beforeReady = first.collect(1.5)
   doAssert beforeReady.len == 1 and beforeReady[0].isSoulAccepted(),
@@ -99,33 +111,43 @@ proc main() =
   first.close()
 
   echo "Testing a reconnect that resumes from its cursor"
-  var second = newWebSocket(Url)
+  var second = newWebSocket(playerUrl(0))
   second.send(SoulText, TextMessage)
   let reply = second.collect(1.0)
   doAssert reply.len >= 1 and reply[0].isSoulAccepted(), "resend of the same soul is accepted"
   second.send("log-cursor game=1 sequence=" & $lastSequence, TextMessage)
-  let resumed = second.collect(3.0).records()
-  doAssert resumed.len > 0, "streaming resumes after the cursor"
-  for node in resumed:
-    doAssert node["sequence"].getInt() > lastSequence,
-      "nothing at or below the cursor is ever re-sent"
-  doAssert resumed.denseFrom(1, lastSequence + 1),
-    "resume starts exactly after the cursor"
+  var gameOne = second.collect(1.0).records()
 
-  echo "Testing a new game restarts the log at sequence 0"
+  echo "Testing the last soul starts the games"
+  var gate = newWebSocket(playerUrl(1))
+  gate.send(SoulText, TextMessage)
+  let gateReply = gate.collect(1.0)
+  doAssert gateReply.len == 1 and gateReply[0].isSoulAccepted(),
+    "a seat that never says log-ready gets only its acceptance, got: " & $gateReply
   var gameTwo: seq[JsonNode]
   let deadline = epochTime() + 60.0
   while epochTime() < deadline and gameTwo.len < 3:
     try:
       for node in second.collect(1.0).records():
-        if node["game"].getInt() == 2:
-          gameTwo.add(node)
+        case node["game"].getInt()
+        of 1: gameOne.add(node)
+        of 2: gameTwo.add(node)
+        else: discard
     except CatchableError:
       break
+  doAssert gameOne.len > 0, "streaming resumes after the cursor"
+  for node in gameOne:
+    doAssert node["sequence"].getInt() > lastSequence,
+      "nothing at or below the cursor is ever re-sent"
+  doAssert gameOne.denseFrom(1, lastSequence + 1),
+    "resume starts exactly after the cursor"
+
+  echo "Testing a new game restarts the log at sequence 0"
   doAssert gameTwo.len >= 3, "game 2 records should arrive"
   doAssert gameTwo[0]["sequence"].getInt() == 0 and
     gameTwo[0]["role"].getStr() == "system", "game 2 opens with its prompt at 0"
   doAssert gameTwo.denseFrom(2, 0)
+  gate.close()
   second.close()
 
   echo "Testing the audit sink never writes a record twice"

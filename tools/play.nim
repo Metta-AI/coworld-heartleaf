@@ -184,7 +184,9 @@ proc main() =
     ))
     sleep(PlayerStartDelayMs)
 
-  let viewer = "http://localhost:" & $options.port & "/client/global"
+  # The root path serves the director cut since #35; /client/global
+  # stays available for the plain view.
+  let viewer = "http://localhost:" & $options.port & "/"
   echo "play: watch at ", viewer, "; logs and replay in ",
     options.logDir, "/"
   if options.browser:

@@ -57,6 +57,25 @@ const
   GlobalWebSocketPath = "/global"
   ReplayWebSocketPath = "/replay"
   DirectorWebSocketPath = "/director"
+  PlainWebSocketPath = "/plain"
+  PlainClientRoute = "/client/plain"
+  DirectorPageRoutes = [
+    "/",
+    GlobalWebSocketPath,
+    DirectorWebSocketPath,
+    bitworldClient.GlobalClientRoute,
+    bitworldClient.CoworldGlobalClientRoute
+  ]
+    ## Every live-viewer page and websocket path serves the director
+    ## cut. The Softmax platform opens `/client/global` and probes the
+    ## `/global` websocket, so those are the hosted front door; the
+    ## page connects its websocket to `/global` while `/`, `/director`
+    ## and `/clients/global` connect back to their own path, and each
+    ## of those upgrades lands in this same set.
+  PlainViewRoutes = [PlainWebSocketPath, PlainClientRoute]
+    ## The stock hand-panned global view, kept for debugging on paths
+    ## the platform never opens. Neither page has a websocket mapping
+    ## in the shared client, so each connects back to its own path.
   MaxWebSocketFrameBytes = 900_000
   MapLayerId = 0
   UiLayerId = 1
@@ -219,12 +238,36 @@ const
     ## Depth of the map-edge band the forest border is built from. Only
     ## the outermost band is sampled, so houses and lawns deeper in the
     ## map are never reflected into the forest.
-  ForestSpriteBase = 30
-    ## Sprite ids 30..35: the untinted forest underlay and its five
-    ## dusk tints, after the home overhang tints (25..29).
-  ForestObjectId = 3
+  ForestSpriteBase* = 30
+    ## Sprite id of the forest underlay, after the home overhang
+    ## tints (25..29). The underlay ships once, in daylight colors;
+    ## dusk is a veil drawn over it, not five tinted copies.
+  ForestVeilSpriteBase = 31
+    ## Sprite ids 31..35: the five translucent dusk-veil tiles that
+    ## darken the forest through the evening stages.
+  ForestVeilTileW = 512
+  ForestVeilTileH = 256
+    ## One veil tile covers a column of visible forest beside the map:
+    ## wider than the widest forest margin, tiled down the viewport.
+  ForestVeilColors = [
+    ColorRGBA(r: 79, g: 0, b: 0, a: 56),
+    ColorRGBA(r: 43, g: 0, b: 0, a: 138),
+    ColorRGBA(r: 28, g: 0, b: 5, a: 207),
+    ColorRGBA(r: 0, g: 17, b: 25, a: 219),
+    ColorRGBA(r: 0, g: 6, b: 16, a: 224),
+  ]
+    ## Per-stage veil color and alpha, least-squares fitted over the
+    ## forest ring pixels against the old hsvTinted stage copies: for
+    ## each candidate alpha the best veil color is the mean residual,
+    ## and the alpha with the lowest error wins. Early dusk leans warm
+    ## sunset red, late dusk deep blue-teal, and the fit keeps the
+    ## tree texture readable instead of flattening it.
+  ForestObjectId* = 3
     ## Map-layer object id for the forest underlay, after the bottom
     ## (1) and overhang (2) objects.
+  ForestVeilObjectBase = 4
+    ## Map-layer object ids 4..99 are reserved for the dusk veil
+    ## tiles; a frame uses at most a handful of them.
   DirectorBounceHops = [2, 4, 6, 6, 5, 4, 2, 0, 2, 3, 3, 2, 1, 0]
     ## The little hop a gnome does when its new line lands, in pixels
     ## of lift per frame.
@@ -388,7 +431,6 @@ type
     bottomTints: array[DayTintCount, RgbaSprite]
     overhangTints: array[DayTintCount, RgbaSprite]
     forestSprite: RgbaSprite
-    forestTints: array[DayTintCount, RgbaSprite]
     walkMask: seq[bool]
 
   GnomeSprites = ref object
@@ -685,7 +727,8 @@ proc addSpriteProtocolInit(
   sim: SimServer,
   viewportWidth,
   viewportHeight: int,
-  globalPanel = false
+  globalPanel = false,
+  encoded = true
 )
 proc flippedHorizontal(sprite: RgbaSprite): RgbaSprite
 proc conversationRingSprite(phase: int): RgbaSprite
@@ -827,9 +870,22 @@ proc foldIntoBand(distance, band: int): int =
 
 proc forestJitter(x, y: int): (int, int) =
   ## A tiny deterministic per-pixel offset that decorrelates mirrored
-  ## copies of the edge band so they read as forest, not ripples.
+  ## copies of the edge band so they read as forest, not ripples. The
+  ## offsets are in half-resolution pixels, so they cover two world
+  ## pixels each.
   let hash = uint32(x * 73_856_093) xor uint32(y * 19_349_663)
-  (int((hash shr 8) mod 7) - 3, int((hash shr 16) mod 7) - 3)
+  (int((hash shr 8) mod 3) - 1, int((hash shr 16) mod 3) - 1)
+
+proc halvedRgbaSprite(sprite: RgbaSprite): RgbaSprite =
+  ## Point-samples one RGBA sprite to half resolution, keeping the
+  ## pixel-art palette crisp for nearest-neighbor work.
+  result = newRgbaSprite((sprite.width + 1) div 2, (sprite.height + 1) div 2)
+  for y in 0 ..< result.height:
+    for x in 0 ..< result.width:
+      result.putPixel(x, y, sprite.rgbaSpriteAt(
+        min(x * 2, sprite.width - 1),
+        min(y * 2, sprite.height - 1)
+      ))
 
 proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite =
   ## Extends the map outward with forest built from the map's own edge
@@ -841,20 +897,34 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
   ## competing with it. Sandy path pixels leaving the map fade into
   ## the canopy, so the roads disappear under the trees. The map
   ## interior stays transparent; the real map draws over that area.
+  ##
+  ## The border is generated at half resolution and upscaled 2x
+  ## nearest-neighbor into the shipped sprite: the sprite protocol has
+  ## no draw-time scaling, but the 2x blocks compress to a fraction of
+  ## full-detail forest in the init packet, and deep-background pixel
+  ## art wears the blockiness happily. The wave and fade tunings below
+  ## are the full-resolution values halved, so the border keeps its
+  ## world-space look.
   var base = newRgbaSprite(bottom.width, bottom.height)
   base.blitRgbaSprite(bottom, 0, 0)
   base.blitRgbaSprite(overhang, 0, 0)
   let
-    w = base.width
-    h = base.height
+    half = base.halvedRgbaSprite()
+    hm = margin div 2
+    hb = max(1, band div 2)
+    w = half.width
+    h = half.height
     fallback = rgba(26, 36, 20, 255)
-  result = newRgbaSprite(w + margin * 2, h + margin * 2)
-  for y in 0 ..< result.height:
-    let wy = y - margin
-    for x in 0 ..< result.width:
-      let wx = x - margin
-      if wx >= 0 and wx < w and wy >= 0 and wy < h:
-        continue  # the map itself covers this area
+  var halfForest = newRgbaSprite(w + hm * 2, h + hm * 2)
+  for y in 0 ..< halfForest.height:
+    let wy = y - hm
+    for x in 0 ..< halfForest.width:
+      let wx = x - hm
+      if wx >= 1 and wx < w - 1 and wy >= 1 and wy < h - 1:
+        # The map itself covers this area. The outermost half-pixel
+        # ring keeps map edge colors so the 2x upscale still meets the
+        # map without a transparent seam; the map draws over it.
+        continue
       let
         dx =
           if wx < 0:
@@ -873,10 +943,10 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
         outDist = max(dx, dy)
         # The jitter ramps in from zero so the first rows still join
         # the real map edge seamlessly.
-        jitterRamp = min(outDist, 16)
+        jitterRamp = min(outDist, 8)
         (rawJx, rawJy) = forestJitter(x, y)
-        jx = rawJx * jitterRamp div 16
-        jy = rawJy * jitterRamp div 16
+        jx = rawJx * jitterRamp div 8
+        jy = rawJy * jitterRamp div 8
       var
         sx = wx
         sy = wy
@@ -885,14 +955,14 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
         # field jumbles its reflections instead of repeating in rows.
         # Its wavelength is long, so the wander reads as drifting
         # canopy rather than zigzag hedges.
-        waveAmp = min(2.2, 1.0 + float(outDist) / 220.0)
+        waveAmp = min(2.2, 1.0 + float(outDist) / 110.0)
       if dx > 0:
         # The wave is keyed on the along-edge coordinate so reflection
         # boundaries wander instead of forming straight ripples.
         let
-          wave = int(9.0 * sin(float(wy) * 0.017) * waveAmp +
-            4.0 * sin(float(wy) * 0.045 + 1.7))
-          depth = foldIntoBand(max(0, dx - 1 + wave), band)
+          wave = int(4.5 * sin(float(wy) * 0.034) * waveAmp +
+            2.0 * sin(float(wy) * 0.09 + 1.7))
+          depth = foldIntoBand(max(0, dx - 1 + wave), hb)
         sx =
           if wx < 0:
             depth
@@ -901,9 +971,9 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
         sy = wy + jy
       if dy > 0:
         let
-          wave = int(9.0 * sin(float(wx) * 0.014 + 0.9) * waveAmp +
-            4.0 * sin(float(wx) * 0.039) )
-          depth = foldIntoBand(max(0, dy - 1 + wave), band)
+          wave = int(4.5 * sin(float(wx) * 0.028 + 0.9) * waveAmp +
+            2.0 * sin(float(wx) * 0.078))
+          depth = foldIntoBand(max(0, dy - 1 + wave), hb)
         sy =
           if wy < 0:
             depth
@@ -911,12 +981,12 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
             h - 1 - depth
         if dx == 0:
           sx = wx + jx
-      var color = base.rgbaSpriteAt(clamp(sx, 0, w - 1), clamp(sy, 0, h - 1))
+      var color = half.rgbaSpriteAt(clamp(sx, 0, w - 1), clamp(sy, 0, h - 1))
       if color.a == 0:
         color = fallback
       # Sandy road pixels reflected past the edge sink into the trees.
       if int(color.r) > 160 and int(color.r) - int(color.b) > 50:
-        let fade = min(1.0, float(outDist) / 70.0)
+        let fade = min(1.0, float(outDist) / 35.0)
         color = rgba(
           uint8(float(color.r) + (float(fallback.r) - float(color.r)) * fade),
           uint8(float(color.g) + (float(fallback.g) - float(color.g)) * fade),
@@ -924,12 +994,27 @@ proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite
           255
         )
       let shade =
-        1.0 - 0.55 * pow(min(1.0, float(outDist) / float(margin)), 0.75)
-      result.putPixel(x, y, rgba(
+        1.0 - 0.55 * pow(min(1.0, float(outDist) / float(hm)), 0.75)
+      halfForest.putPixel(x, y, rgba(
         uint8(float(color.r) * shade),
         uint8(float(color.g) * shade),
         uint8(float(color.b) * shade),
         255
+      ))
+  # 2x nearest-neighbor upscale into the shipped sprite. The strict
+  # interior stays transparent for the map to draw over; the two-pixel
+  # overlap ring under the map edge guards against a hairline gap.
+  result = newRgbaSprite(bottom.width + margin * 2, bottom.height + margin * 2)
+  for y in 0 ..< result.height:
+    let wy = y - margin
+    for x in 0 ..< result.width:
+      let wx = x - margin
+      if wx >= 2 and wx < bottom.width - 2 and
+          wy >= 2 and wy < bottom.height - 2:
+        continue  # the map itself covers this area
+      result.putPixel(x, y, halfForest.rgbaSpriteAt(
+        min(x div 2, halfForest.width - 1),
+        min(y div 2, halfForest.height - 1)
       ))
 
 proc loadGnomeSprites(path: string): seq[GnomeSprites] =
@@ -1111,13 +1196,6 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
     ForestMarginPx,
     ForestBandPx
   )
-  for i in 0 ..< DayTintCount:
-    result.mainMap.forestTints[i] = forestUnderlay(
-      result.mainMap.bottomTints[i],
-      result.mainMap.overhangTints[i],
-      ForestMarginPx,
-      ForestBandPx
-    )
   dumpForestUnderlay(result.mainMap)
   let homeMap = loadWorldMap(homeMapPath, "Home map")
   for i in 0 ..< HouseCount:
@@ -1147,14 +1225,65 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   )
   echo "init packet bytes: ", result.playerInitPacket.len
 
+proc playerInitPacketBytes*(sim: SimServer): seq[uint8] =
+  ## Returns the static sprite protocol init packet every viewer receives
+  ## first, so tools can account for its per-sprite cost.
+  sim.playerInitPacket
+
+proc buildInitPacket*(sim: SimServer, encoded = true): seq[uint8] =
+  ## Builds the global viewer init packet. `encoded = false` builds it
+  ## with legacy raw-RGBA Define Sprite messages, for size comparisons
+  ## and for checking that the encoded packet decodes to the same pixels.
+  result.addSpriteProtocolInit(
+    sim,
+    ViewportWidth,
+    ViewportHeight,
+    true,
+    encoded
+  )
+
 proc addRgbaSprite(
   packet: var seq[uint8],
   spriteId: int,
   sprite: RgbaSprite,
-  label: string
+  label: string,
+  encoded = true
 ) =
-  ## Appends one RGBA sprite definition.
-  packet.addSprite(spriteId, sprite.width, sprite.height, sprite.pixels, label)
+  ## Appends one RGBA sprite definition. Encoded sprites travel as
+  ## Define Encoded Sprite messages: indexed (palette + deflated index
+  ## plane) when the art has at most 256 colors, deflated RGBA otherwise.
+  if encoded:
+    packet.addEncodedSprite(
+      spriteId, sprite.width, sprite.height, sprite.pixels, label
+    )
+  else:
+    packet.addSprite(spriteId, sprite.width, sprite.height, sprite.pixels, label)
+
+proc addTintedSprite(
+  packet: var seq[uint8],
+  spriteId, baseSpriteId: int,
+  base, tinted: RgbaSprite,
+  label: string,
+  encoded = true
+) =
+  ## Appends one tinted copy of an already-defined indexed sprite as a
+  ## palette swap: the client keeps the base sprite's index plane, so
+  ## the tint costs one palette instead of a second full image. Falls
+  ## back to a normal encoded sprite when the tint is not a per-color
+  ## recoloring of the base.
+  if encoded and
+      base.width == tinted.width and base.height == tinted.height:
+    discard packet.addPaletteSwapSprite(
+      spriteId,
+      baseSpriteId,
+      tinted.width,
+      tinted.height,
+      base.pixels,
+      tinted.pixels,
+      label
+    )
+  else:
+    packet.addRgbaSprite(spriteId, tinted, label, encoded)
 
 proc addRgbaSpriteCached(
   packet: var seq[uint8],
@@ -1708,12 +1837,6 @@ proc mainOverhangSpriteId(tintIndex: int): int =
     return OverhangSpriteId
   return MainOverhangTintSpriteBase + tintIndex
 
-proc forestSpriteId(tintIndex: int): int =
-  ## Returns the forest underlay sprite id for one day tint.
-  if tintIndex < 0:
-    return ForestSpriteBase
-  return ForestSpriteBase + 1 + tintIndex
-
 proc homeBottomSpriteId(tintIndex: int): int =
   ## Returns the home map bottom sprite id for one day tint.
   if tintIndex < 0:
@@ -1853,9 +1976,12 @@ proc addSpriteProtocolInit(
   sim: SimServer,
   viewportWidth,
   viewportHeight: int,
-  globalPanel = false
+  globalPanel = false,
+  encoded = true
 ) =
-  ## Appends static sprite protocol setup for one viewer.
+  ## Appends static sprite protocol setup for one viewer. Sprites go out
+  ## as Define Encoded Sprite messages unless `encoded` is false; the
+  ## dusk tints of the maps ride as palette swaps of their base sprite.
   packet.addViewport(MapLayerId, viewportWidth, viewportHeight)
   packet.addViewport(UiLayerId, InventoryUiWidth, InventoryUiHeight)
   packet.addViewport(ClockLayerId, ClockUiWidth, ClockUiHeight)
@@ -1877,106 +2003,138 @@ proc addSpriteProtocolInit(
   packet.addRgbaSprite(
     BottomSpriteId,
     sim.mainMap.bottomSprite,
-    MainBottomLabelPrefix
+    MainBottomLabelPrefix,
+    encoded
   )
   packet.addRgbaSprite(
     OverhangSpriteId,
     sim.mainMap.overhangSprite,
-    MainOverhangLabelPrefix
+    MainOverhangLabelPrefix,
+    encoded
   )
   for i in 0 ..< DayTintCount:
-    packet.addRgbaSprite(
+    packet.addTintedSprite(
       mainBottomSpriteId(i),
+      BottomSpriteId,
+      sim.mainMap.bottomSprite,
       sim.mainMap.bottomTints[i],
-      MainBottomLabelPrefix & " tint " & $i
+      MainBottomLabelPrefix & " tint " & $i,
+      encoded
     )
-    packet.addRgbaSprite(
+    packet.addTintedSprite(
       mainOverhangSpriteId(i),
+      OverhangSpriteId,
+      sim.mainMap.overhangSprite,
       sim.mainMap.overhangTints[i],
-      MainOverhangLabelPrefix & " tint " & $i
+      MainOverhangLabelPrefix & " tint " & $i,
+      encoded
     )
   if sim.mainMap.forestSprite.width > 0:
     packet.addRgbaSprite(
-      forestSpriteId(-1),
+      ForestSpriteBase,
       sim.mainMap.forestSprite,
-      "forest underlay"
+      "forest underlay",
+      encoded
     )
     for i in 0 ..< DayTintCount:
       packet.addRgbaSprite(
-        forestSpriteId(i),
-        sim.mainMap.forestTints[i],
-        "forest underlay tint " & $i
+        ForestVeilSpriteBase + i,
+        solidRgbaSprite(
+          ForestVeilTileW,
+          ForestVeilTileH,
+          ForestVeilColors[i]
+        ),
+        "forest dusk veil " & $i,
+        encoded
       )
   packet.addRgbaSprite(
     HomeBottomSpriteId,
     sim.homeMaps[0].bottomSprite,
-    HomeBottomLabelPrefix
+    HomeBottomLabelPrefix,
+    encoded
   )
   packet.addRgbaSprite(
     HomeOverhangSpriteId,
     sim.homeMaps[0].overhangSprite,
-    HomeOverhangLabelPrefix
+    HomeOverhangLabelPrefix,
+    encoded
   )
   for i in 0 ..< DayTintCount:
-    packet.addRgbaSprite(
+    packet.addTintedSprite(
       homeBottomSpriteId(i),
+      HomeBottomSpriteId,
+      sim.homeMaps[0].bottomSprite,
       sim.homeMaps[0].bottomTints[i],
-      HomeBottomLabelPrefix & " tint " & $i
+      HomeBottomLabelPrefix & " tint " & $i,
+      encoded
     )
-    packet.addRgbaSprite(
+    packet.addTintedSprite(
       homeOverhangSpriteId(i),
+      HomeOverhangSpriteId,
+      sim.homeMaps[0].overhangSprite,
       sim.homeMaps[0].overhangTints[i],
-      HomeOverhangLabelPrefix & " tint " & $i
+      HomeOverhangLabelPrefix & " tint " & $i,
+      encoded
     )
   for ch in ClockGlyphs:
     packet.addRgbaSprite(
       ch.clockGlyphSpriteId(),
       sim.clockGlyphSprite(ch),
-      ClockLabelPrefix & $ch
+      ClockLabelPrefix & $ch,
+      encoded
     )
   for foodIndex, icon in sim.foods.icons:
-    packet.addRgbaSprite(foodSpriteId(foodIndex), icon, foodIndex.foodName())
+    packet.addRgbaSprite(
+      foodSpriteId(foodIndex), icon, foodIndex.foodName(), encoded
+    )
   packet.addRgbaSprite(
     FoodMarkerSpriteId,
     sim.foods.marker,
-    GardenMarkerLabel
+    GardenMarkerLabel,
+    encoded
   )
   for gnomeIndex, gnome in sim.gnomes:
     for direction in Direction:
       packet.addRgbaSprite(
         playerSpriteId(gnomeIndex, direction),
         gnome.frames[direction],
-        GnomeLabelPrefix & $gnomeIndex & " " & direction.directionLabel()
+        GnomeLabelPrefix & $gnomeIndex & " " & direction.directionLabel(),
+        encoded
       )
   if sim.chatBanner.width > 0:
     packet.addRgbaSprite(
       ChatBannerSpriteId,
       sim.chatBanner,
-      "chat banner"
+      "chat banner",
+      encoded
     )
   for i, portrait in sim.portraits:
     packet.addRgbaSprite(
       PortraitSpriteBase + i,
       portrait,
-      "portrait " & $i
+      "portrait " & $i,
+      encoded
     )
     packet.addRgbaSprite(
       PortraitFlipSpriteBase + i,
       portrait.flippedHorizontal(),
-      "portrait flip " & $i
+      "portrait flip " & $i,
+      encoded
     )
   for code in FirstPrintableAscii .. LastPrintableAscii:
     let ch = char(code)
     packet.addRgbaSprite(
       ch.bannerGlyphSpriteId(),
       sim.bannerGlyphSprite(ch),
-      "banner glyph " & $ch
+      "banner glyph " & $ch,
+      encoded
     )
   for phase in 0 ..< ConversationRingPhases:
     packet.addRgbaSprite(
       ConversationRingSpriteBase + phase,
       conversationRingSprite(phase),
-      "conversation ring " & $phase
+      "conversation ring " & $phase,
+      encoded
     )
 
 proc worldClampPixel(value, maxValue: int): int =
@@ -3889,8 +4047,50 @@ proc addDirectorWorldView(
       -cameraY - ForestMarginPx,
       BottomZ,
       MapLayerId,
-      forestSpriteId(tintIndex)
+      ForestSpriteBase
     )
+    if tintIndex >= 0:
+      # At dusk a translucent veil darkens the forest instead of a
+      # tinted second copy; the map keeps its own tinted sprites. The
+      # camera never leaves the map vertically, so visible forest is
+      # the two columns beside it. Veil tiles anchor flush against
+      # the map edges and spill away from the map, off the viewport,
+      # so they never dim the village. They share BottomZ and sort
+      # after the forest object: every tile y is above -ForestVeil-
+      # TileH while the forest sits at -ForestMarginPx or lower, and
+      # they never overlap the map bottom, so order against it cannot
+      # matter.
+      let
+        mapLeft = -cameraX
+        mapRight = mapLeft + sim.mainMap.width
+        veilRows = (viewH + ForestVeilTileH - 1) div ForestVeilTileH
+      var veilIndex = 0
+      for row in 1 .. veilRows:
+        let tileY = viewH - row * ForestVeilTileH
+        var tileX = mapLeft - ForestVeilTileW
+        while tileX + ForestVeilTileW > 0 and veilIndex < 96:
+          packet.addObject(
+            ForestVeilObjectBase + veilIndex,
+            tileX,
+            tileY,
+            BottomZ,
+            MapLayerId,
+            ForestVeilSpriteBase + tintIndex
+          )
+          inc veilIndex
+          tileX -= ForestVeilTileW
+        tileX = mapRight
+        while tileX < paddedW and veilIndex < 96:
+          packet.addObject(
+            ForestVeilObjectBase + veilIndex,
+            tileX,
+            tileY,
+            BottomZ,
+            MapLayerId,
+            ForestVeilSpriteBase + tintIndex
+          )
+          inc veilIndex
+          tileX += ForestVeilTileW
   packet.addObject(
     BottomObjectId,
     -cameraX,
@@ -6207,6 +6407,7 @@ when not defined(emscripten):
     return true
 
   const DirectorFitSnippet = """
+<!-- director -->
 <script>(function(){
   // The director cut frames every shot itself, so the page must stay
   // auto-fitted. The stock viewer drops auto-fit on the first click or
@@ -6221,6 +6422,20 @@ when not defined(emscripten):
 })();</script>
 """
 
+  proc respondDirectorPage(request: Request) =
+    ## Serves the shared global client as a director page: the stock
+    ## viewer body with the fit snippet appended, so the automated
+    ## camera's wide shots stay centered after any gesture.
+    var page = bitworldClient.clientStaticBody(
+      bitworldClient.GlobalClientRoute,
+      bitworldClient.GlobalClientRoute
+    )
+    page = page.replace("</body>", DirectorFitSnippet & "</body>")
+    var headers: HttpHeaders
+    headers["Content-Type"] = "text/html"
+    headers["Cache-Control"] = "no-cache"
+    request.respond(200, headers, page)
+
   proc httpHandler(request: Request) =
     ## Handles Heartleaf HTTP and websocket routes.
     if request.serveHealthz():
@@ -6228,44 +6443,35 @@ when not defined(emscripten):
     elif request.path == WebSocketPath and request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
       request.respondPlain(426, "websocket required\n")
-    elif request.path in ["/", GlobalWebSocketPath, DirectorWebSocketPath] and
+    elif request.path in DirectorPageRoutes and
         request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
-      # The root and /director serve the same viewer page; the page
-      # connects its websocket back to its own path, which lands in
-      # the upgrade branch below and flags the viewer as a director
+      # The root, /director, and the platform's /client/global all
+      # serve the director page; each page's websocket lands in the
+      # upgrade branch below and flags the viewer as a director
       # watcher. The director cut is the main page.
-      if request.path != GlobalWebSocketPath and
-          not request.checkReplayRequest():
+      if not request.checkReplayRequest():
         return
-      if request.path != GlobalWebSocketPath:
-        # Director pages (the root and the /director alias) keep the
-        # stock viewer auto-fitted: the fit snippet re-arms the fit
-        # after every gesture so the wide shot stays centered.
-        var page = bitworldClient.clientStaticBody(
-          bitworldClient.GlobalClientRoute,
-          bitworldClient.GlobalClientRoute
-        )
-        page = page.replace("</body>", DirectorFitSnippet & "</body>")
-        var headers: HttpHeaders
-        headers["Content-Type"] = "text/html"
-        headers["Cache-Control"] = "no-cache"
-        request.respond(200, headers, page)
-      else:
-        discard bitworldClient.serveClientFile(
-          request,
-          bitworldClient.GlobalClientRoute,
-          bitworldClient.GlobalClientRoute
-        )
-    elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
+      request.respondDirectorPage()
+    elif request.path in PlainViewRoutes and
+        request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
+      # The explicit opt-in for hand-panning: the stock page without
+      # the fit snippet, whose websocket (its own path) stays plain.
       if not request.checkReplayRequest():
         return
       discard bitworldClient.serveClientFile(
         request,
-        bitworldClient.ReplayClientRoute,
+        bitworldClient.GlobalClientRoute,
         bitworldClient.GlobalClientRoute
       )
+    elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
+        not request.isWebSocketUpgrade():
+      if not request.checkReplayRequest():
+        return
+      # Replay viewers are director watchers now, so the /replay page
+      # is the director page too; /plain keeps the plain view.
+      request.respondDirectorPage()
     elif request.path == WebSocketPath and request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
       let
@@ -6286,11 +6492,13 @@ when not defined(emscripten):
         withLock appState.lock:
           appState.playerSlots[websocket] = slot
           appState.playerUsernames[websocket] = username
-    elif request.path in ["/", GlobalWebSocketPath, DirectorWebSocketPath] and
+    elif (request.path in DirectorPageRoutes or
+        request.path in PlainViewRoutes) and
         request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
-      if request.path != GlobalWebSocketPath and
-          not request.checkReplayRequest():
+      # Live viewers: the platform's /global probe and every director
+      # page get the director cut; only the /plain opt-in stays plain.
+      if not request.checkReplayRequest():
         return
       let websocket = request.upgradeToWebSocket()
       {.gcsafe.}:
@@ -6302,10 +6510,20 @@ when not defined(emscripten):
             appState.replayViewerJoined = true
           appState.globalViewers[websocket] = PlayerViewerState(
             selectedPlayerIndex: -1,
-            directorMode: request.path != GlobalWebSocketPath
+            directorMode: request.path notin PlainViewRoutes
           )
-    elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
+    elif request.path in [
+        ReplayWebSocketPath,
+        bitworldClient.ReplayClientRoute,
+        bitworldClient.CoworldReplayClientRoute
+      ] and request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
+      # Replay watchers get the director cut: the automated camera,
+      # the conversation cards, and the queue playback. The Coworld
+      # replay client page has no websocket mapping of its own, so it
+      # connects back to its own path - accept that upgrade here too.
+      # Transport commands still drain for director viewers, so
+      # tools/replay_cmd.nim keeps working on the raw /replay path.
       if not request.checkReplayRequest():
         return
       let websocket = request.upgradeToWebSocket()
@@ -6317,7 +6535,8 @@ when not defined(emscripten):
               appState.replayRestartPending = true
             appState.replayViewerJoined = true
           appState.replayViewers[websocket] = PlayerViewerState(
-            selectedPlayerIndex: -1
+            selectedPlayerIndex: -1,
+            directorMode: true
           )
     elif request.path in [
         bitworldClient.ReplayClientRoute,
@@ -6325,11 +6544,10 @@ when not defined(emscripten):
       ] and request.httpMethod == "GET":
       if not request.checkReplayRequest():
         return
-      discard bitworldClient.serveClientFile(
-        request,
-        request.path,
-        bitworldClient.GlobalClientRoute
-      )
+      # Hosted replays get the director cut too: the observatory loads
+      # this route, and its websocket (the page's own path, upgraded
+      # above) is flagged as a director watcher with the ?uri= applied.
+      request.respondDirectorPage()
     elif bitworldClient.serveClientRoute(
       request,
       bitworldClient.GlobalClientRoute
