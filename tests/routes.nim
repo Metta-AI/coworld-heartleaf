@@ -79,22 +79,26 @@ proc fetch(path: string): tuple[status: int, body: string] =
   let response = client.get(Origin & path)
   (response.code.int, response.body)
 
-proc hasForest(frame: string): bool =
-  ## True when one binary frame places the forest underlay object, which
-  ## only the director world view emits.
+proc hasScorePanelCard(frame: string): bool =
+  ## True when one binary frame places the parchment score-panel card,
+  ## which every rendered viewer frame carries. It replaces the forest
+  ## underlay object this test used to pin director frames on: the
+  ## forest is gone, and with the plain view gone too every viewer
+  ## socket is a director watcher, so the card is the stable
+  ## always-present object of a viewer frame.
   if frame.len == 0:
     return false
   for message in parseSpritePacket(frame.toOpenArrayByte(0, frame.high)):
     if message.kind == spkObject and
-        message.objectDef.id == ForestObjectId and
-        message.objectDef.spriteId == ForestSpriteBase:
+        message.objectDef.id == GlobalPanelCardObjectId and
+        message.objectDef.spriteId == GlobalPanelCardSpriteId:
       return true
   false
 
-proc watch(path: string, seconds: float, stopOnForest: bool):
-    tuple[frames: int, forest: bool] =
+proc watch(path: string, seconds: float):
+    tuple[frames: int, scorePanel: bool] =
   ## Counts the binary frames one viewer socket receives in the window
-  ## and whether any of them carried the director's forest underlay.
+  ## and whether any of them carried the score-panel card.
   var ws = newWebSocket(WsOrigin & path)
   defer: ws.close()
   let deadline = epochTime() + seconds
@@ -105,10 +109,9 @@ proc watch(path: string, seconds: float, stopOnForest: bool):
     case message.get().kind
     of BinaryMessage:
       inc result.frames
-      if message.get().data.hasForest():
-        result.forest = true
-        if stopOnForest:
-          return
+      if message.get().data.hasScorePanelCard():
+        result.scorePanel = true
+        return
     of Ping:
       ws.send(message.get().data, Pong)
     else:
@@ -151,9 +154,9 @@ proc main() =
 
   echo "Testing the viewer websockets stream the director cut"
   for path in DirectorSockets:
-    let seen = watch(path, 5.0, stopOnForest = true)
+    let seen = watch(path, 5.0)
     doAssert seen.frames > 0, path & " should stream at least one frame"
-    doAssert seen.forest, path & " should place the forest underlay"
+    doAssert seen.scorePanel, path & " should place the score-panel card"
 
   echo "Route tests passed"
 
