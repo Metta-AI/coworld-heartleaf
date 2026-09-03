@@ -1,5 +1,5 @@
 import
-  std/[algorithm, hashes, json, math, os, osproc, random, strutils, tables, times],
+  std/[algorithm, hashes, json, math, os, random, strutils, tables, times],
   flatty, jsony, pixie,
   bitworld/aseprite, bitworld/pixelfonts, bitworld/spriteprotocol,
   bitworld/resources, bitworld/sprites,
@@ -9,11 +9,11 @@ import
 
 when not defined(emscripten):
   import
-    std/[locks, monotimes, sysrand],
+    std/[base64, locks, monotimes, sysrand],
     curly, mummy,
     bitworld/client as bitworldClient,
     bitworld/runtime,
-    heartleaf/brains, heartleaf/bedrock_client
+    heartleaf/brains, heartleaf/bedrock_client, heartleaf/voices
 
 const
   DefaultSeed* = 0x484541
@@ -228,6 +228,17 @@ const
   DirectorBounceHops = [2, 4, 6, 6, 5, 4, 2, 0, 2, 3, 3, 2, 1, 0]
     ## The little hop a gnome does when its new line lands, in pixels
     ## of lift per frame.
+  DirectorUiReferenceRows = 300
+    ## The browser draws the parchment UI cards (the score panel, the
+    ## transport card) on window-anchored layers at up to 3x, over the
+    ## director viewport it fits to the window; the server never
+    ## learns the window size. The name-label layout assumes the
+    ## shortest common window, 900 px tall, where the viewport's
+    ## height spans 300 UI-scale pixels: one UI pixel covers
+    ## viewH / 300 viewport pixels. A taller window leaves the reserved
+    ## bands roomier than the cards; a shorter one may still clip.
+  LabelClearGap = 2
+    ## Pixels a name label keeps from a reserved rect it slid off.
   ClockPadX = 2
   ClockPadY = 1
   ClockGlyphGap = 1
@@ -543,6 +554,10 @@ type
       ## Frames left of the hop a gnome does when its new line lands.
     directorLastMessages: seq[string]
       ## The last spoken line seen per player, to spot new ones.
+    directorShowAccum: int
+      ## Show-pacing frame accumulator: at 1X with the camera on a
+      ## conversation the replay advances one tick per
+      ## DirectorShowFrames frames. Viewer-only, never hashed.
     inferredHuddles: Table[int, tuple[x, y, ttl: int]]
       ## Fallback conversation rings inferred from replay state when no
       ## game.log rides next to the replay (an http replay URI), keyed
@@ -586,6 +601,14 @@ type
       ## encounter: no dwell rotation, no tour, until the queue
       ## releases it.
 
+  LabelLayout* = object
+    ## Where name labels may sit in one view: inside the clear rect and
+    ## off every reserved rect, all in viewport pixels. An inactive
+    ## layout (the default) leaves labels where their gnome puts them.
+    active*: bool
+    clear*: Rect
+    keepOut*: seq[Rect]
+
   KeyframeState = object
     ## Dynamic simulation state stored in one replay keyframe. Static
     ## assets (maps, sprites, fonts, init packet) are never serialized.
@@ -602,9 +625,10 @@ type
 
   PlayerViewerState* = ref object
     initialized: bool
-    directorMode: bool
+    directorMode*: bool
       ## A /director viewer: the automated camera picks the shot;
-      ## player and house selection are ignored.
+      ## player and house selection are ignored. Exported so the
+      ## standalone wasm viewer can opt its single local viewer in.
     selectedPlayerIndex: int
     selectedHouseNumber: int  ## 0 = none, 1..HouseCount = house interior view
     pendingMapClick: bool
@@ -663,6 +687,10 @@ when not defined(emscripten):
       voiceHoldSince: float
         ## While a viewer is speaking line voiceHoldSerial aloud, the
         ## replay holds; voicedone (or the timeout) releases it.
+      voiceClips: VoiceClipTable
+        ## The clips baked into the loaded replay, plus - in a live
+        ## game - the clips the record-time baker has finished so far.
+        ## /voice.m4a serves from here and synthesizes only on a miss.
       playerSlots: Table[WebSocket, int]
         ## Seat requested by each /player socket, -1 for any free seat.
       globalViewers: Table[WebSocket, PlayerViewerState]
@@ -1496,6 +1524,28 @@ proc selectedGlobalPlayerIndex(state: PlayerViewerState, sim: SimServer): int =
   if result >= sim.players.len:
     return -1
 
+proc globalScorePanelCardSize(
+  sim: SimServer
+): tuple[width, height, rows: int] =
+  ## The parchment card the score panel draws on, sized to the rows it
+  ## can show; zero rows when there is nothing to draw.
+  var maxRight = 0
+  for i, player in sim.players:
+    let rowY = GlobalPanelPad + i * GlobalPanelRowHeight
+    if GlobalPanelCardPadY * 2 + rowY + GlobalPanelRowHeight >
+        GlobalPanelHeight:
+      break
+    result.rows = i + 1
+    maxRight = max(maxRight, GlobalPanelNameX +
+      sim.textFont.textWidth(player.attributedDisplayName()))
+    maxRight = max(maxRight, GlobalPanelScoreX +
+      sim.textFont.textWidth(player.score.globalPanelScoreText()))
+  if result.rows == 0:
+    return
+  result.width = min(GlobalPanelWidth, GlobalPanelCardPadX * 2 + maxRight + 1)
+  result.height = GlobalPanelCardPadY * 2 + GlobalPanelPad +
+    result.rows * GlobalPanelRowHeight
+
 proc addGlobalScorePanel(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1507,25 +1557,9 @@ proc addGlobalScorePanel(
   if sim.players.len == 0:
     return
   # Size the card to its rows before drawing anything.
-  var
-    rows = 0
-    maxRight = 0
-  for i, player in sim.players:
-    let rowY = GlobalPanelPad + i * GlobalPanelRowHeight
-    if GlobalPanelCardPadY * 2 + rowY + GlobalPanelRowHeight >
-        GlobalPanelHeight:
-      break
-    rows = i + 1
-    maxRight = max(maxRight, GlobalPanelNameX +
-      sim.textFont.textWidth(player.attributedDisplayName()))
-    maxRight = max(maxRight, GlobalPanelScoreX +
-      sim.textFont.textWidth(player.score.globalPanelScoreText()))
+  let (cardWidth, cardHeight, rows) = sim.globalScorePanelCardSize()
   if rows == 0:
     return
-  let
-    cardWidth = min(GlobalPanelWidth, GlobalPanelCardPadX * 2 + maxRight + 1)
-    cardHeight = GlobalPanelCardPadY * 2 + GlobalPanelPad +
-      rows * GlobalPanelRowHeight
   var card: RgbaSprite
   if sim.chatBanner.width > 0:
     card = sim.chatBanner.nineSliceSprite(
@@ -1599,6 +1633,67 @@ proc addGlobalScorePanel(
       nameSpriteId
     )
 
+proc rectsOverlap(a, b: Rect): bool =
+  ## Returns true when two rectangles share any pixel.
+  a.x < b.x + b.w and b.x < a.x + a.w and
+    a.y < b.y + b.h and b.y < a.y + a.h
+
+proc rectInside(inner, outer: Rect): bool =
+  ## Returns true when one rectangle lies wholly inside another.
+  inner.x >= outer.x and inner.y >= outer.y and
+    inner.x + inner.w <= outer.x + outer.w and
+    inner.y + inner.h <= outer.y + outer.h
+
+proc placeLabel*(
+  layout: LabelLayout,
+  x, y, w, h: int
+): tuple[x, y: int] =
+  ## Slides one label rect so it stays inside the layout's clear rect
+  ## and off every reserved rect, the way a speech bubble slides back
+  ## inside the viewport: first into the clear rect, then, for each
+  ## reserved rect it still touches, to that rect's nearest clear
+  ## side. A label that fits nowhere keeps its place; an inactive
+  ## layout changes nothing.
+  result = (x, y)
+  if not layout.active:
+    return
+  let clear = layout.clear
+  if w > clear.w or h > clear.h:
+    return
+  result.x = clamp(x, clear.x, clear.x + clear.w - w)
+  result.y = clamp(y, clear.y, clear.y + clear.h - h)
+  var moved = true
+  # Every move settles one reserved rect; the loop only repeats when a
+  # move landed on another one, so a few rounds always settle it.
+  for _ in 0 ..< layout.keepOut.len + 1:
+    if not moved:
+      break
+    moved = false
+    for reserved in layout.keepOut:
+      let here = Rect(x: result.x, y: result.y, w: w, h: h)
+      if not rectsOverlap(here, reserved):
+        continue
+      let candidates = [
+        (x: result.x, y: reserved.y - h - LabelClearGap),
+        (x: result.x, y: reserved.y + reserved.h + LabelClearGap),
+        (x: reserved.x - w - LabelClearGap, y: result.y),
+        (x: reserved.x + reserved.w + LabelClearGap, y: result.y)
+      ]
+      var
+        best = -1
+        bestCost = high(int)
+      for i, candidate in candidates:
+        if not rectInside(
+            Rect(x: candidate.x, y: candidate.y, w: w, h: h), clear):
+          continue
+        let cost = abs(candidate.x - result.x) + abs(candidate.y - result.y)
+        if cost < bestCost:
+          bestCost = cost
+          best = i
+      if best >= 0:
+        result = candidates[best]
+        moved = true
+
 proc addNameTag(
   packet: var seq[uint8],
   sim: SimServer,
@@ -1609,13 +1704,20 @@ proc addNameTag(
   screenY,
   z,
   viewportWidth,
-  viewportHeight: int
+  viewportHeight: int,
+  layout = LabelLayout()
 ): int =
-  ## Appends a player name tag and returns its top y coordinate.
+  ## Appends a player name tag and returns its top y coordinate. An
+  ## active layout keeps the tag inside its clear rect and off its
+  ## reserved rects.
   let
     tag = sim.nameTagSprite(player.playerName)
-    x = screenX + GnomeSpriteSize div 2 - tag.width div 2
-    y = screenY - tag.height - NameGapY
+    (x, y) = layout.placeLabel(
+      screenX + GnomeSpriteSize div 2 - tag.width div 2,
+      screenY - tag.height - NameGapY,
+      tag.width,
+      tag.height
+    )
     spriteId = NameSpriteBase + playerIndex
   if not rectVisible(
     x,
@@ -2964,9 +3066,11 @@ proc addPlayerObjects(
   viewportWidth,
   viewportHeight: int,
   highlightIndex = -1,
-  includeBubbles = true
+  includeBubbles = true,
+  labelLayout = LabelLayout()
 ) =
-  ## Appends all player sprite objects for one map.
+  ## Appends all player sprite objects for one map. An active label
+  ## layout keeps the name tags clear of the view's reserved rects.
   if mapIndex == MainMapIndex:
     packet.addConversationCircles(
       sim, cameraX, cameraY, viewportWidth, viewportHeight
@@ -3019,7 +3123,8 @@ proc addPlayerObjects(
       screenY,
       NameZ,
       viewportWidth,
-      viewportHeight
+      viewportHeight,
+      labelLayout
     )
     if includeBubbles:
       packet.addSpeechBubble(
@@ -3622,6 +3727,26 @@ proc updateDirectorCamera*(sim: SimServer) =
     sim.directorCamW += (targetW - sim.directorCamW) * DirectorTweenRate
     sim.directorCamH += (targetH - sim.directorCamH) * DirectorTweenRate
 
+proc directorCrop*(sim: SimServer): tuple[x, y, w, h: float] =
+  ## The director camera's current crop of the main map, in world
+  ## pixels, for the headless checks and tests.
+  (sim.directorCamX, sim.directorCamY, sim.directorCamW, sim.directorCamH)
+
+proc directorCropJump*(
+  before, after: tuple[x, y, w, h: float]
+): float =
+  ## How far the crop moved between two frames, as a fraction of the
+  ## crop itself: the largest of the position shifts against the
+  ## crop's size and the size changes against the size. A glide keeps
+  ## this small every frame; a snap shows up as a value near one.
+  let
+    w = max(1.0, max(before.w, after.w))
+    h = max(1.0, max(before.h, after.h))
+  max(
+    max(abs(after.x - before.x) / w, abs(after.y - before.y) / h),
+    max(abs(after.w - before.w) / w, abs(after.h - before.h) / h)
+  )
+
 proc wrapCardLines(sim: SimServer, text: string, maxWidth: int): seq[string] =
   ## Word-wraps one spoken line to a pixel width in the Tiny5 font.
   var line = ""
@@ -3871,10 +3996,45 @@ proc addDirectorConversationCards(
     DirectorCardFaceSpriteBase + speakingPlayer.gnomeIndex
   )
 
+proc directorLabelLayout*(
+  sim: SimServer,
+  viewW, viewH, paddedW, forestPad: int,
+  replayControls: bool
+): LabelLayout =
+  ## The director view's name-label layout, in viewport pixels. Labels
+  ## stay inside the map crop - the margins beside it belong to the
+  ## conversation cards - and off the parchment UI cards the browser
+  ## overlays on its window: the score panel at the top left and, with
+  ## replay controls showing, the transport card at the bottom center.
+  ## Those cards live on window-anchored layers the server never
+  ## sees, so their footprint on the crop is the one they have in the
+  ## DirectorUiReferenceRows window, the viewport filling its height.
+  result.active = true
+  result.clear = Rect(
+    x: DirectorCardMarginPx + forestPad, y: 0, w: viewW, h: viewH
+  )
+  let uiScale = float(viewH) / float(DirectorUiReferenceRows)
+  if replayControls:
+    let
+      cardW = int(float(ViewportWidth) * uiScale)
+      cardH = int(float(ReplayPanelHeight) * uiScale)
+    result.keepOut.add(Rect(
+      x: (paddedW - cardW) div 2, y: viewH - cardH, w: cardW, h: cardH
+    ))
+  let panel = sim.globalScorePanelCardSize()
+  if panel.rows > 0:
+    result.keepOut.add(Rect(
+      x: 0,
+      y: 0,
+      w: int(float(panel.width) * uiScale),
+      h: int(float(panel.height) * uiScale)
+    ))
+
 proc addDirectorWorldView(
   packet: var seq[uint8],
   sim: SimServer,
-  cache: var seq[SpriteCacheEntry]
+  cache: var seq[SpriteCacheEntry],
+  replayControls = false
 ) =
   ## Appends the main map cropped to the director camera. The browser
   ## client scales the declared viewport to fit its window, so a
@@ -3919,6 +4079,8 @@ proc addDirectorWorldView(
   )
   packet.addGardenObjects(sim, cameraX, cameraY, paddedW, viewH)
   packet.addTrailObjects(sim, cache, cameraX, cameraY)
+  # Name labels slide clear of the UI cards and the card margins, so
+  # a gnome walking under the transport card keeps its name on screen.
   packet.addPlayerObjects(
     sim,
     cache,
@@ -3927,7 +4089,10 @@ proc addDirectorWorldView(
     cameraY,
     paddedW,
     viewH,
-    includeBubbles = false
+    includeBubbles = false,
+    labelLayout = sim.directorLabelLayout(
+      viewW, viewH, paddedW, forestPad, replayControls
+    )
   )
   packet.addHouseGnomeObjects(sim, cache, cameraX, cameraY)
   packet.addObject(
@@ -4531,7 +4696,7 @@ proc buildGlobalPacket*(
     # camera picks the shot for everyone watching.
     nextState.pendingMapClick = false
     nextState.selectedPlayerIndex = -1
-    result.addDirectorWorldView(sim, nextState.spriteCache)
+    result.addDirectorWorldView(sim, nextState.spriteCache, replayControls)
     result.addGlobalScorePanel(sim, nextState.spriteCache, -1)
     if replayControls:
       result.addReplayControls(
@@ -5787,6 +5952,76 @@ proc applyReplayCommand*(
   else:
     discard
 
+proc queueReplayCommand*(state: PlayerViewerState, command: char) =
+  ## Queues one transport command as if the viewer had clicked it,
+  ## for hosts whose client cannot deliver keystrokes (the standalone
+  ## wasm viewer polls the browser's keydown queue directly).
+  state.replayCommands.add(command)
+
+proc advanceReplayShow*(
+  sim: SimServer,
+  replay: var ReplayPlayer,
+  directorWatching: bool,
+  holdTicks = false
+) =
+  ## Advances playback one frame, shared by the websocket replay
+  ## server loop and the standalone viewer: conversation-queue
+  ## bookkeeping, show pacing under a director, the between-
+  ## conversations fast-forward with its boundary clamps, the camera
+  ## tween hold, and the loop restart. With holdTicks the caller has
+  ## its own reason to land no ticks this frame (the server holds
+  ## while a viewer speaks the current line aloud); the queue
+  ## bookkeeping and the loop restart still run.
+  if not replay.playing:
+    return
+  # Queue-mode bookkeeping: commit at births, release at deaths,
+  # rewind through same-tick birth groups, resume from the furthest
+  # tick shown.
+  sim.stepConversationQueue(replay)
+  # With a director watching, a conversation on screen slows 1X
+  # playback to show pacing: recorded lines land about five seconds
+  # apart. Other speeds respect the transport.
+  let showPacing = directorWatching and
+    (sim.directorFocusActive or sim.directorDinnerTtl > 0) and
+    replay.replaySpeedIndex() == DefaultSpeedIndex
+  var ticksThisFrame = 0
+  if showPacing:
+    inc sim.directorShowAccum
+    if sim.directorShowAccum >= DirectorShowFrames:
+      sim.directorShowAccum = 0
+      ticksThisFrame = 1
+  else:
+    sim.directorShowAccum = 0
+    ticksThisFrame = replay.replayTicksThisFrame()
+  # Between conversations the queue's playhead fast-forwards briskly
+  # to the next birth; committed playback never runs past its item's
+  # death tick. The clamps land the playhead exactly on each boundary.
+  if sim.convQueue.len > 0:
+    if not sim.convQueueCommitted and
+        replay.replaySpeedIndex() == DefaultSpeedIndex:
+      ticksThisFrame = QueueFastForwardTicks
+    if sim.convQueueCommitted:
+      ticksThisFrame = min(ticksThisFrame, max(0,
+        sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount))
+    elif sim.convQueueIndex < sim.convQueue.len:
+      ticksThisFrame = min(ticksThisFrame, max(0,
+        sim.convQueue[sim.convQueueIndex].birthTick - sim.tickCount))
+  # A camera glide is a held breath: at show speed the replay pauses
+  # until the shot settles, so cuts never swallow lines.
+  if directorWatching and sim.directorTweenLeft > 0 and
+      replay.replaySpeedIndex() == DefaultSpeedIndex:
+    ticksThisFrame = 0
+  if holdTicks:
+    ticksThisFrame = 0
+  for _ in 0 ..< ticksThisFrame:
+    if replay.playing:
+      replay.stepReplay(sim)
+  if replay.looping and not replay.playing and
+      replay.replayMaxTick() > 0:
+    sim.restartConversationQueue()
+    replay.seekReplay(sim, 0)
+    replay.playing = true
+
 when not defined(emscripten):
   proc initAppState() =
     ## Initializes shared websocket state.
@@ -5806,19 +6041,60 @@ when not defined(emscripten):
     appState.replayLoaded = false
     appState.pendingReplayUri = ""
 
-proc publishNowPlaying(sim: SimServer) =
-  ## Mirrors the banner's current chat line into shared state, so the
-  ## /nowplaying route can hand it to the viewer pages' speech layer.
-  let now = sim.chatFeedNowPlaying()
-  {.gcsafe.}:
-    withLock appState.lock:
-      if now != appState.nowKey:
-        appState.nowKey = now
-        if now.index >= 0:
-          inc appState.nowPlayingSerial
-          appState.nowPlayingSeat = now.gnomeIndex
-          appState.nowPlayingText = sim.chatFeedNowText()
+when not defined(emscripten):
+  proc publishNowPlaying(sim: SimServer) =
+    ## Mirrors the banner's current chat line into shared state, so the
+    ## /nowplaying route can hand it to the viewer pages' speech layer.
+    ## Headless runs (the director check tool, the tests) pump viewer
+    ## frames with no server and no shared state to publish into.
+    if appState == nil:
+      return
+    let now = sim.chatFeedNowPlaying()
+    {.gcsafe.}:
+      withLock appState.lock:
+        if now != appState.nowKey:
+          appState.nowKey = now
+          if now.index >= 0:
+            inc appState.nowPlayingSerial
+            appState.nowPlayingSeat = now.gnomeIndex
+            appState.nowPlayingText = sim.chatFeedNowText()
 
+  proc publishVoiceClips(replay: ReplayPlayer) =
+    ## Hands the loaded replay's baked clips to the /voice.m4a route.
+    if appState == nil:
+      return
+    {.gcsafe.}:
+      withLock appState.lock:
+        appState.voiceClips = replay.voiceClips
+    if replay.voiceClips.len > 0:
+      echo "Voice clips: ", replay.voiceClips.len, " baked into the replay"
+
+  proc recordBakedVoice(
+    sim: SimServer,
+    writer: var ReplayWriter,
+    baked: VoiceBakeResult
+  ) =
+    ## Writes one finished clip into the recording and the live cache.
+    writer.writeVoiceRecord(
+      tickTime(sim.tickCount), sim.tickCount, baked.seat,
+      baked.text, baked.codec, baked.bytes
+    )
+    if appState == nil:
+      return
+    {.gcsafe.}:
+      withLock appState.lock:
+        appState.voiceClips[voiceClipKey(baked.seat, baked.text)] = VoiceClip(
+          tick: sim.tickCount,
+          seat: baked.seat,
+          text: baked.text,
+          codec: baked.codec,
+          base64: encode(baked.bytes)
+        )
+else:
+  proc publishNowPlaying(sim: SimServer) =
+    ## The wasm viewer has no server and no shared state: its page
+    ## learns the line on air from the viewer's own sound hook.
+    discard
 
 proc globalPanelClickedPlayer(data: string): int =
   ## Returns the clicked global score-panel player index or -1.
@@ -6009,14 +6285,10 @@ proc replayViewerFrame*(
       replay.applyReplaySeek(sim, seekTick)
     for command in commands:
       replay.applyReplayCommand(sim, command)
-    if replay.playing:
-      for _ in 0 ..< replay.replayTicksThisFrame():
-        if replay.playing:
-          replay.stepReplay(sim)
-      if replay.looping and not replay.playing and
-          replay.replayMaxTick() > 0:
-        replay.seekReplay(sim, 0)
-        replay.playing = true
+    sim.advanceReplayShow(
+      replay,
+      directorWatching = state != nil and state.directorMode
+    )
   if replay.circlesTimeline.len > 0:
     # The replay recorded its circles; they beat any re-derivation.
     sim.conversationCircles =
@@ -6337,105 +6609,29 @@ when not defined(emscripten):
       ## viewer left, or sound never started) the show falls back to
       ## the wall-clock delay-chat pacing, so muted viewers never
       ## stall.
-    ## The ElevenLabs cast, seat by seat, matched to the persona souls.
-    ## An empty id falls back to the macOS voice for that seat. Override
-    ## with HEARTLEAF_ELEVEN_VOICES, a comma list of voice ids.
-    ElevenCast = [
-      "nzeAacJi50IvxcyDnMXa",  # Ivan (chatty)    - Marshal, exuberant professor
-      "ouL9IsyrSnUkCmfnD02u",  # Anton (curious)  - Grimblewood, snarky gnome
-      "M4zkunnpRihDKTNF0D7f",  # Yura (fatherly)  - Klaus Santa, warm and jolly
-      "ZUz67EWNNT6d1i38Xmcm",  # Sasha (friendly) - Robert, warm baritone
-      "LRpNiUBlcqgIsKUzcrlN",  # Maxim (funny)    - Georg, funny and emotional
-      "0pkdtmrxitYBWv6q9NJO",  # Nikita (grumpy)  - Potato, deep wooden stoic
-      "B52raBK48m23qWYbwchQ",  # Vova (jolly)     - Matthew Schmitz, warm teller
-      "gSYqSbtMajxq5LUT0bNl",  # Dima (poet)      - Elder, epic storyteller
-      "LxiqOV1uxBCgYTeitAHf"   # Egor (shy)       - Bowo, hoarse and quiet
-    ]
-
-  proc elevenKey(): string =
-    ## The ElevenLabs API key: the environment first, then the key
-    ## file, so the key never has to travel through a chat or a repo.
-    result = getEnv("ELEVENLABS_API_KEY").strip()
-    if result.len == 0:
-      let keyFile = getHomeDir() / ".elevenlabs_key"
-      if fileExists(keyFile):
-        result = readFile(keyFile).strip()
-
-  proc elevenVoiceFor(seat: int): string =
-    ## The ElevenLabs voice id for one seat, or empty for the fallback.
-    let listed = getEnv("HEARTLEAF_ELEVEN_VOICES").strip()
-    if listed.len > 0:
-      let ids = listed.split(',')
-      if seat >= 0 and seat < ids.len:
-        return ids[seat].strip()
-      return ""
-    if seat >= 0 and seat < ElevenCast.len:
-      return ElevenCast[seat]
-    ""
-
-  proc elevenClip(seat: int, text: string): string =
-    ## One spoken line from ElevenLabs as mp3 bytes, cached by voice
-    ## and text so a replay costs credits once. Empty on any failure -
-    ## the caller falls back to the macOS voice.
-    let key = elevenKey()
-    if key.len == 0:
-      return ""
-    let voiceId = elevenVoiceFor(seat)
-    if voiceId.len == 0:
-      return ""
-    let cacheDir = getTempDir() / "heartleaf-eleven"
-    createDir(cacheDir)
-    let clipPath = cacheDir / voiceId & "-" & $abs(hash(text)) & ".mp3"
-    if fileExists(clipPath):
-      return readFile(clipPath)
-    let bodyPath = cacheDir / "request.json"
-    writeFile(bodyPath, $(%*{
-      "text": text,
-      "model_id": "eleven_flash_v2_5"
-    }))
-    discard execProcess("/usr/bin/curl", args = [
-      "-s", "-f", "--max-time", "15",
-      "-X", "POST",
-      "https://api.elevenlabs.io/v1/text-to-speech/" & voiceId &
-        "?output_format=mp3_44100_64",
-      "-H", "xi-api-key: " & key,
-      "-H", "Content-Type: application/json",
-      "--data-binary", "@" & bodyPath,
-      "-o", clipPath
-    ], options = {poUsePath})
-    removeFile(bodyPath)
-    if fileExists(clipPath) and getFileSize(clipPath) > 500:
-      return readFile(clipPath)
-    if fileExists(clipPath):
-      removeFile(clipPath)
-    ""
-
-  const
-    VoiceCast = [
-      ("Grandpa (English (US))", 185),
-      ("Junior", 200),
-      ("Jester", 205),
-      ("Eddy (English (US))", 200),
-      ("Ralph", 190),
-      ("Reed (English (US))", 190),
-      ("Daniel", 195),
-      ("Fred", 185),
-      ("Rishi", 200)
-    ]
+    VoiceBakeFinishSeconds = 30.0
+      ## How long the recording game waits at its end for the last
+      ## clips still being synthesized before it closes the replay.
 
   proc serveVoiceClip(request: Request): bool =
-    ## Speaks the current banner line as a small AAC clip, one voice
-    ## per seat, and holds the replay until the viewer reports the
-    ## line finished (or the hold times out).
+    ## Serves the current banner line as a small audio clip and holds
+    ## the replay until the viewer reports the line finished (or the
+    ## hold times out). The clip comes from the replay when it was
+    ## baked in at record time; only a line with no baked clip - a
+    ## live game, an old recording - is synthesized here, and only
+    ## when this machine has a synthesizer.
     if request.path != "/voice.m4a" or request.httpMethod != "GET":
       return false
     var serial, seat: int
     var text: string
+    var baked: VoiceClip
+    var hasBaked = false
     {.gcsafe.}:
       withLock appState.lock:
         serial = appState.nowPlayingSerial
         seat = appState.nowPlayingSeat
         text = appState.nowPlayingText
+        hasBaked = appState.voiceClips.findVoiceClip(seat, text, baked)
     let wanted = request.queryParams.getOrDefault("serial", "").strip()
     if wanted != $serial or text.len == 0:
       request.respondPlain(409, "line has moved on\n")
@@ -6444,35 +6640,22 @@ when not defined(emscripten):
       withLock appState.lock:
         appState.voiceHoldSerial = serial
         appState.voiceHoldSince = epochTime()
-    let premium = elevenClip(seat, text)
-    if premium.len > 0:
-      var headers: HttpHeaders
-      headers["Content-Type"] = "audio/mpeg"
-      headers["Cache-Control"] = "no-cache"
-      request.respond(200, headers, premium)
-      return true
-    let
-      voice = VoiceCast[seat mod VoiceCast.len]
-      base = getTempDir() / "heartleaf-voice-" & $serial
-    discard execProcess("/usr/bin/say", args = [
-      "-v", voice[0], "-r", $voice[1], "-o", base & ".aiff", text
-    ], options = {poUsePath})
-    discard execProcess("/usr/bin/afconvert", args = [
-      "-f", "m4af", "-d", "aac", base & ".aiff", base & ".m4a"
-    ], options = {poUsePath})
-    if not fileExists(base & ".m4a"):
+    var clip: VoiceClipBytes
+    if hasBaked:
+      clip = (baked.codec, baked.voiceClipBytes())
+    else:
+      clip = synthesizeVoice(detectVoiceSynth(), seat, text)
+    if clip.bytes.len == 0:
       {.gcsafe.}:
         withLock appState.lock:
           appState.voiceDoneSerial = max(appState.voiceDoneSerial, serial)
-      request.respondPlain(404, "voice synthesis failed\n")
+      request.respondPlain(404, "no voice for this line\n")
       return true
-    let body = readFile(base & ".m4a")
-    removeFile(base & ".aiff")
-    removeFile(base & ".m4a")
     var headers: HttpHeaders
-    headers["Content-Type"] = "audio/mp4"
+    headers["Content-Type"] = voiceContentType(clip.codec)
     headers["Cache-Control"] = "no-cache"
-    request.respond(200, headers, body)
+    headers["X-Heartleaf-Voice"] = if hasBaked: "baked" else: "synthesized"
+    request.respond(200, headers, clip.bytes)
     true
 
   proc serveVoiceDone(request: Request): bool =
@@ -6810,6 +6993,17 @@ when not defined(emscripten):
         "tokenCount": tokens.len
       })
     )
+    # Spoken lines are voiced as they happen, on a background thread,
+    # and the finished clips ride into the replay so hosted playback
+    # never has to synthesize. Without a replay file or a synthesizer
+    # the baker is inert.
+    var voiceBaker = startVoiceBaker(
+      if replayWriter.enabled: detectVoiceSynth() else: vsNone
+    )
+    if voiceBaker.running:
+      echo "Voice baking with ", $voiceBaker.synth, " into ", saveReplayPath
+    elif replayWriter.enabled:
+      echo "No voice synthesizer; the replay records without voices"
     var
       sim = initSimServer(seed, dayTicks)
       lastTick: MonoTime
@@ -6880,6 +7074,13 @@ when not defined(emscripten):
             playerIndex,
             chatText
           )
+          # Only a line somebody hears reaches the chat feed, so only
+          # those get a voice.
+          if sim.replayChatAudience(playerIndex).len > 0:
+            voiceBaker.request(
+              sim.players[playerIndex].gnomeIndex,
+              sim.players[playerIndex].message
+            )
       # Conversation enter/exit rows ride inside the replay so playback
       # can rebuild the ring timeline from the one file.
       if not brains.gameLog.isNil and
@@ -7029,6 +7230,11 @@ when not defined(emscripten):
             for websocket in logDrops:
               sim.removePlayer(websocket)
 
+      # Finished clips go into the replay as they land, and into the
+      # live voice cache so a watching viewer gets the same clip.
+      for baked in voiceBaker.drain():
+        sim.recordBakedVoice(replayWriter, baked)
+
       sim.updateDirectorCamera()
       for i in 0 ..< globalSockets.len:
         var nextState: PlayerViewerState
@@ -7048,7 +7254,13 @@ when not defined(emscripten):
         if lastWrittenDay == 0:
           sim.writeArtifacts(runtimeConfig)
         if replayWriter.enabled:
-          # Only the first game of a run is recorded and uploaded.
+          # Only the first game of a run is recorded and uploaded. The
+          # last spoken lines may still be in the synthesizer; give
+          # them a moment so the recording carries every voice.
+          if voiceBaker.pending > 0:
+            echo "Waiting for ", voiceBaker.pending, " voice clips"
+          for baked in voiceBaker.finish(VoiceBakeFinishSeconds):
+            sim.recordBakedVoice(replayWriter, baked)
           replayWriter.closeReplayWriter()
           if fileExists(saveReplayPath):
             echo "Replay written: ", saveReplayPath,
@@ -7310,6 +7522,43 @@ proc replaySimDay*(sim: SimServer): tuple[dayNumber, dayTick, dayTicks: int] =
   ## The simulation's day-cycle position (event context).
   (dayNumber: sim.dayNumber, dayTick: sim.dayTick, dayTicks: sim.dayTicks)
 
+type
+  SpokenLine* = tuple[tick, seat: int, text: string]
+    ## One chat line that reaches the delay-chat feed on playback:
+    ## the tick it was captured at, the speaker's gnome index (the
+    ## voice) and the text. Exactly the lines a viewer will want a
+    ## voice for.
+
+proc replaySpokenLines*(
+  data: ReplayData,
+  replayPath = "",
+  gameLogPath = ""
+): seq[SpokenLine] =
+  ## Every line the delay-chat feed will show for one replay, found
+  ## by playing the recording through the real simulation: the feed
+  ## keeps a chat only when someone was in hearing range, and that is
+  ## a fact of the sim, not of the chat records. `replayPath` names
+  ## the recording (for the game.log beside it) and `gameLogPath` an
+  ## explicit game.log, both optional and only for the conversation
+  ## timeline of recordings that predate in-replay conversation rows.
+  let (seed, dayTicks) = replaySimConfig(data)
+  let sim = initSimServer(seed, dayTicks)
+  sim.attachConversationTimeline(data, replayPath)
+  if sim.conversationTimeline.events.len == 0 and gameLogPath.len > 0:
+    sim.conversationTimeline = loadConversationTimeline(gameLogPath)
+  var replay = initReplayPlayer(data)
+  replay.looping = false
+  let maxTick = replay.replayMaxTick()
+  var seen = 0
+  while replay.playing and sim.tickCount < maxTick:
+    replay.stepReplay(sim)
+    # The feed is never trimmed while its cursor sits at -1 (nothing
+    # here advances it), so every captured line is still there.
+    while seen < sim.chatFeed.len:
+      let item = sim.chatFeed[seen]
+      result.add((sim.tickCount, item.speaker.gnomeIndex, item.message))
+      inc seen
+
 proc replayDirectionName(direction: Direction): string =
   ## Human-readable facing, matching the sprite gnome labels.
   case direction
@@ -7408,6 +7657,7 @@ when not defined(emscripten):
       sim.attachConversationTimeline(replayData, cliLoadReplayPath())
       replay.buildReplayKeyframes(replaySeed, replayDayTicks)
       sim.buildConversationQueue(replay.replayMaxTick())
+      publishVoiceClips(replay)
     # The server holds paused on the final tick instead of looping, so
     # a page load never lands mid-recording; "r" re-enables looping.
     replay.looping = false
@@ -7427,9 +7677,7 @@ when not defined(emscripten):
     )
     httpServer.waitUntilReady()
     lastTick = getMonoTime()
-    var
-      directorShowAccum = 0
-      lastSeekSerial = replay.seekSerial
+    var lastSeekSerial = replay.seekSerial
 
     while true:
       var
@@ -7494,6 +7742,7 @@ when not defined(emscripten):
           replay = initReplayPlayer(replayData)
           replay.buildReplayKeyframes(replaySeed, replayDayTicks)
           sim.buildConversationQueue(replay.replayMaxTick())
+          publishVoiceClips(replay)
           replay.looping = false
           replayLoaded = true
           {.gcsafe.}:
@@ -7535,68 +7784,25 @@ when not defined(emscripten):
           replay.applyReplaySeek(sim, seekTick)
         for command in commands:
           replay.applyReplayCommand(sim, command)
-        if replay.playing:
-          # Queue-mode bookkeeping: commit at births, release at
-          # deaths, rewind through same-tick birth groups, resume
-          # from the furthest tick shown.
-          sim.stepConversationQueue(replay)
-          # With a director watching, a conversation on screen slows
-          # 1X playback to show pacing: recorded lines land about five
-          # seconds apart. Other speeds respect the transport.
-          var directorWatching = false
-          for state in viewerStates:
-            if state.directorMode:
-              directorWatching = true
-              break
-          let showPacing = directorWatching and
-            (sim.directorFocusActive or sim.directorDinnerTtl > 0) and
-            replay.replaySpeedIndex() == DefaultSpeedIndex
-          var ticksThisFrame = 0
-          if showPacing:
-            inc directorShowAccum
-            if directorShowAccum >= DirectorShowFrames:
-              directorShowAccum = 0
-              ticksThisFrame = 1
-          else:
-            directorShowAccum = 0
-            ticksThisFrame = replay.replayTicksThisFrame()
-          # Between conversations the queue's playhead fast-forwards
-          # briskly to the next birth; committed playback never runs
-          # past its item's death tick. The clamps land the playhead
-          # exactly on each boundary.
-          if sim.convQueue.len > 0:
-            if not sim.convQueueCommitted and
-                replay.replaySpeedIndex() == DefaultSpeedIndex:
-              ticksThisFrame = QueueFastForwardTicks
-            if sim.convQueueCommitted:
-              ticksThisFrame = min(ticksThisFrame, max(0,
-                sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount))
-            elif sim.convQueueIndex < sim.convQueue.len:
-              ticksThisFrame = min(ticksThisFrame, max(0,
-                sim.convQueue[sim.convQueueIndex].birthTick - sim.tickCount))
-          # A camera glide is a held breath: at show speed the replay
-          # pauses until the shot settles, so cuts never swallow lines.
-          if directorWatching and sim.directorTweenLeft > 0 and
-              replay.replaySpeedIndex() == DefaultSpeedIndex:
-            ticksThisFrame = 0
-          # While a viewer speaks the current line aloud, the show
-          # waits: no ticks, so the next card pops when the voice ends.
-          # Between queue commitments the hold does not pace ticks: the
-          # fast-forward must reach the next birth even while a stale
-          # line from the played-out conversation is still being
-          # spoken, or the ticks the next commitment's huddle needs
-          # would starve behind one slow clip.
-          if voiceHolding and
-              not (sim.convQueue.len > 0 and not sim.convQueueCommitted):
-            ticksThisFrame = 0
-          for _ in 0 ..< ticksThisFrame:
-            if replay.playing:
-              replay.stepReplay(sim)
-          if replay.looping and not replay.playing and
-              replay.replayMaxTick() > 0:
-            sim.restartConversationQueue()
-            replay.seekReplay(sim, 0)
-            replay.playing = true
+        var directorWatching = false
+        for state in viewerStates:
+          if state.directorMode:
+            directorWatching = true
+            break
+        # While a viewer speaks the current line aloud, the show
+        # waits: no ticks, so the next card pops when the voice ends.
+        # Between queue commitments the hold does not pace ticks: the
+        # fast-forward must reach the next birth even while a stale
+        # line from the played-out conversation is still being spoken,
+        # or the ticks the next commitment's huddle needs would starve
+        # behind one slow clip.
+        let voiceHoldsTicks = voiceHolding and
+          not (sim.convQueue.len > 0 and not sim.convQueueCommitted)
+        sim.advanceReplayShow(
+          replay,
+          directorWatching,
+          holdTicks = voiceHoldsTicks
+        )
       # Any seek strands a viewer mid-line: the clip it is speaking
       # belongs to a feed that no longer exists, and its voicedone
       # would otherwise be the only thing releasing the hold. Release
