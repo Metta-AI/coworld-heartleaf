@@ -122,6 +122,32 @@ To call a real model locally, set `BEDROCK_KEY` (or AWS credentials) in the
 game's environment instead of `HEARTLEAF_MOCK_REPLY`. Hosted games get
 Bedrock from the platform automatically.
 
+### Gnome voices
+
+The director page (`/` or `/director`) plays village music and reads each
+spoken line aloud. Voices are synthesized once, when the game is recorded,
+and baked into the replay file: hosted replays are static bundles with no
+server and no API key, so nothing is synthesized at playback time. The
+game server bakes voices into the replay it records whenever a synthesizer
+is available - ElevenLabs (`ELEVENLABS_API_KEY` or `~/.elevenlabs_key`),
+macOS `say`, or `espeak-ng` with `ffmpeg` - and `HEARTLEAF_VOICE_SYNTH`
+(`auto`, `none`, `eleven`, `say`, `espeak`) forces the choice.
+
+To add voices to a recording made without them:
+
+```sh
+nim c tools/bake_voices.nim
+out/bake_voices path/to/game.bitreplay          # writes game-voiced.bitreplay
+```
+
+Each spoken line becomes one row inside the replay (`VoiceClip` in
+`src/replays.nim`): `{"kind":"voice","tick","seat","text","codec","bytes"}`
+with the clip as base64 AAC (`m4a`) or MP3, looked up by the speaker's seat
+and the line's text. Replays without voice rows play exactly as before;
+`/voice.m4a` then synthesizes live when it can, and the wasm viewer falls
+back to the browser's speech synthesis. A day of nine talking gnomes is
+roughly 250 lines, about 35 KB per line with espeak-ng at 32 kbit/s.
+
 ## Build A Soul
 
 A soul is a markdown file. The first line is `#!` followed by the Bedrock

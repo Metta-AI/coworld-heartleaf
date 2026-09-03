@@ -31,6 +31,9 @@ jobs:
       - name: Build the soul player
         run: nim c -d:release players/soul_player/soul_player.nim
 
+      - name: Build the voice baker
+        run: nim c -d:release tools/bake_voices.nim
+
       - name: Unit tests
         run: nim r tests/tests.nim
 
