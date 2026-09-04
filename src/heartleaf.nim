@@ -57,6 +57,21 @@ const
   GlobalWebSocketPath = "/global"
   ReplayWebSocketPath = "/replay"
   DirectorWebSocketPath = "/director"
+  DirectorPageRoutes = [
+    "/",
+    GlobalWebSocketPath,
+    DirectorWebSocketPath,
+    bitworldClient.GlobalClientRoute,
+    bitworldClient.CoworldGlobalClientRoute
+  ]
+    ## Every live-viewer page and websocket path serves the director
+    ## cut. The Softmax platform opens `/client/global` and probes the
+    ## `/global` websocket, so those are the hosted front door; the
+    ## page connects its websocket to `/global` while `/`, `/director`
+    ## and `/clients/global` connect back to their own path, and each
+    ## of those upgrades lands in this same set. There is one view:
+    ## every viewer page is the director page and every viewer socket
+    ## is a director watcher.
   MaxWebSocketFrameBytes = 900_000
   MapLayerId = 0
   UiLayerId = 1
@@ -118,8 +133,10 @@ const
   GlobalPanelCardPadX = 9
     ## Content inset that clears the parchment card's leafy border.
   GlobalPanelCardPadY = 8
-  GlobalPanelCardSpriteId = 8290
-  GlobalPanelCardObjectId = 20_090
+  GlobalPanelCardSpriteId* = 8290
+  GlobalPanelCardObjectId* = 20_090
+    ## The parchment score-panel card, on the global panel layer.
+    ## Exported so tests/routes.nim can pin viewer frames to it.
   GlobalPanelTextR = 0x5E'u8
     ## Dark parchment ink: the score panel sits on a nine-sliced
     ## chat-banner card, the same design system as the director cards.
@@ -183,6 +200,11 @@ const
     ## Extra viewport width on each side of the director's crop. The
     ## conversation cards live in these margins, outside the map.
   DirectorCardWidth = 158
+  DirectorFrameAspectNum = 16
+  DirectorFrameAspectDen = 9
+    ## The frame shape tall director shots widen toward, over the
+    ## backdrop, until the page reports its real window shape, so a
+    ## wide window shows forest instead of black bars.
   DirectorCardPad = 5
   DirectorCardGapY = 6
   DirectorCardPortraitSize = 36
@@ -199,32 +221,6 @@ const
     ## Content padding inside a card's leafy frame.
   DirectorCardFaceSpriteBase = 9150
   DirectorCardFaceObjectBase = 28_100
-  DirectorForestAspectNum = 16
-  DirectorForestAspectDen = 9
-    ## Target width:height of the director viewport (16:9). Shots
-    ## narrower than this gain forest-only padding on each side, so
-    ## common browser shapes see forest where they used to letterbox
-    ## in black; the conversation cards stay next to the map. Zoomed
-    ## shots are already wide and gain nothing.
-  ForestMarginPx = 480
-    ## World pixels of generated forest border around the main map. The
-    ## director viewport pads the camera crop by DirectorCardMarginPx
-    ## plus the forest-only padding on each side, so the border must
-    ## reach at least that far past the map edge; it extends further so
-    ## every camera position stays covered with slack.
-  DirectorForestPadMax = ForestMarginPx - DirectorCardMarginPx - 22
-    ## The forest-only padding cannot exceed what the generated border
-    ## sprite can fill at the widest shot, slack included.
-  ForestBandPx = 44
-    ## Depth of the map-edge band the forest border is built from. Only
-    ## the outermost band is sampled, so houses and lawns deeper in the
-    ## map are never reflected into the forest.
-  ForestSpriteBase = 30
-    ## Sprite ids 30..35: the untinted forest underlay and its five
-    ## dusk tints, after the home overhang tints (25..29).
-  ForestObjectId = 3
-    ## Map-layer object id for the forest underlay, after the bottom
-    ## (1) and overhang (2) objects.
   DirectorBounceHops = [2, 4, 6, 6, 5, 4, 2, 0, 2, 3, 3, 2, 1, 0]
     ## The little hop a gnome does when its new line lands, in pixels
     ## of lift per frame.
@@ -239,6 +235,11 @@ const
   OverlayScoreColumns = 3
   OverlayScoreCellWidth = 104
   OverlayScoreCellHeight = 54
+  BackdropSpriteId = 30
+    ## The forest backdrop PNG drawn behind the main map in the
+    ## director view.
+  BackdropObjectId = 3
+    ## Map-layer object id for the backdrop, before the map bottom.
   BottomSpriteId = 1
   OverhangSpriteId = 2
   HomeBottomSpriteId = 4
@@ -384,11 +385,11 @@ type
   WorldMap = ref object
     width, height: int
     bottomSprite: RgbaSprite
+    backdropSprite: RgbaSprite
+      ## The forest PNG drawn behind the map in the director view.
     overhangSprite: RgbaSprite
     bottomTints: array[DayTintCount, RgbaSprite]
     overhangTints: array[DayTintCount, RgbaSprite]
-    forestSprite: RgbaSprite
-    forestTints: array[DayTintCount, RgbaSprite]
     walkMask: seq[bool]
 
   GnomeSprites = ref object
@@ -598,6 +599,9 @@ type
     directorMode: bool
       ## A /director viewer: the automated camera picks the shot;
       ## player and house selection are ignored.
+    frameWidth, frameHeight: int
+      ## The director viewer's window size in CSS pixels, reported by
+      ## the page as an "aspect:WxH" chat message; 0 until it arrives.
     selectedPlayerIndex: int
     selectedHouseNumber: int  ## 0 = none, 1..HouseCount = house interior view
     pendingMapClick: bool
@@ -816,122 +820,6 @@ proc loadWorldMap(path, label: string): WorldMap =
     )
   result.walkMask = walkImage.loadWalkMask()
 
-proc foldIntoBand(distance, band: int): int =
-  ## Maps a distance past the map edge into the edge band, mirrored
-  ## back and forth so adjacent reflections join without a seam.
-  let t = distance mod (band * 2)
-  if t < band:
-    t
-  else:
-    band * 2 - 1 - t
-
-proc forestJitter(x, y: int): (int, int) =
-  ## A tiny deterministic per-pixel offset that decorrelates mirrored
-  ## copies of the edge band so they read as forest, not ripples.
-  let hash = uint32(x * 73_856_093) xor uint32(y * 19_349_663)
-  (int((hash shr 8) mod 7) - 3, int((hash shr 16) mod 7) - 3)
-
-proc forestUnderlay(bottom, overhang: RgbaSprite, margin, band: int): RgbaSprite =
-  ## Extends the map outward with forest built from the map's own edge
-  ## art. Pixels beyond the edge sample the outermost band of the
-  ## composited map (bottom plus overhang canopy), mirrored back and
-  ## forth with a slow wave along the edge and a per-pixel jitter so
-  ## the reflections do not read as stripes, darkening toward
-  ## deep-canopy shade so the border frames the village instead of
-  ## competing with it. Sandy path pixels leaving the map fade into
-  ## the canopy, so the roads disappear under the trees. The map
-  ## interior stays transparent; the real map draws over that area.
-  var base = newRgbaSprite(bottom.width, bottom.height)
-  base.blitRgbaSprite(bottom, 0, 0)
-  base.blitRgbaSprite(overhang, 0, 0)
-  let
-    w = base.width
-    h = base.height
-    fallback = rgba(26, 36, 20, 255)
-  result = newRgbaSprite(w + margin * 2, h + margin * 2)
-  for y in 0 ..< result.height:
-    let wy = y - margin
-    for x in 0 ..< result.width:
-      let wx = x - margin
-      if wx >= 0 and wx < w and wy >= 0 and wy < h:
-        continue  # the map itself covers this area
-      let
-        dx =
-          if wx < 0:
-            -wx
-          elif wx >= w:
-            wx - w + 1
-          else:
-            0
-        dy =
-          if wy < 0:
-            -wy
-          elif wy >= h:
-            wy - h + 1
-          else:
-            0
-        outDist = max(dx, dy)
-        # The jitter ramps in from zero so the first rows still join
-        # the real map edge seamlessly.
-        jitterRamp = min(outDist, 16)
-        (rawJx, rawJy) = forestJitter(x, y)
-        jx = rawJx * jitterRamp div 16
-        jy = rawJy * jitterRamp div 16
-      var
-        sx = wx
-        sy = wy
-      let
-        # The wave wanders more the deeper the forest goes, so the far
-        # field jumbles its reflections instead of repeating in rows.
-        # Its wavelength is long, so the wander reads as drifting
-        # canopy rather than zigzag hedges.
-        waveAmp = min(2.2, 1.0 + float(outDist) / 220.0)
-      if dx > 0:
-        # The wave is keyed on the along-edge coordinate so reflection
-        # boundaries wander instead of forming straight ripples.
-        let
-          wave = int(9.0 * sin(float(wy) * 0.017) * waveAmp +
-            4.0 * sin(float(wy) * 0.045 + 1.7))
-          depth = foldIntoBand(max(0, dx - 1 + wave), band)
-        sx =
-          if wx < 0:
-            depth
-          else:
-            w - 1 - depth
-        sy = wy + jy
-      if dy > 0:
-        let
-          wave = int(9.0 * sin(float(wx) * 0.014 + 0.9) * waveAmp +
-            4.0 * sin(float(wx) * 0.039) )
-          depth = foldIntoBand(max(0, dy - 1 + wave), band)
-        sy =
-          if wy < 0:
-            depth
-          else:
-            h - 1 - depth
-        if dx == 0:
-          sx = wx + jx
-      var color = base.rgbaSpriteAt(clamp(sx, 0, w - 1), clamp(sy, 0, h - 1))
-      if color.a == 0:
-        color = fallback
-      # Sandy road pixels reflected past the edge sink into the trees.
-      if int(color.r) > 160 and int(color.r) - int(color.b) > 50:
-        let fade = min(1.0, float(outDist) / 70.0)
-        color = rgba(
-          uint8(float(color.r) + (float(fallback.r) - float(color.r)) * fade),
-          uint8(float(color.g) + (float(fallback.g) - float(color.g)) * fade),
-          uint8(float(color.b) + (float(fallback.b) - float(color.b)) * fade),
-          255
-        )
-      let shade =
-        1.0 - 0.55 * pow(min(1.0, float(outDist) / float(margin)), 0.75)
-      result.putPixel(x, y, rgba(
-        uint8(float(color.r) * shade),
-        uint8(float(color.g) * shade),
-        uint8(float(color.b) * shade),
-        255
-      ))
-
 proc loadGnomeSprites(path: string): seq[GnomeSprites] =
   ## Loads all gnome direction sets from the sheet.
   let image = readAsepriteImage(path)
@@ -1063,28 +951,6 @@ proc loadPortraits(dataRoot: string): seq[RgbaSprite] =
       cellSize
     ))
 
-proc dumpForestUnderlay(map: WorldMap) =
-  ## Writes the forest underlay composited under the daylight map to
-  ## the PNG path in HEARTLEAF_FOREST_DUMP, for visual review of the
-  ## generated border. A no-op when the variable is unset.
-  let path = getEnv("HEARTLEAF_FOREST_DUMP")
-  if path.len == 0:
-    return
-  var composite = newRgbaSprite(
-    map.forestSprite.width,
-    map.forestSprite.height
-  )
-  composite.blitRgbaSprite(map.forestSprite, 0, 0)
-  composite.blitRgbaSprite(map.bottomSprite, ForestMarginPx, ForestMarginPx)
-  composite.blitRgbaSprite(map.overhangSprite, ForestMarginPx, ForestMarginPx)
-  var image = newImage(composite.width, composite.height)
-  for y in 0 ..< composite.height:
-    for x in 0 ..< composite.width:
-      let color = composite.rgbaSpriteAt(x, y)
-      image[x, y] = rgbx(color.r, color.g, color.b, color.a)
-  image.writeFile(path)
-  echo "forest underlay dumped to ", path
-
 proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   ## Initializes the Heartleaf simulation.
   result = SimServer()
@@ -1105,20 +971,7 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
   result.homeResourceRects = loadResourceRects(homeResourcePath)
   result.homeResources = loadHomeResources(result.homeResourceRects)
   result.mainMap = loadWorldMap(mapPath, "Map")
-  result.mainMap.forestSprite = forestUnderlay(
-    result.mainMap.bottomSprite,
-    result.mainMap.overhangSprite,
-    ForestMarginPx,
-    ForestBandPx
-  )
-  for i in 0 ..< DayTintCount:
-    result.mainMap.forestTints[i] = forestUnderlay(
-      result.mainMap.bottomTints[i],
-      result.mainMap.overhangTints[i],
-      ForestMarginPx,
-      ForestBandPx
-    )
-  dumpForestUnderlay(result.mainMap)
+  result.mainMap.backdropSprite = loadEmoteSprite(dataRoot / "backdrop.png")
   let homeMap = loadWorldMap(homeMapPath, "Home map")
   for i in 0 ..< HouseCount:
     result.homeMaps[i] = homeMap
@@ -1708,12 +1561,6 @@ proc mainOverhangSpriteId(tintIndex: int): int =
     return OverhangSpriteId
   return MainOverhangTintSpriteBase + tintIndex
 
-proc forestSpriteId(tintIndex: int): int =
-  ## Returns the forest underlay sprite id for one day tint.
-  if tintIndex < 0:
-    return ForestSpriteBase
-  return ForestSpriteBase + 1 + tintIndex
-
 proc homeBottomSpriteId(tintIndex: int): int =
   ## Returns the home map bottom sprite id for one day tint.
   if tintIndex < 0:
@@ -1895,18 +1742,11 @@ proc addSpriteProtocolInit(
       sim.mainMap.overhangTints[i],
       MainOverhangLabelPrefix & " tint " & $i
     )
-  if sim.mainMap.forestSprite.width > 0:
-    packet.addRgbaSprite(
-      forestSpriteId(-1),
-      sim.mainMap.forestSprite,
-      "forest underlay"
-    )
-    for i in 0 ..< DayTintCount:
-      packet.addRgbaSprite(
-        forestSpriteId(i),
-        sim.mainMap.forestTints[i],
-        "forest underlay tint " & $i
-      )
+  packet.addRgbaSprite(
+    BackdropSpriteId,
+    sim.mainMap.backdropSprite,
+    "map backdrop"
+  )
   packet.addRgbaSprite(
     HomeBottomSpriteId,
     sim.homeMaps[0].bottomSprite,
@@ -3698,7 +3538,7 @@ proc addDirectorConversationCards(
   packet: var seq[uint8],
   sim: SimServer,
   cache: var seq[SpriteCacheEntry],
-  cropX, cropY, cropW, cropH, paddedWidth, forestPad: int
+  cropX, cropY, cropW, cropH, paddedWidth, backdropPad: int
 ) =
   ## Draws one parchment card per active spoken line, stacked in the
   ## margins beside the map crop: speakers left of the shot's center
@@ -3780,13 +3620,9 @@ proc addDirectorConversationCards(
   for (column, columnX, topInset) in [
     # The score panel overlays the window's top left, so the left
     # column starts below it. The columns hug the map crop, inside
-    # the forest-only viewport padding.
-    (left, forestPad + 4, viewHeight div 4),
-    (
-      right,
-      paddedWidth - forestPad - DirectorCardWidth - 4,
-      8
-    )
+    # the backdrop-only viewport padding.
+    (left, backdropPad + 4, viewHeight div 4),
+    (right, paddedWidth - backdropPad - DirectorCardWidth - 4, 8)
   ]:
     if column.len == 0:
       continue
@@ -3856,7 +3692,8 @@ proc addDirectorConversationCards(
 proc addDirectorWorldView(
   packet: var seq[uint8],
   sim: SimServer,
-  cache: var seq[SpriteCacheEntry]
+  cache: var seq[SpriteCacheEntry],
+  frameWidth, frameHeight: int
 ) =
   ## Appends the main map cropped to the director camera. The browser
   ## client scales the declared viewport to fit its window, so a
@@ -3867,30 +3704,33 @@ proc addDirectorWorldView(
     cameraY = int(sim.directorCamY)
     viewW = max(1, int(sim.directorCamW))
     viewH = max(1, int(sim.directorCamH))
-    # Forest-only padding widens tall shots toward the target frame
-    # shape; the cards keep hugging the map crop.
-    forestPad = clamp(
-      (viewH * DirectorForestAspectNum div DirectorForestAspectDen -
+    (frameNum, frameDen) =
+      if frameWidth > 0 and frameHeight > 0:
+        (frameWidth, frameHeight)
+      else:
+        (DirectorFrameAspectNum, DirectorFrameAspectDen)
+    # Backdrop-only padding widens tall shots toward the frame shape,
+    # never past the backdrop's edge; the cards keep hugging the crop.
+    backdropPad = clamp(
+      (viewH * frameNum div frameDen -
         viewW - DirectorCardMarginPx * 2) div 2,
       0,
-      DirectorForestPadMax
+      (sim.mainMap.backdropSprite.width - sim.mainMap.width) div 2
     )
-    cameraX = int(sim.directorCamX) - DirectorCardMarginPx - forestPad
-    paddedW = viewW + (DirectorCardMarginPx + forestPad) * 2
+    cameraX = int(sim.directorCamX) - DirectorCardMarginPx - backdropPad
+    paddedW = viewW + (DirectorCardMarginPx + backdropPad) * 2
   packet.addViewport(MapLayerId, paddedW, viewH)
-  if sim.mainMap.forestSprite.width > 0:
-    # The generated forest border sits behind the map, filling the
-    # card margins and any camera slack, so the village reads as a
-    # clearing in a larger forest instead of floating on black. It
-    # shares BottomZ; its smaller y draws it before the map bottom.
-    packet.addObject(
-      ForestObjectId,
-      -cameraX - ForestMarginPx,
-      -cameraY - ForestMarginPx,
-      BottomZ,
-      MapLayerId,
-      forestSpriteId(tintIndex)
-    )
+  # The forest backdrop sits behind the map, centered on it, so the
+  # village reads as a clearing instead of floating on black. It
+  # shares BottomZ; its smaller y draws it before the map bottom.
+  packet.addObject(
+    BackdropObjectId,
+    -cameraX - (sim.mainMap.backdropSprite.width - sim.mainMap.width) div 2,
+    -cameraY - (sim.mainMap.backdropSprite.height - sim.mainMap.height) div 2,
+    BottomZ,
+    MapLayerId,
+    BackdropSpriteId
+  )
   packet.addObject(
     BottomObjectId,
     -cameraX,
@@ -3929,7 +3769,7 @@ proc addDirectorWorldView(
       sim,
       cache,
       sim.directorDinnerHouse,
-      offsetX = DirectorCardMarginPx + forestPad
+      offsetX = DirectorCardMarginPx
     )
   # Cards belong to the cut: they appear only once the camera has
   # finished its glide in on a conversation, and frame that circle's
@@ -3944,7 +3784,7 @@ proc addDirectorWorldView(
       viewW,
       viewH,
       paddedW,
-      forestPad
+      backdropPad
     )
   packet.addClockObjects(sim)
 
@@ -4496,7 +4336,12 @@ proc buildGlobalPacket*(
     # camera picks the shot for everyone watching.
     nextState.pendingMapClick = false
     nextState.selectedPlayerIndex = -1
-    result.addDirectorWorldView(sim, nextState.spriteCache)
+    result.addDirectorWorldView(
+      sim,
+      nextState.spriteCache,
+      nextState.frameWidth,
+      nextState.frameHeight
+    )
     result.addGlobalScorePanel(sim, nextState.spriteCache, -1)
     if replayControls:
       result.addReplayControls(
@@ -5853,8 +5698,19 @@ proc applyReplayViewerMessage(state: PlayerViewerState, data: string) =
         else:
           state.scrubbingReplay = false
     of SpriteClientChatMessage:
-      for ch in item.text:
-        state.replayCommands.add(ch)
+      if item.text.startsWith("aspect:"):
+        # The director page reports its window shape so the shot can
+        # widen over the backdrop to that shape instead of a guess.
+        let parts = item.text[7 .. ^1].split('x')
+        if parts.len == 2:
+          try:
+            state.frameWidth = parseInt(parts[0])
+            state.frameHeight = parseInt(parts[1])
+          except ValueError:
+            discard
+      else:
+        for ch in item.text:
+          state.replayCommands.add(ch)
     of SpriteClientInputMessage, SpriteClientReadyMessage,
         SpriteClientDebugSpriteMessage, SpriteClientSpritesOffMessage:
       discard
@@ -6207,10 +6063,11 @@ when not defined(emscripten):
     return true
 
   const DirectorFitSnippet = """
+<!-- director -->
 <script>(function(){
   // The director cut frames every shot itself, so the page must stay
   // auto-fitted. The stock viewer drops auto-fit on the first click or
-  // scroll (meant for hand-panning the plain global view), which
+  // scroll (meant for hand-panning the stock global view), which
   // freezes zoom and pan at that moment's crop - the next wide shot
   // then renders far off center, stranded in a corner. Re-arm the fit
   // after every gesture; the server ignores director clicks anyway.
@@ -6218,8 +6075,36 @@ when not defined(emscripten):
   addEventListener("pointerup",rearm);
   addEventListener("wheel",rearm);
   setInterval(rearm,1000);
+  // Report the window shape as a chat message ("aspect:WxH"), so the
+  // server widens tall shots over the backdrop to this window instead
+  // of a guessed 16:9. Same 0x81 text packet the player entry sends.
+  var told="";
+  function tell(){
+    var t="aspect:"+viewWidth()+"x"+viewHeight();
+    if(t===told||!socket||socket.readyState!==WebSocket.OPEN)return;
+    var b=new Uint8Array(t.length+3);
+    b[0]=0x81;writeU16(b,1,t.length);
+    for(var i=0;i<t.length;i++)b[3+i]=t.charCodeAt(i);
+    sendPacket(b);told=t;
+  }
+  addEventListener("resize",function(){told="";tell();});
+  setInterval(tell,1000);
 })();</script>
 """
+
+  proc respondDirectorPage(request: Request) =
+    ## Serves the shared global client as a director page: the stock
+    ## viewer body with the fit snippet appended, so the automated
+    ## camera's wide shots stay centered after any gesture.
+    var page = bitworldClient.clientStaticBody(
+      bitworldClient.GlobalClientRoute,
+      bitworldClient.GlobalClientRoute
+    )
+    page = page.replace("</body>", DirectorFitSnippet & "</body>")
+    var headers: HttpHeaders
+    headers["Content-Type"] = "text/html"
+    headers["Cache-Control"] = "no-cache"
+    request.respond(200, headers, page)
 
   proc httpHandler(request: Request) =
     ## Handles Heartleaf HTTP and websocket routes.
@@ -6228,44 +6113,23 @@ when not defined(emscripten):
     elif request.path == WebSocketPath and request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
       request.respondPlain(426, "websocket required\n")
-    elif request.path in ["/", GlobalWebSocketPath, DirectorWebSocketPath] and
+    elif request.path in DirectorPageRoutes and
         request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
-      # The root and /director serve the same viewer page; the page
-      # connects its websocket back to its own path, which lands in
-      # the upgrade branch below and flags the viewer as a director
+      # The root, /director, and the platform's /client/global all
+      # serve the director page; each page's websocket lands in the
+      # upgrade branch below and flags the viewer as a director
       # watcher. The director cut is the main page.
-      if request.path != GlobalWebSocketPath and
-          not request.checkReplayRequest():
+      if not request.checkReplayRequest():
         return
-      if request.path != GlobalWebSocketPath:
-        # Director pages (the root and the /director alias) keep the
-        # stock viewer auto-fitted: the fit snippet re-arms the fit
-        # after every gesture so the wide shot stays centered.
-        var page = bitworldClient.clientStaticBody(
-          bitworldClient.GlobalClientRoute,
-          bitworldClient.GlobalClientRoute
-        )
-        page = page.replace("</body>", DirectorFitSnippet & "</body>")
-        var headers: HttpHeaders
-        headers["Content-Type"] = "text/html"
-        headers["Cache-Control"] = "no-cache"
-        request.respond(200, headers, page)
-      else:
-        discard bitworldClient.serveClientFile(
-          request,
-          bitworldClient.GlobalClientRoute,
-          bitworldClient.GlobalClientRoute
-        )
+      request.respondDirectorPage()
     elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
         not request.isWebSocketUpgrade():
       if not request.checkReplayRequest():
         return
-      discard bitworldClient.serveClientFile(
-        request,
-        bitworldClient.ReplayClientRoute,
-        bitworldClient.GlobalClientRoute
-      )
+      # Replay viewers are director watchers, so the /replay page is
+      # the director page too.
+      request.respondDirectorPage()
     elif request.path == WebSocketPath and request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
       let
@@ -6286,11 +6150,12 @@ when not defined(emscripten):
         withLock appState.lock:
           appState.playerSlots[websocket] = slot
           appState.playerUsernames[websocket] = username
-    elif request.path in ["/", GlobalWebSocketPath, DirectorWebSocketPath] and
+    elif request.path in DirectorPageRoutes and
         request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
-      if request.path != GlobalWebSocketPath and
-          not request.checkReplayRequest():
+      # Live viewers: the platform's /global probe and every director
+      # page get the director cut.
+      if not request.checkReplayRequest():
         return
       let websocket = request.upgradeToWebSocket()
       {.gcsafe.}:
@@ -6302,10 +6167,20 @@ when not defined(emscripten):
             appState.replayViewerJoined = true
           appState.globalViewers[websocket] = PlayerViewerState(
             selectedPlayerIndex: -1,
-            directorMode: request.path != GlobalWebSocketPath
+            directorMode: true
           )
-    elif request.path == ReplayWebSocketPath and request.httpMethod == "GET" and
+    elif request.path in [
+        ReplayWebSocketPath,
+        bitworldClient.ReplayClientRoute,
+        bitworldClient.CoworldReplayClientRoute
+      ] and request.httpMethod == "GET" and
         request.isWebSocketUpgrade():
+      # Replay watchers get the director cut: the automated camera,
+      # the conversation cards, and the queue playback. The Coworld
+      # replay client page has no websocket mapping of its own, so it
+      # connects back to its own path - accept that upgrade here too.
+      # Transport commands still drain for director viewers, so
+      # tools/replay_cmd.nim keeps working on the raw /replay path.
       if not request.checkReplayRequest():
         return
       let websocket = request.upgradeToWebSocket()
@@ -6317,7 +6192,8 @@ when not defined(emscripten):
               appState.replayRestartPending = true
             appState.replayViewerJoined = true
           appState.replayViewers[websocket] = PlayerViewerState(
-            selectedPlayerIndex: -1
+            selectedPlayerIndex: -1,
+            directorMode: true
           )
     elif request.path in [
         bitworldClient.ReplayClientRoute,
@@ -6325,11 +6201,10 @@ when not defined(emscripten):
       ] and request.httpMethod == "GET":
       if not request.checkReplayRequest():
         return
-      discard bitworldClient.serveClientFile(
-        request,
-        request.path,
-        bitworldClient.GlobalClientRoute
-      )
+      # Hosted replays get the director cut too: the observatory loads
+      # this route, and its websocket (the page's own path, upgraded
+      # above) is flagged as a director watcher with the ?uri= applied.
+      request.respondDirectorPage()
     elif bitworldClient.serveClientRoute(
       request,
       bitworldClient.GlobalClientRoute

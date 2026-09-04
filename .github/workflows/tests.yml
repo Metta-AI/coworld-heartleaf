@@ -12,18 +12,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Install Nim with nimby
+      - uses: treeform/setup-nim-action@v6
+        with:
+          nim-version: 2.2.10
+
+      - name: Install locked dependencies
+        shell: bash
         run: |
-          curl -fsSL -o /usr/local/bin/nimby \
-            https://github.com/treeform/nimby/releases/download/0.1.26/nimby-Linux-X64
-          chmod +x /usr/local/bin/nimby
-          nimby use 2.2.4
-          echo "$HOME/.nimby/nim/bin" >> "$GITHUB_PATH"
-
-      - name: Sync locked packages
-        run: nimby sync nimby.lock -g
+          # The workspace must be the parent of the checkout: Nimby 0.2
+          # refuses to create one inside a git checkout, and Nim walks
+          # up from the compiled file to find nim.cfg.
+          cd ..
+          nimby create
+          nimby sync "$GITHUB_WORKSPACE/nimby.lock"
 
       - name: Build the game server
         run: nim c -d:release src/heartleaf.nim

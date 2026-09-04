@@ -98,7 +98,9 @@ To run the pieces by hand:
 nim r src/heartleaf.nim
 ```
 
-Then open `http://localhost:8080/client/global`.
+Then open `http://localhost:8080/`. There is one view: the root,
+`/director`, `/global`, `/client/global`, `/client/replay` and `/replay`
+all serve the director cut, which is what the hosted platform opens.
 
 With no `tokens` configured the village starts at once and a gnome appears
 whenever a soul arrives. Without Bedrock credentials, give the game a mock
@@ -121,6 +123,31 @@ nim r players/soul_player/soul_player.nim \
 To call a real model locally, set `BEDROCK_KEY` (or AWS credentials) in the
 game's environment instead of `HEARTLEAF_MOCK_REPLY`. Hosted games get
 Bedrock from the platform automatically.
+
+### Developing
+
+From a clean machine, clone the repository and sync the lock into a
+workspace in the parent directory:
+
+```sh
+git clone <this repository>
+cd <parent of the checkout>
+nimby create
+nimby sync heartleaf-conversations/nimby.lock
+```
+
+Nimby 0.2 refuses to create a workspace inside a git checkout, and Nim
+finds `nim.cfg` by walking up from the file it compiles, so the
+workspace has to be the parent directory: the pinned packages land
+beside the repository and the compiler finds them from inside it.
+`nimby sync` installs the lock's pinned packages; plain `nimby install`
+does not. Then the run commands above work as written. If a sync is
+aborted partway, nimby can leave a stale lock behind — `rmdir
+~/.nimby/nimbylock` clears it.
+
+CI does the same thing: `treeform/setup-nim-action@v6` puts Nim and
+nimby on PATH, then each job runs `nimby create` and `nimby sync` in the
+parent of the checkout.
 
 ## Build A Soul
 
@@ -155,7 +182,9 @@ cd ../bitworld && nim r tools/quick_run.nim ../coworld-heartleaf \
   `players/*_villager/` are example souls.
 - BitWorld is used as a Nimble dependency for shared sprite protocol helpers.
 - `data/` contains map, sprite, font, and Figma resource data.
-- `tests/tests.nim` contains smoke checks (`nim r tests/tests.nim`).
+- `tests/tests.nim` contains smoke checks (`nim r tests/tests.nim`);
+  `tests/routes.nim` pins the viewer front door against a real replay
+  server (`nim c src/heartleaf.nim`, then `nim r tests/routes.nim`).
 
 ## License
 
