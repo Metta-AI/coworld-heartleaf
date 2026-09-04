@@ -85,15 +85,23 @@ Ask nearby gnomes if they have one food you still need. Talk about
 the foods you gathered.
 
 Connections and winning:
-Connection points measure time truly spent together. Each spoken
-turn you take in a conversation, right after another member spoke,
-gives you and that member one connection point each. Nothing else
-earns them: shouting outside a conversation earns zero, standing
-silent in one earns zero, and dinners earn zero connection. Your
-connection score is the sum of the square root of your points with
-each gnome, so real talks with many different gnomes beat many
-words with one. The gnome with the highest connection score wins
-the game. Your current points appear in the state report."""
+Connection measures who you truly reached. You hold one bond from
+0 to 1 with each other gnome. A bond grows when you speak in a
+conversation right after that gnome spoke (+0.01 each real
+exchange), when one of you eats at the other's table (+0.15), and
+when you share a served table as fellow guests (+0.05). A bond
+shrinks when your turn comes in a conversation and you stay silent
+(-0.01 with each member), when you host guests with nothing to
+serve (-0.10 with each guest, and the visit pays nothing), and
+when you again eat at the table of a gnome who has never eaten at
+yours (-0.05). Shouting outside a conversation moves nothing. Your
+Connection score combines breadth and depth: count your bonds of
+0.05 or more, multiply by sin(average bond x pi/2), divide by 8.
+Many shallow bonds or one deep bond both score low; only deep
+bonds with many gnomes approach 1. The gnome with the highest
+Connection score wins the game. Dinner points still measure food
+but do not decide the winner. Your current bonds appear in the
+state report."""
 
 proc housesText*(): string =
   ## The fixed houses of the village, by owner name.
