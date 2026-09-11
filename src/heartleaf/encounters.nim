@@ -38,6 +38,7 @@ type
     id*: int
     birthTick*: int
     deathTick*: int
+    spokenTurns*: int
     members*: seq[int]
       ## Every house seat that was ever in the conversation.
   ConversationAnchor* = object
@@ -317,6 +318,8 @@ proc conversationSpans*(
       ## Current members of each conversation that is still open.
   for event in timeline.events:
     if event.spokenTurn:
+      if event.encounterId in spanAt:
+        inc result[spanAt[event.encounterId]].spokenTurns
       continue
     if event.enter:
       if event.encounterId in spanAt:

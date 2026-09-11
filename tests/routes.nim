@@ -80,18 +80,13 @@ proc fetch(path: string): tuple[status: int, body: string] =
   (response.code.int, response.body)
 
 proc hasScorePanelCard(frame: string): bool =
-  ## True when one binary frame places the parchment score-panel card,
-  ## which every rendered viewer frame carries. It replaces the forest
-  ## underlay object this test used to pin director frames on: the
-  ## forest is gone, and with the plain view gone too every viewer
-  ## socket is a director watcher, so the card is the stable
-  ## always-present object of a viewer frame.
+  ## Every desktop director frame places the left leaderboard panel.
   if frame.len == 0:
     return false
   for message in parseSpritePacket(frame.toOpenArrayByte(0, frame.high)):
     if message.kind == spkObject and
-        message.objectDef.id == GlobalPanelCardObjectId and
-        message.objectDef.spriteId == GlobalPanelCardSpriteId:
+        message.objectDef.id == 50_000 and
+        message.objectDef.spriteId == 9850:
       return true
   false
 

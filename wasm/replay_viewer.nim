@@ -18,14 +18,15 @@
 ## coworld's docs/STATIC_REPLAY_VIEWERS.md.
 
 import
-  std/[json, os, parseopt, uri],
+  std/[importutils, json, math, os, parseopt, times, uri],
   windy,
   bitworld/spriteprotocol,
   heartleaf, replays,
   client/global_client
 
-when not defined(emscripten):
-  import std/monotimes
+# The pinned renderer has no public director/size adapter yet. Keep
+# access confined here; protocol, input, drawing remain in Bitworld.
+privateAccess(GlobalApp)
 
 const
   RepoDir = currentSourcePath().parentDir().parentDir()
@@ -57,6 +58,7 @@ EM_JS(void, heartleaf_post_host_message, (char* json), {
 });
 """.}
   proc heartleaf_post_host_message(json: cstring) {.importc.}
+  proc emscripten_sleep(ms: cuint) {.importc, header: "<emscripten.h>".}
 
 proc tellHost(message: JsonNode) =
   ## Posts one readiness-protocol message to the embedding page (browser only).
@@ -105,6 +107,8 @@ proc loadReplayBytes(viewer: ReplayViewer, name, bytes: string) =
     viewer.sim.attachConversationTimeline(data, name)
     viewer.replay = initReplayPlayer(data)
     viewer.replay.buildReplayKeyframes(config.seed, config.dayTicks)
+    viewer.sim.buildConversationQueue(viewer.replay.replayMaxTick())
+    viewer.replay.looping = false
     viewer.state = newReplayViewerState()
     viewer.inputPackets.setLen(0)
     viewer.loaded = true
@@ -188,6 +192,14 @@ proc tick(viewer: ReplayViewer) =
   ## Pumps one replay viewer frame.
   viewer.app.handleInput()
   viewer.drainInput()
+  let size = viewer.app.window.size
+  let scale = max(1.0'f32, viewer.app.contentScale)
+  viewer.state.setViewerSize(int(float32(size.x) / scale),
+    int(float32(size.y) / scale))
+  for key, value in decodeQuery(parseUri(viewer.app.windowUrl()).query):
+    if key == "background":
+      viewer.state.setViewerBackground(value == "forest")
+  viewer.app.autoFit = true
   let packet = replayViewerFrame(
     viewer.sim,
     viewer.replay,
@@ -219,16 +231,22 @@ proc runReplayViewer*() =
   ## Runs the standalone replay viewer until the window closes.
   let viewer = initReplayViewer()
   tellHost(%*{"type": "phase", "phase": "bundle_ready"})
-  when not defined(emscripten):
-    var lastTick = getMonoTime()
   viewer.installFileDrop()
   viewer.loadReplayPath(parseReplayPathArg())
   viewer.downloadReplay(replayUrl(viewer.app.windowUrl()))
   while viewer.app.windowOpen:
+    let started = epochTime()
     pollEvents()
     viewer.tick()
-    when not defined(emscripten):
-      runFrameLimiter(lastTick)
+    # Both transports advance at the replay's 24 Hz. Browser polling
+    # otherwise runs as fast as it can and swallows the dialogue.
+    let remaining = int(ceil((1.0 / float(ReplayFps) -
+      (epochTime() - started)) * 1000.0))
+    if remaining > 0:
+      when defined(emscripten):
+        emscripten_sleep(cuint(remaining))
+      else:
+        sleep(remaining)
   viewer.app.shutdown()
 
 when isMainModule:

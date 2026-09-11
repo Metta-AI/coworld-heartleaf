@@ -37,5 +37,25 @@ jobs:
       - name: Unit tests
         run: nim r tests/tests.nim
 
+      - name: Viewer and route regressions
+        run: |
+          nim r tests/viewer_stability.nim
+          nim r tests/viewer_navigation.nim
+          nim r tests/viewer_controls.nim
+          nim r tests/routes.nim
+          nim r tools/record_viewer_scenario.nim out/viewer-scenario.replay
+
       - name: Integration tests
         run: HEARTLEAF_SERVER=out/heartleaf nim r tests/integration.nim
+
+  static-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the pinned static replay viewer
+        run: tools/build_replay_viewer.sh "$GITHUB_WORKSPACE/out/static-replay-viewer"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: static-replay-viewer
+          path: out/static-replay-viewer/
