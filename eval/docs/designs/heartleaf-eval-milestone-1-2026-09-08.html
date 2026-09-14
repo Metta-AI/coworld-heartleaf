@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heartleaf eval — first hosted milestone · 2026-09-08</title>
+<!--
+  Ink & Print design/plan document template (Softmax house style).
+
+  HOW TO USE (renderer subagent):
+  - Replace everything inside <article id="doc"> with the real document content.
+    The placeholder content below doubles as a component style guide — copy the
+    markup patterns (masthead, TOC, section, figure, table, callout, code,
+    citation) and delete what you don't use.
+  - Do NOT modify anything between the DC-COMMENTS BEGIN/END markers. That block
+    is the tested commenting system; copy it verbatim.
+  - Keep the doc self-contained: inline SVG for figures, no JS deps beyond this
+    file. Google Fonts is the only permitted external fetch.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@400;700;900&family=Merriweather+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ============ Ink & Print tokens ============ */
+  :root {
+    --bg: #fffdf4;            /* cream paper */
+    --surface: #fffaf0;
+    --surface-alt: #f8f6ef;
+    --fg: #111827;            /* warm near-black — never pure #000 */
+    --fg-subtle: #555555;
+    --fg-muted: #999999;
+    --ink-navy: #1a3875;
+    --ink-sage: #6e8050;
+    --ink-terracotta: #b36e4e;
+    --ink-gold: #d4a853;
+    --accent: #859ebe;
+    --accent-soft: #eef2f7;
+    --cta: #0e2758;
+    --cta-foreground: #fffdf4;
+    --border: #e4dac8;
+    --border-strong: #d4c9b5;
+    --border-subtle: #f0ebe1;
+    --serif: 'Merriweather', Georgia, serif;
+    --sans: 'Merriweather Sans', 'Helvetica Neue', sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.7;
+  }
+
+  /* ============ Page grid: reading column + comment rail ============ */
+  .dc-page {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 0;
+    max-width: 1240px;
+    margin: 0 auto;
+  }
+  article#doc {
+    max-width: 72ch;
+    margin: 0 auto;
+    padding: 56px 40px 120px;
+    min-width: 0;
+  }
+
+  /* ============ Typography ============ */
+  .eyebrow {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-subtle);
+  }
+  header.masthead { border-bottom: 2px solid var(--border-strong); padding-bottom: 20px; margin-bottom: 32px; }
+  header.masthead h1 {
+    font-family: var(--serif);
+    font-weight: 900;
+    font-size: 34px;
+    line-height: 1.2;
+    margin: 8px 0 10px;
+  }
+  header.masthead .context { color: var(--fg-subtle); font-size: 13.5px; margin: 0; }
+  h2 {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-size: 15px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-navy);
+    margin: 48px 0 12px;
+  }
+  h3 { font-family: var(--serif); font-weight: 700; font-size: 16.5px; margin: 32px 0 8px; }
+  p { margin: 0 0 14px; }
+  a { color: var(--ink-navy); text-decoration-color: var(--accent); text-underline-offset: 3px; }
+  a:hover { color: var(--cta); }
+  strong { font-weight: 700; }
+  ul, ol { padding-left: 24px; margin: 0 0 14px; }
+  li { margin-bottom: 4px; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 40px 0; }
+
+  /* Key-points opener: every section starts with scannable bullets */
+  .key-points {
+    list-style: none;
+    padding: 0 0 0 2px;
+    margin: 0 0 18px;
+  }
+  .key-points li { padding-left: 18px; position: relative; margin-bottom: 6px; }
+  .key-points li::before { content: '—'; position: absolute; left: 0; color: var(--ink-gold); font-weight: 700; }
+
+  /* ============ TOC ============ */
+  nav.toc { margin: 28px 0 8px; }
+  nav.toc ol { list-style: none; padding: 0; column-count: 2; column-gap: 40px; margin: 10px 0 0; }
+  nav.toc li { margin-bottom: 5px; break-inside: avoid; }
+  nav.toc a { text-decoration: none; border-bottom: 1px dotted var(--border-strong); }
+  nav.toc .toc-num { font-family: var(--mono); font-size: 12px; color: var(--fg-muted); margin-right: 8px; }
+
+  /* ============ Tables ============ */
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 18px 0 22px;
+    font-size: 13.5px;
+  }
+  th {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fg-subtle);
+    text-align: left;
+    padding: 6px 12px 6px 0;
+    border-bottom: 2px solid var(--border-strong);
+  }
+  td { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
+  td.num, th.num { text-align: right; font-family: var(--mono); font-size: 12.5px; font-feature-settings: 'tnum' 1; }
+
+  /* ============ Figures ============ */
+  figure { margin: 24px 0 28px; }
+  figure svg { max-width: 100%; height: auto; display: block; }
+  figcaption {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--fg-subtle);
+  }
+  figcaption .fig-label {
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 10.5px;
+    color: var(--ink-navy);
+    margin-right: 8px;
+  }
+
+  /* ============ Code & citations ============ */
+  code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--surface-alt);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--surface-alt);
+    border: 1px solid var(--border-subtle);
+    border-radius: 3px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 16px 0 20px;
+  }
+  pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.6; }
+  .cite {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--fg-subtle);
+    background: var(--surface-alt);
+    padding: 1px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+
+  /* ============ Callouts ============ */
+  .callout { padding: 12px 16px; margin: 18px 0; font-size: 13.5px; border-radius: 3px; }
+  .callout .callout-label {
+    display: block;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 4px;
+  }
+  .callout-info { background: var(--accent-soft); }
+  .callout-info .callout-label { color: var(--ink-navy); }
+  .callout-warn { background: rgba(179, 110, 78, 0.08); border-left: 3px solid var(--ink-terracotta); }
+  .callout-warn .callout-label { color: var(--ink-terracotta); }
+  .callout-open { background: rgba(212, 168, 83, 0.10); }
+  .callout-open .callout-label { color: #8a6a1f; }
+
+  /* Decision record */
+  .decision { border-top: 1px solid var(--border); padding: 14px 0 4px; margin: 14px 0; }
+  .decision .decision-label { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-sage); }
+  .decision p { margin-top: 6px; }
+
+  @media (max-width: 1100px) {
+    .dc-page { grid-template-columns: 1fr; }
+  }
+  @media print {
+    #dc-sidebar, #dc-fab, #dc-toggle { display: none !important; }
+    .dc-page { grid-template-columns: 1fr; }
+  }
+
+  /* Document-specific layout; house tokens and comments remain unchanged. */
+  article#doc { width: 100%; }
+  article#doc code, article#doc td, article#doc th, .sources li { overflow-wrap: anywhere; }
+  article#doc table { table-layout: fixed; }
+  article#doc pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ref { font-family: var(--sans); font-size: 10px; line-height: 0; margin-left: 2px; }
+  .ref a { text-decoration: none; }
+  .sources { font-size: 12px; }
+  .sources li { margin-bottom: 10px; }
+  section, h3, .sources li, #technical tr { scroll-margin-top: 24px; }
+  @media (max-width: 600px) {
+    article#doc { padding: 32px 20px 90px; }
+    header.masthead h1 { font-size: 28px; }
+    nav.toc ol { column-count: 1; }
+    table { font-size: 11px; }
+    th { font-size: 9px; letter-spacing: 0.02em; }
+    td, th { padding-right: 6px; }
+    code { font-size: 11px; }
+  }
+
+  /* ================================================================
+     DC-COMMENTS BEGIN — styles (copy verbatim; do not modify)
+     ================================================================ */
+  ::highlight(dc-hl) { background: rgba(212, 168, 83, 0.28); }
+  ::highlight(dc-hl-active) { background: rgba(212, 168, 83, 0.6); }
+
+  #dc-fab {
+    position: absolute;
+    z-index: 40;
+    display: none;
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--cta-foreground);
+    background: var(--cta);
+    border: 1px solid #0a1c42;
+    border-radius: 3px;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  #dc-fab:hover { background: var(--ink-navy); }
+
+  #dc-sidebar {
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    padding: 24px 20px 60px;
+    font-size: 13px;
+    position: sticky;
+    top: 0;
+    height: 100dvh;
+    overflow-y: auto;
+  }
+  #dc-sidebar h2.dc-title {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-subtle);
+    margin: 0 0 4px;
+  }
+  .dc-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 18px; }
+  .dc-btn {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--fg);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 3px;
+    padding: 4px 9px;
+    cursor: pointer;
+  }
+  .dc-btn:hover { background: var(--surface-alt); }
+  .dc-btn:focus-visible, #dc-fab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .dc-empty { color: var(--fg-muted); font-style: italic; }
+  .dc-item { border-top: 1px solid var(--border-subtle); padding: 12px 0; cursor: pointer; }
+  .dc-item.dc-resolved { opacity: 0.5; }
+  .dc-quote {
+    border-left: 2px solid var(--ink-gold);
+    padding-left: 8px;
+    color: var(--fg-subtle);
+    font-style: italic;
+    font-size: 12px;
+    margin-bottom: 6px;
+    overflow-wrap: break-word;
+  }
+  .dc-orphan-tag {
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-terracotta);
+    background: rgba(179, 110, 78, 0.12);
+    border-radius: 999px;
+    padding: 1px 7px;
+    margin-left: 6px;
+  }
+  .dc-text { white-space: pre-wrap; overflow-wrap: break-word; }
+  .dc-item textarea {
+    width: 100%;
+    min-height: 64px;
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 3px;
+    padding: 6px 8px;
+    resize: vertical;
+  }
+  .dc-item textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .dc-meta { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 11px; color: var(--fg-muted); }
+  .dc-meta label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  .dc-meta .dc-del { margin-left: auto; color: var(--ink-terracotta); background: none; border: none; font-size: 11px; cursor: pointer; padding: 0; }
+  .dc-meta .dc-del:hover { text-decoration: underline; }
+  #dc-status { font-size: 11px; color: var(--ink-sage); min-height: 16px; margin-top: 8px; }
+
+  #dc-toggle { display: none; }
+  @media (max-width: 1100px) {
+    #dc-sidebar {
+      position: fixed;
+      right: 0;
+      top: 0;
+      width: 320px;
+      max-width: 90vw;
+      transform: translateX(100%);
+      transition: transform 200ms ease-out;
+      z-index: 50;
+      box-shadow: -4px 0 16px rgba(0, 0, 0, 0.08);
+    }
+    #dc-sidebar.dc-open { transform: translateX(0); }
+    #dc-toggle {
+      display: block;
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 51;
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--cta-foreground);
+      background: var(--cta);
+      border: 1px solid #0a1c42;
+      border-radius: 999px;
+      padding: 9px 15px;
+      cursor: pointer;
+    }
+  }
+  /* ============ DC-COMMENTS END — styles ============ */
+</style>
+</head>
+<body>
+<div class="dc-page">
+<article id="doc">
+<header class="masthead"><span class="eyebrow">Implementation proposal · 2026-09-08 · Status: revised</span><h1>Heartleaf eval: first hosted milestone</h1><p class="context">Incorporates James’s nine exported review comments. No hosted evaluation has been run, and no backend changes are proposed or authorized.</p></header>
+<section id="summary"><h2>Executive summary</h2><p>Create a separate <code>heartleaf-eval</code> Coworld using the existing platform. Accept that its manifest and shared game assets are visible. Use a private league for the experiment and private Experience Requests (XP requests), with explicit nine-seat rosters. Keep spend attributed to the new Coworld, not the original Heartleaf world.</p>
+<p>Freeze the top three ranked Heartleaf policies, extract their souls, and cross each soul with Claude Haiku 4.5, Qwen3.5-35B-A3B, and GPT-OSS-120B. This produces nine distinct soul/model policies. Run one nine-player canary and two full nine-player games. Every full game contains all nine policies, including three versions of each soul.</p></section>
+<div class="callout callout-warn"><span class="callout-label">Private-league prerequisite</span>The scope is local tooling plus normal uploads and requests through existing APIs. No Observatory/Metta backend code, migrations, deployments, infrastructure changes, direct database writes, or broadened platform permissions are part of this milestone. The requested private league is an unresolved existing-platform setup constraint: seeded leagues are reconciled back to public. Resolve that operational path before uploading extracted policies or running paid games; do not turn it into a backend project.</div>
+<nav class="toc" aria-label="Contents"><span class="eyebrow">Contents</span><ol><li><span class="toc-num">1</span><a href="#evidence">Evidence and current state</a></li><li><span class="toc-num">2</span><a href="#experiment">Models and fixed experiment</a></li><li><span class="toc-num">3</span><a href="#implementation">Implementation sequence</a></li><li><span class="toc-num">4</span><a href="#alternatives">Alternatives and scope boundaries</a></li><li><span class="toc-num">5</span><a href="#technical">Planned local files and validation commands</a></li><li><span class="toc-num">6</span><a href="#review-outcomes">Review comment outcomes</a></li><li><span class="toc-num">7</span><a href="#open-questions">Open questions and execution gates</a></li><li><span class="toc-num">8</span><a href="#sources">Sources and technical references</a></li></ol></nav>
+<section id="evidence"><h2>1 · Evidence and current state</h2><ul class="key-points"><li>Extraction is proven for one submitted soul; the revised cohort still needs three traced sources.</li><li>A visible world is accepted. Persistent private-league setup remains unresolved.</li></ul>
+<p>The original research used Heartleaf commit <code>ad3c13860431cf29f7f8ac5e04ffe6b632928ad9</code> and Metta commit <code>b4e3589c1e509aaecce23fb63a418c21c7451e38</code>. The revision refreshed remotes: Heartleaf remains equal to origin/master at the same commit; the new league/routing checks use Metta origin/main <code>22a97ccd454b3c1d666488214d82e0ae3e45f04b</code>. The separate Metta worktree was read without rebasing it. No backend files were edited.</p>
+<p>Original CLI probes used isolated coworld 0.1.45 and softmax-cli 0.26.32, not global installs. This revision does not depend on running either CLI. Before implementation, check current project-local releases through the project's dependency tool, and record the versions actually used.</p>
+<p>References labeled with the Metta repository prefix refer to that repository. Original extraction and attribution citations retain their original pinned commit; the league/routing citations below use the refreshed commit. Live observations are labeled separately.</p>
+<h3>Storage access: proven for one submitted soul</h3>
+<p>A team read-only SQL query found a ready, undeleted submitted image after the image-detail API returned 404. James's existing AWS PowerUser identity could read its manifest and layers without new permissions.</p>
+<table><thead><tr><th>Provenance</th><th>Observed value</th></tr></thead><tbody><tr><td>Source policy</td><td><code>nishadiota-heartleaf-tablekeeper:v2</code></td></tr>
+<tr><td>Policy-version UUID</td><td><code>5c311a87-5993-4cc1-878c-7a5c137e9645</code></td></tr>
+<tr><td>Image ID</td><td><code>img_ef1088cd-1292-4800-8aeb-712f6b9fab3c</code></td></tr>
+<tr><td>Registry</td><td><code>471879937681.dkr.ecr.us-east-1.amazonaws.com</code></td></tr>
+<tr><td>Repository</td><td><code>cogames/hayb9m1pzz988c5nioyoffel-7114269757e9/nishadiota-heartleaf-tablekeeper</code></td></tr>
+<tr><td>Image digest</td><td><code>sha256:d6974770bbbb1b1ed358061cb8d8888f071b30be45384a9a13da0d6e4a7b9712</code></td></tr>
+<tr><td>Image size reported by ECR</td><td>88,124,241 bytes</td></tr>
+<tr><td>Runtime</td><td>Linux amd64; the soul-player executable<sup class="ref"><a href="#src-1" title="/bin/soul_player">1</a></sup>; the configured soul location<sup class="ref"><a href="#src-2" title="HEARTLEAF_SOUL_PATH=/soul.md">2</a></sup></td></tr>
+<tr><td>Final image layer</td><td><code>sha256:72a07c3ef736177354cf56fe7c5b8bdcb88809157975bf7b1c98ba1664a650bc</code></td></tr>
+<tr><td>Soul file</td><td>the soul file<sup class="ref"><a href="#src-3" title="/soul.md">3</a></sup>, 3,511 bytes</td></tr>
+<tr><td>Soul SHA-256</td><td><code>60f0c8debbfc0d72cf567f3a40267b9f74834cb333268ee73a19c0651dfbe86b</code></td></tr></tbody></table>
+<p>The earlier live probe successfully used <code>DescribeImages</code>, <code>BatchGetImage</code>, and <code>GetDownloadUrlForLayer</code>. It downloaded the final 5,120-byte layer into memory, verified its digest, and found the sole 3,511-byte soul file. Image configuration confirmed the runtime path. No container was started, and no soul text, credentials, or signed download URLs were printed or committed. This proves extraction for one policy, not for all three policies in the revised cohort.</p>
+<p>Submitted images live in ECR, not in a separate application-managed S3 image archive. Use the supported registry download path. Upload/storage evidence: <sup class="ref"><a href="#src-4" title="metta/packages/coworld/src/coworld/upload.py:1980-2040">4</a></sup>, <sup class="ref"><a href="#src-5" title="metta/app_backend/src/metta/app_backend/routes/container_image_routes.py:170-215,586-627">5</a></sup>, and <sup class="ref"><a href="#src-6" title="metta/devops/app-manifests/values.yaml:43-53">6</a></sup> at the original research commit.</p>
+<p>For implementation, reuse Docker create<sup class="ref"><a href="#src-7" title="https://docs.docker.com/reference/cli/docker/container/create/">7</a></sup> and Docker cp<sup class="ref"><a href="#src-8" title="https://docs.docker.com/reference/cli/docker/container/cp/">8</a></sup> on digest-pinned images. A created, stopped container allows filesystem extraction without running the submitted program. Do not build a custom image-layer merger from the bounded last-layer probe.</p>
+<h3>Accepted visibility tradeoff</h3>
+<table><thead><tr><th>Surface</th><th>Existing behavior</th><th>Revised treatment</th></tr></thead><tbody><tr><td>Coworld upload</td><td>Upload accepts a manifest, without a Coworld public flag</td><td>Rename to heartleaf-eval; do not send public=False</td></tr>
+<tr><td>Coworld manifest and listing</td><td>World metadata is not team-only</td><td>Accept visibility explicitly</td></tr>
+<tr><td>Shared game/viewer assets</td><td>Existing public assets remain public</td><td>Reuse them; do not claim they are secret</td></tr>
+<tr><td>League visibility</td><td>Team API can set public=False, hidden=False</td><td>Desired team-readable experiment league</td></tr>
+<tr><td>Seeded league</td><td>Reconciliation reapplies public=True</td><td>Private league setup remains unresolved</td></tr>
+<tr><td>XP requests</td><td>private=True limits ordinary-user access; elevated team reads exist</td><td>Set private on every request and verify actual access</td></tr>
+<tr><td>Extracted souls</td><td>Submitted policy images are distinct from bundled game assets</td><td>Keep them out of public manifests and bundled player images; verify actual image visibility</td></tr></tbody></table>
+<p>The original strict team-only Coworld requirement is explicitly relaxed by James. Private here describes the requested league and runs, not the world itself. No backend privacy feature will be built. Existing ordinary-owner exceptions and elevated team access must be documented honestly; do not claim stronger isolation than the platform provides.</p>
+<p>Original visibility evidence: <sup class="ref"><a href="#src-9" title="metta/app_backend/src/metta/app_backend/routes/coworld_routes.py:381-384,2073-2168">9</a></sup>, <sup class="ref"><a href="#src-10" title="metta/app_backend/src/metta/app_backend/v2/permissions.py:259-289,329-365">10</a></sup>, and <sup class="ref"><a href="#src-11" title="metta/app_backend/src/metta/app_backend/job_runner/coworld_image_publisher.py:209-239">11</a></sup>.</p>
+<h3>Private league: the unresolved setup path</h3>
+<p>The existing visibility endpoint accepts public=False and hidden=False for an enabled league. However, the standard Coworld seed template sets public=True, and reconciliation restores that value. Disabling the seed also disables its league, while XP target selection excludes disabled leagues. Pausing rounds does not stop visibility reconciliation.</p>
+<p>Fresh source evidence: <sup class="ref"><a href="#src-12" title="metta/app_backend/src/metta/app_backend/v2/routes/leagues.py:1914-1930">12</a></sup>; <sup class="ref"><a href="#src-13" title="metta/app_backend/src/metta/app_backend/v2/seed.py:383-394,654-663,720-748">13</a></sup>; <sup class="ref"><a href="#src-14" title="metta/app_backend/src/metta/app_backend/v2/routes/experience_requests.py:205-218">14</a></sup>.</p>
+<p>I did not find a supported route for creating a new, persistently private, unseeded league in the APIs inspected. An existing operational mechanism may still exist. Before execution, check that with the platform owner and verify that any proposed setup survives reconciliation. Do not assume an unrelated private league can be repurposed.</p>
+<p>If no such mechanism exists, pause at this boundary and ask James whether to use league-less private XP requests on the new world. His latest comment specifically requests a league, so that fallback is not silently authorized. Do not repeatedly flip visibility, disable reconciliation, write database rows, or deploy a backend fix.</p>
+<h3>OpenRouter and league-scoped XP requests</h3>
+<p>A live read of the deployed backend in the softmax-main cluster, observatory namespace, showed <code>COWORLD_OPENROUTER_ROUTING_ENABLED=true</code> and <code>COWORLD_OPENROUTER_EPISODE_PERCENT=100</code> during this revision. Current GitOps configuration agrees. Normal eligible Coworld episodes should therefore use OpenRouter without an override. This does not establish that every unrelated product's LLM traffic uses OpenRouter. Source: <sup class="ref"><a href="#src-15" title="metta/devops/app-manifests/values.yaml:388-434">15</a></sup>.</p>
+<p>Omit <code>llm_routing_override</code>. Recheck the deployed setting immediately before running and verify the realized route/model in all nine seats. If routing changes, report it rather than silently introducing an override or changing platform settings.</p>
+<p>Target the new league through <code>target.league_id</code>. Do not also send a top-level Coworld ID: the API rejects mixed league and Coworld selectors. Resolve the league's Coworld first and assert that it is the new heartleaf-eval world. Use explicit policy-version UUIDs and slots 0 through 8. Source: <sup class="ref"><a href="#src-16" title="metta/app_backend/src/metta/app_backend/v2/routes/experience_requests.py:332-392,570-610">16</a></sup>.</p>
+<p>League-targeted requests use the existing league-scoped idempotency lookup and lock. Give each scheduled game a unique, stable key and persist the request body and returned ID. On an ambiguous response, reconcile or repeat the identical request under the same key, then verify the returned body/roster; do not change the payload under a reused key. Keep one request per game for clear accounting and serial verification, not because normal routing requires it. Sources: <sup class="ref"><a href="#src-17" title="metta/app_backend/src/metta/app_backend/v2/routes/experience_requests.py:939-960">17</a></sup> at the refreshed commit and <sup class="ref"><a href="#src-18" title="metta/app_backend/src/metta/app_backend/v2/experience_requests.py:276-310">18</a></sup> at the original research commit.</p>
+<p>Spend attribution follows job attempt to episode request to Coworld ID/name. A new league alone would not move spend off Heartleaf; its runtime must resolve to the separately uploaded world. This changes the attribution dimension, not the payer. Original evidence: <sup class="ref"><a href="#src-19" title="metta/app_backend/src/metta/app_backend/usage_ingest/llm_attribution.py:85-154">19</a></sup> and <sup class="ref"><a href="#src-20" title="metta/app_backend/src/metta/app_backend/usage_ingest/episode_llm_usage.py:14-84">20</a></sup>.</p></section>
+<section id="experiment"><h2>2 · Models and fixed experiment</h2><ul class="key-points"><li>Cross three ranked souls with Haiku, Qwen, and GPT-OSS to create nine policies.</li><li>Run one nine-seat canary and two full nine-seat games; every pair meets twice in the full games.</li></ul>
+<table><thead><tr><th>Model label</th><th>Soul first line</th><th>Expected canonical model</th></tr></thead><tbody><tr><td>H: Claude Haiku 4.5</td><td><code>#!us.anthropic.claude-haiku-4-5-20251001-v1:0</code></td><td><code>anthropic/claude-haiku-4.5</code></td></tr>
+<tr><td>Q: Qwen3.5-35B-A3B</td><td><code>#!qwen/qwen3.5-35b-a3b</code></td><td><code>qwen/qwen3.5-35b-a3b</code></td></tr>
+<tr><td>G: GPT-OSS-120B</td><td><code>#!openai/gpt-oss-120b</code></td><td><code>openai/gpt-oss-120b</code></td></tr></tbody></table>
+<p>Keep the first two models from the original proposal. Add GPT-OSS-120B<sup class="ref"><a href="#src-21" title="https://openrouter.ai/openai/gpt-oss-120b">21</a></sup>, which has published open weights<sup class="ref"><a href="#src-22" title="https://github.com/openai/gpt-oss">22</a></sup>, as the third model. Haiku<sup class="ref"><a href="#src-23" title="https://openrouter.ai/anthropic/claude-haiku-4.5">23</a></sup> is the requested baseline; Qwen<sup class="ref"><a href="#src-24" title="https://openrouter.ai/qwen/qwen3.5-35b-a3b">24</a></sup> is the existing efficient open-weight comparison. These are practical comparison choices, not claims of equal capability or cost. Do not use a free or auto model alias.</p>
+<p>Heartleaf accepts the header syntax, uses its existing Anthropic path for Haiku, and routes the other two through Converse translation. The hosted canary must prove both canonical-slug paths work and produce useful actions. No provider adapter or self-hosted inference is proposed. Sources: <sup class="ref"><a href="#src-25" title="src/heartleaf/souls.nim:9-13,43-87">25</a></sup>, <sup class="ref"><a href="#src-26" title="src/heartleaf/bedrock_client.nim:117-139">26</a></sup>, and <sup class="ref"><a href="#src-27" title="metta/app_backend/src/metta/app_backend/job_runner/bedrock_translation.py:305-350,774-787">27</a></sup> at the original research commit.</p>
+<p>Use the shared eval setting <code>BEDROCK_MAX_TOKENS=2048</code>. This deliberately differs from the current default of 192; preserve all other game rules and pacing. Verify both open-weight models return complete actions rather than using the entire budget on reasoning. Record truncations. If changes are needed after the canary, stop, version the experiment, and record them before full games. Source: <sup class="ref"><a href="#src-28" title="src/heartleaf/bedrock_client.nim:15-16,97-105">28</a></sup>.</p>
+<h3>Freeze three souls and generate nine policies</h3>
+<p>At preparation time, snapshot the top three ranked eligible policy versions from the chosen Heartleaf leaderboard/division. Record league/division ID, ranking metric, timestamp, rank, policy UUID, and immutable image digest. Label them S1, S2, and S3. Do not use a dynamic top_n selector during evaluation.</p>
+<p>The previously extracted Tablekeeper image is a proven extraction example, not a guaranteed member of the refreshed top three. Download each selected image again. If any top-three soul is unavailable or invalid, report the exact failure rather than quietly substituting a lower-ranked policy. Keep identical source bodies if two ranked policies happen to share a soul, but flag the duplicate; do not pretend this is three independent prompt bodies.</p>
+<table><thead><tr><th>Source</th><th>Haiku</th><th>Qwen</th><th>GPT-OSS</th></tr></thead><tbody><tr><td>Rank 1 soul</td><td>S1-H</td><td>S1-Q</td><td>S1-G</td></tr>
+<tr><td>Rank 2 soul</td><td>S2-H</td><td>S2-Q</td><td>S2-G</td></tr>
+<tr><td>Rank 3 soul</td><td>S3-H</td><td>S3-Q</td><td>S3-G</td></tr></tbody></table>
+<p>Each cell is a separately named policy with its own immutable UUID. Within a row, the raw soul body must be byte-identical; only the model header changes. Multiple variants of the same soul explicitly belong in the same village. Reporting groups by policy UUID, source soul, and model, never just by uploader/player identity.</p>
+<h3>Standard nine-player schedule</h3>
+<p>Use the canonical nine-seat <code>league</code> variant, not a custom two-seat variant and not filler players. The current game technically supports 2-9 seats, but James's requested experiment is a full nine-player village. The standard variant declares nine players and a seven-day game. Source: <sup class="ref"><a href="#src-29" title="coworld_manifest_template.json:292-331">29</a></sup>; <sup class="ref"><a href="#src-30" title="README.md:49-54">30</a></sup>.</p>
+<p>Base seat order is [S1-H, S1-Q, S1-G, S2-H, S2-Q, S2-G, S3-H, S3-Q, S3-G]. For the second full game, move the policy at slot i to slot (i+4) modulo 9. This changes every policy's house. It is not a fully house-balanced design.</p>
+<table><thead><tr><th>Game</th><th>Roster</th><th>Seed</th><th>Length</th><th>Counts toward coverage</th></tr></thead><tbody><tr><td>canary</td><td>All nine, base order</td><td>91001</td><td>1 game day, 180 seconds/day</td><td>No</td></tr>
+<tr><td>eval-a</td><td>All nine, base order</td><td>91002</td><td>7 game days, 180 seconds/day</td><td>Yes</td></tr>
+<tr><td>eval-b</td><td>All nine, rotated by four seats</td><td>91002</td><td>7 game days, 180 seconds/day</td><td>Yes</td></tr></tbody></table>
+<p>Set maxGames=1, maxTicks=0, and real model replies for each request. Only the canary shortens the duration; it still uses nine seats. Run serially, proceeding only after the previous game's checks pass.</p>
+<p>Nine distinct policies give 36 unordered pairs. Each complete full game contains all 36 pairs, so two successful full games give every pair M=2 meetings, including same-soul/different-model pairs. The canary is excluded. Equal seeds do not make model replies deterministic. These correlated village results are infrastructure and behavior evidence, not 36 independent trials or enough evidence to declare a winning model. Full house balancing and the eventual top-nine-by-N cohort are later work.</p></section>
+<section id="implementation"><h2>3 · Implementation sequence</h2><ul class="key-points"><li>Build local tooling and use existing supported platform operations.</li><li>Resolve and verify the private league before uploading extracted policies or spending on games.</li></ul>
+<figure><svg viewBox="0 0 560 465" role="img" aria-labelledby="flow-title flow-desc"><title id="flow-title">Five gates for the hosted milestone</title><desc id="flow-desc">Local preparation, a verified private league, one nine-seat canary, two full games, then a report. The private league is an unresolved prerequisite using existing operations.</desc><defs><marker id="flow-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7" fill="#859ebe"/></marker></defs><rect x="50" y="10" width="460" height="68" rx="3" fill="#fffaf0" stroke="#d4c9b5"/><g text-anchor="middle" font-family="Merriweather Sans, sans-serif" font-size="15"><text x="280" y="37" fill="#1a3875">1 · Local preparation</text><text x="280" y="60" fill="#555555">Three souls × three models</text></g><path d="M280 79 V97" fill="none" stroke="#859ebe" stroke-width="1.5" marker-end="url(#flow-arrow)"/><rect x="50" y="102" width="460" height="68" rx="3" fill="#f8f6ef" stroke="#b36e4e"/><g text-anchor="middle" font-family="Merriweather Sans, sans-serif" font-size="15"><text x="280" y="129" fill="#1a3875">2 · Private league prerequisite</text><text x="280" y="152" fill="#555555">Verify persistent privacy</text></g><path d="M280 171 V189" fill="none" stroke="#859ebe" stroke-width="1.5" marker-end="url(#flow-arrow)"/><rect x="50" y="194" width="460" height="68" rx="3" fill="#fffaf0" stroke="#d4c9b5"/><g text-anchor="middle" font-family="Merriweather Sans, sans-serif" font-size="15"><text x="280" y="221" fill="#1a3875">3 · Nine-seat canary</text><text x="280" y="244" fill="#555555">1 game day · seed 91001</text></g><path d="M280 263 V281" fill="none" stroke="#859ebe" stroke-width="1.5" marker-end="url(#flow-arrow)"/><rect x="50" y="286" width="460" height="68" rx="3" fill="#fffaf0" stroke="#d4c9b5"/><g text-anchor="middle" font-family="Merriweather Sans, sans-serif" font-size="15"><text x="280" y="313" fill="#1a3875">4 · Two full games</text><text x="280" y="336" fill="#555555">7 days each · rotate seats</text></g><path d="M280 355 V373" fill="none" stroke="#859ebe" stroke-width="1.5" marker-end="url(#flow-arrow)"/><rect x="50" y="378" width="460" height="68" rx="3" fill="#fffaf0" stroke="#d4c9b5"/><g text-anchor="middle" font-family="Merriweather Sans, sans-serif" font-size="15"><text x="280" y="405" fill="#1a3875">5 · Report and reconcile</text><text x="280" y="428" fill="#555555">All 36 pairs · M=2</text></g></svg><figcaption><span class="fig-label">Figure 1</span>Use existing operations to establish the private league before the canary. The canary is excluded from pair coverage; two complete nine-seat games give every unordered pair two meetings.</figcaption></figure>
+<h3>1. Resolve existing-platform setup and freeze inputs</h3>
+<p>Keep all code work in this Heartleaf repository. Resolve the private-league setup issue described above using only existing supported operations before paid execution. Read the current API schemas rather than assuming a generic create-league endpoint exists.</p>
+<p>Pin the original Heartleaf manifest, previously observed as <code>cow_f7e8be04-190b-470f-befe-fe98ca1cbcea</code>, version 0.2.7. Refresh that read and preserve exact game/viewer digests. Snapshot the top-three cohort and current model catalog/prices. Do not infer deployed image equality from a current local checkout.</p>
+<p>Start a friction log alongside the batch record. Existing findings are the image-detail API 404 despite an image existing, admin SQL/ECR access needed for extraction, the absence of atomic Coworld visibility, seeded-league privacy reconciliation, and mutually exclusive league/Coworld XP selectors. Record evidence, operator effort, workaround, risk, and suggested future API improvement. Do not implement those improvements in this task.</p>
+<h3>2. Build the local driver and nine policy images</h3>
+<p>Add a small synchronous driver, focused tests, and a runbook. Reuse the Coworld API client, existing httpx dependency where needed, AWS CLI, and Docker. No new service, solver, async framework, backend package edits, or deployment. Local work means the code lives locally; later uploads and XP submissions still create hosted resources and spend money.</p>
+<p>The driver supports prepare, submit-one, inspect, and report. Runtime artifacts belong in an ignored batch directory. Never commit source souls, credentials, signed URLs, authenticated logs, or images.</p>
+<p>For each of the three digest-pinned images, authenticate using short-lived credentials and a temporary Docker config, create a stopped container, copy the soul from its configured location, and validate it with Heartleaf's parser. If the location differs from the proven example, record it. Remove only the temporary stopped container and temporary credential configuration after extraction. Retain source hashes and provenance.</p>
+<p>Split the model header without normalizing body bytes. Generate H/Q/G variants for every source and assert matching body hashes within each triplet. Use one reusable compiled soul-player base and nine thin derived images. Build for Linux amd64, use distinct policy names, and record exact image digests and policy UUIDs.</p>
+<p>The batch manifest records each source's rank, policy identity, image digest, and soul hash, along with the nine variants and their requested models. It also records the game, viewer, and uploader digests; the new Coworld ID/version and league runtime; the schedule; all request, episode, and job-attempt IDs; and cost and status.</p>
+<p>Tests cover invalid souls, header-only transformation, all nine combinations, explicit unique slots, the four-seat rotation, prevention of original-world submissions, private request fields, omission of routing override, correct league target shape, stable per-game idempotency keys, ambiguous responses, and all 36 pair counters. Count distinct successful full episodes only. Include multiple policies from one uploader and duplicate source-body fixtures.</p>
+<h3>3. Prepare and validate the unchanged nine-player game</h3>
+<p>Create a renamed heartleaf-eval manifest with independent version/ownership, exact pinned game/viewer images, standard nine-seat league variant, and the declared shared token cap. Keep extracted souls and eval policies out of manifest-bundled player entries. Existing public baseline players may serve certification. Do not set an unsupported Coworld public flag.</p>
+<p>Run the package's real validation and certification workflow with a mocked fixture to avoid unnecessary model calls. Then run all nine generated images together in a local mocked episode and verify soul acceptance, results, and replay. Passing this test establishes packaging and protocol compatibility, but does not verify real model behavior.</p>
+<p>Use the repository's pinned Nim toolchain when rebuilding the uploader and its documented unit and integration tests. Follow the existing CI dependency setup. Add driver tests and documentation in the same change. Audit documentation before any commit. This plan does not authorize pushing, merging, deploying, uploading, or spending during the current review turn.</p>
+<h3>4. Upload, establish the private league, and verify scope</h3>
+<p>Using the approved existing setup path, upload heartleaf-eval through the normal manifest upload API. Wait for certification graduation, successful upload smoke episodes, and version readiness. Verify that the standard variant has nine seats and the original Heartleaf world remains unchanged.</p>
+<p>Create or obtain the dedicated league through that supported mechanism, set public=False and hidden=False with the existing team visibility API, and keep automatic rounds paused using the existing rounds-paused setting. Verify the league resolves to the new Coworld/version and standard variant. Record league/division identities as needed by the XP API. Do not start a ladder or commissioner process locally.</p>
+<p>Read privacy back after reconciliation, and verify the league remains enabled and usable as an XP target. Confirm there are no unintended automatic rounds. Pausing must be verified before attaching the eval cohort; do not assume a visibility call also stops scheduling. If persistent private setup cannot be established, stop here and report the blocker, without hacking the backend or exposing the cohort through a public league.</p>
+<p>Upload the nine submitted policies once the league/privacy path is established. Use explicit UUID selection without champion qualification unless the existing API actually requires membership. If membership is required, record that friction and use the documented route without launching qualification games accidentally.</p>
+<p>Check team access and ordinary non-team denial for the league/private requests/artifacts using legitimate credentials or test fixtures. Verify submitted-soul image records do not expose public URIs, including after a publisher cycle. Public Coworld metadata and already-public game assets are expected, not failures. Report any role-testing limitation rather than impersonating a teammate.</p>
+<h3>5. Submit the canary and two full games</h3>
+<p>Generate one existing-API request per scheduled game:</p>
+<pre><code class="language-json">{
+  &quot;target&quot;: {&quot;league_id&quot;: &quot;&lt;new-private-heartleaf-eval-league-id&gt;&quot;},
+  &quot;variant_id&quot;: &quot;league&quot;,
+  &quot;private&quot;: true,
+  &quot;num_episodes&quot;: 1,
+  &quot;idempotency_key&quot;: &quot;&lt;batch&gt;-canary&quot;,
+  &quot;notes&quot;: &quot;heartleaf-eval &lt;batch&gt; canary; three souls by three models&quot;,
+  &quot;game_config_overrides&quot;: {
+    &quot;seed&quot;: 91001,
+    &quot;maxGames&quot;: 1,
+    &quot;maxDays&quot;: 1,
+    &quot;daySeconds&quot;: 180,
+    &quot;maxTicks&quot;: 0,
+    &quot;mockReply&quot;: &quot;&quot;
+  },
+  &quot;roster&quot;: [
+    {&quot;player&quot;: {&quot;policy_ref&quot;: &quot;&lt;S1-H-uuid&gt;&quot;}, &quot;slot&quot;: 0},
+    {&quot;player&quot;: {&quot;policy_ref&quot;: &quot;&lt;S1-Q-uuid&gt;&quot;}, &quot;slot&quot;: 1},
+    {&quot;player&quot;: {&quot;policy_ref&quot;: &quot;&lt;S1-G-uuid&gt;&quot;}, &quot;slot&quot;: 2},
+    {&quot;player&quot;: {&quot;policy_ref&quot;: &quot;&lt;S2-H-uuid&gt;&quot;}, &quot;slot&quot;: 3},
+    {&quot;player&quot;: {&quot;policy_ref&quot;: &quot;&lt;S2-Q-uuid&gt;&quot;}, &quot;slot&quot;: 4},
+    {&quot;player&quot;: {&quot;policy_ref&quot;: &quot;&lt;S2-G-uuid&gt;&quot;}, &quot;slot&quot;: 5},
+    {&quot;player&quot;: {&quot;policy_ref&quot;: &quot;&lt;S3-H-uuid&gt;&quot;}, &quot;slot&quot;: 6},
+    {&quot;player&quot;: {&quot;policy_ref&quot;: &quot;&lt;S3-Q-uuid&gt;&quot;}, &quot;slot&quot;: 7},
+    {&quot;player&quot;: {&quot;policy_ref&quot;: &quot;&lt;S3-G-uuid&gt;&quot;}, &quot;slot&quot;: 8}
+  ]
+}</code></pre>
+<p>The request has neither a top-level Coworld ID nor a routing override. Before POST, assert the target league's resolved world is the new heartleaf-eval ID, visibility remains private, automatic rounds remain paused, and the roster is exactly the intended nine UUIDs. Use James's legitimate user credential and the existing elevation mechanism where needed.</p>
+<p>Before the first game, read current budgets, dispatch/per-episode limits, model availability, and default routing. Keep the proposed $10 driver stop threshold pending a nine-seat canary cost check. It is not a guaranteed cost estimate or hard provider cap: ingestion lag and a running game can exceed it. With one active game and three deliberate submissions maximum, wait for canary spend, project the remaining cost, and pause for a revised budget if necessary. Do not silently raise the threshold or invent an XP budget field.</p>
+<p>Canary acceptance requires all nine souls accepted, successful real calls from every seat, three correct canonical models, OpenRouter execution, usable action JSON, no persistent truncation/default replies, terminal success, results, and replay. Inspect durable attempts/provider records and player logs; request fields are not execution proof.</p>
+<p>After the canary and accounting checks pass, submit eval-a and eval-b with the full-game configuration and seat rotation. Retain failures and their costs. A replacement is an explicit additional submission requiring a reviewed schedule/budget, not an invisible retry until scores look good.</p>
+<h3>6. Verify accounting, coverage, and report results</h3>
+<p>Reconcile each request to episodes, all attempts, the realized Coworld/version/config, and all nine seated policies. Confirm both full games reach the last day with all nine scores. Watch replay behavior and inspect accepted souls, model calls, actions, truncations/timeouts, and normal completion.</p>
+<p>Use the approved read-only SQL/API surfaces for episode-level usage grouped by episode, slot, policy, model/provider where available, and source. Every pilot attempt, including retries, must attribute to heartleaf-eval, never the original heartleaf world. Separately reconcile Coworld budget/spend totals. Include upload/certification compute as setup cost and distinguish canary cost from evaluation cost.</p>
+<p>Wait up to a proposed 30 minutes after completion for usage ingest before marking accounting unresolved. Missing rows are not zero cost. Reconcile provider and episode totals within a stated rounding/caching tolerance without double-counting projections of the same calls.</p>
+<p>Deliver Markdown and machine-readable results in the ignored batch directory. Include request/episode IDs, seed, seat/house, source soul/rank, policy UUID, requested/served model, final score, successful/failed calls, truncations/timeouts, tokens, LLM cost, compute/setup cost where available, routing evidence, terminal result, authorized replay/log links, and a 9-by-9 pair-coverage matrix. The diagonal is excluded; all 36 off-diagonal unordered pairs must have count 2 from the two full games.</p>
+<p>Report descriptive within-soul model comparisons and village-level results without statistical superiority claims. Append the website/API friction log, all workarounds, remaining limitations, and proposed future improvements. Leave automatic league rounds paused and make no recurring-refresh commitment.</p>
+<p>Final acceptance is three traced source policies, nine immutable variants with matching within-soul body hashes, a separate visible Coworld, a persistently private enabled league with paused automatic rounds, one successful nine-seat real-model canary, two completed nine-seat full games, verified routing/spend, all-pair M=2 coverage, and an honest results/friction report. The private-league setup constraint must be resolved through existing operations or explicitly renegotiated before claiming this milestone is executable end to end.</p></section>
+<section id="alternatives"><h2>4 · Alternatives and scope boundaries</h2><ul class="key-points"><li>Reuse the existing registry, hosted sidecar, and league-targeted requests.</li><li>Backend changes and a custom scheduler are outside this milestone.</li></ul>
+<ul><li>Backend Coworld privacy work is removed entirely. A visible renamed world is the accepted tradeoff.</li>
+<li>A two-seat game is removed. Standard nine-player villages use all nine generated policies without fillers.</li>
+<li>Three souls by two models plus filler policies would preserve the old model count, but mixes filler behavior into the experiment. Three by three follows James's requested expansion.</li>
+<li>A single soul across nine separately named variants remains valid for later constant-soul studies. It is not this three-soul cohort.</li>
+<li>A new ladder/tournament scheduler is unnecessary. Existing league-targeted XP requests give exact rosters and per-game tracking; the league supplies context rather than automatic scheduling.</li>
+<li>Repeatedly setting a seeded league private is unreliable because reconciliation undoes it. Disabling its seed also removes it as an XP target. Neither is an acceptable privacy workaround.</li>
+<li>League-less private XP requests would work with a visible new world, but require James to approve relaxing his latest league request. If chosen, restore the stricter no-blind-POST-retry behavior because league-less idempotency is not guaranteed.</li>
+<li>Existing Docker/ECR extraction and the hosted sidecar avoid a custom image export service, layer merger, new provider adapter, or self-hosted inference.</li></ul></section>
+<section id="technical"><h2>5 · Planned local files and validation commands</h2><ul class="key-points"><li>Planned local files and exact validation commands are retained for implementation.</li><li>Runtime artifacts and extracted souls stay out of version control.</li></ul>
+<p>These are planned local implementation artifacts, not files already implemented by this review.</p>
+<table><thead><tr><th>Artifact</th><th>Purpose</th></tr></thead><tbody><tr><td><code>eval/tools/heartleaf_eval.py</code></td><td>Synchronous prepare, submit-one, inspect, and report driver</td></tr>
+<tr><td><code>eval/tests/test_heartleaf_eval.py</code></td><td>Focused driver, transformation, roster, and coverage tests</td></tr>
+<tr><td><code>eval/docs/heartleaf_eval.md</code></td><td>Operator runbook, setup limitations, and recovery procedure</td></tr>
+<tr><td><code>tmp/heartleaf-eval/&lt;batch&gt;/</code></td><td>Ignored source souls, batch manifest, and authenticated evidence</td></tr>
+<tr><td><code>tmp/heartleaf-eval/&lt;batch&gt;/results.md</code></td><td>Final results with machine-readable companion data</td></tr>
+<tr><td><code>tmp/heartleaf-eval/&lt;batch&gt;/friction.md</code></td><td>Website/API issues, local workarounds, and future improvements</td></tr></tbody></table>
+<p>Use the project's real environment and check current CLI releases before implementation. Packaging verification uses <code>coworld run-episode</code>. When rebuilding the uploader, run <code>nim r tests/tests.nim</code>; after building the game, run <code>HEARTLEAF_SERVER=out/heartleaf nim r tests/integration.nim</code>. Follow <code>.github/workflows/tests.yml</code> for dependency setup. Run the new driver tests through its declared isolated Python environment. No backend test or deployment suite is needed because no backend code is changed.</p></section>
+<section id="review-outcomes"><h2>6 · Review comment outcomes</h2><ul class="key-points"><li>All nine exported review comments have explicit outcomes below.</li><li>The original review JSON is preserved; rewritten passages may leave old anchors orphaned.</li></ul>
+<table><thead><tr><th>Comment ID</th><th>Outcome</th></tr></thead><tbody><tr><td>cmtsynlkl0</td><td>Accepted: visible Coworld, no Coworld privacy implementation</td></tr>
+<tr><td>cmtsyp5qf1</td><td>Accepted: no backend changes; existing visibility tradeoffs documented</td></tr>
+<tr><td>cmtsyq26i2</td><td>Answered: deployed Coworld routing is enabled at 100%; override removed</td></tr>
+<tr><td>cmtsyraah3</td><td>Incorporated as the target: private league and league-targeted XP; persistent setup remains blocked by seed reconciliation</td></tr>
+<tr><td>cmtsytb0n5</td><td>Answered: all nine seats use the three-soul by three-model product; no fillers</td></tr>
+<tr><td>cmtsyusb76</td><td>Removed platform privacy phase and its deployment requirement</td></tr>
+<tr><td>cmtsyv2j57</td><td>Expanded to three souls and three models, including GPT-OSS-120B</td></tr>
+<tr><td>cmtsywnah8</td><td>Clarified local code versus hosted API writes/spend; added per-step website/API friction reporting</td></tr>
+<tr><td>cmtsyy3i29</td><td>Replaced two-seat variant with the standard nine-seat league variant</td></tr></tbody></table>
+<p>The exported review JSON remains unchanged. Rewritten passages may cause old comments to appear orphaned in the HTML comment sidebar; the table above preserves their disposition.</p></section>
+<section id="open-questions"><h2>7 · Open questions and execution gates</h2><ul class="key-points"><li>A persistent private-league setup must be found through existing supported operations.</li><li>Hosted model behavior, complete games, and accounting still require execution evidence.</li></ul><div class="callout callout-open"><span class="callout-label">Unresolved</span>Remaining uncertainty: an existing supported persistent-private-league setup has not been identified; only one source soul extraction is proven; the new nine-policy package and Qwen/GPT-OSS routes have not been exercised in a hosted Heartleaf village; no new-world results or accounting are verified. These are execution checks and one explicit setup blocker, not permission to change the backend.</div></section>
+<section id="sources"><h2>8 · Sources and technical references</h2><ul class="key-points"><li>Code references retain their source locations and the commit context stated in the body.</li><li>External references identify the existing tools and selected models.</li></ul><ol class="sources"><li id="src-1">Soul-player executable path: <code>/bin/soul_player</code></li>
+<li id="src-2">Soul location environment setting: <code>HEARTLEAF_SOUL_PATH=/soul.md</code></li>
+<li id="src-3">Soul file path: <code>/soul.md</code></li>
+<li id="src-4"><code>metta/packages/coworld/src/coworld/upload.py:1980-2040</code></li>
+<li id="src-5"><code>metta/app_backend/src/metta/app_backend/routes/container_image_routes.py:170-215,586-627</code></li>
+<li id="src-6"><code>metta/devops/app-manifests/values.yaml:43-53</code></li>
+<li id="src-7"><a href="https://docs.docker.com/reference/cli/docker/container/create/">Docker create</a></li>
+<li id="src-8"><a href="https://docs.docker.com/reference/cli/docker/container/cp/">Docker cp</a></li>
+<li id="src-9"><code>metta/app_backend/src/metta/app_backend/routes/coworld_routes.py:381-384,2073-2168</code></li>
+<li id="src-10"><code>metta/app_backend/src/metta/app_backend/v2/permissions.py:259-289,329-365</code></li>
+<li id="src-11"><code>metta/app_backend/src/metta/app_backend/job_runner/coworld_image_publisher.py:209-239</code></li>
+<li id="src-12"><code>metta/app_backend/src/metta/app_backend/v2/routes/leagues.py:1914-1930</code></li>
+<li id="src-13"><code>metta/app_backend/src/metta/app_backend/v2/seed.py:383-394,654-663,720-748</code></li>
+<li id="src-14"><code>metta/app_backend/src/metta/app_backend/v2/routes/experience_requests.py:205-218</code></li>
+<li id="src-15"><code>metta/devops/app-manifests/values.yaml:388-434</code></li>
+<li id="src-16"><code>metta/app_backend/src/metta/app_backend/v2/routes/experience_requests.py:332-392,570-610</code></li>
+<li id="src-17"><code>metta/app_backend/src/metta/app_backend/v2/routes/experience_requests.py:939-960</code></li>
+<li id="src-18"><code>metta/app_backend/src/metta/app_backend/v2/experience_requests.py:276-310</code></li>
+<li id="src-19"><code>metta/app_backend/src/metta/app_backend/usage_ingest/llm_attribution.py:85-154</code></li>
+<li id="src-20"><code>metta/app_backend/src/metta/app_backend/usage_ingest/episode_llm_usage.py:14-84</code></li>
+<li id="src-21"><a href="https://openrouter.ai/openai/gpt-oss-120b">GPT-OSS-120B</a></li>
+<li id="src-22"><a href="https://github.com/openai/gpt-oss">published open weights</a></li>
+<li id="src-23"><a href="https://openrouter.ai/anthropic/claude-haiku-4.5">Haiku</a></li>
+<li id="src-24"><a href="https://openrouter.ai/qwen/qwen3.5-35b-a3b">Qwen</a></li>
+<li id="src-25"><code>src/heartleaf/souls.nim:9-13,43-87</code></li>
+<li id="src-26"><code>src/heartleaf/bedrock_client.nim:117-139</code></li>
+<li id="src-27"><code>metta/app_backend/src/metta/app_backend/job_runner/bedrock_translation.py:305-350,774-787</code></li>
+<li id="src-28"><code>src/heartleaf/bedrock_client.nim:15-16,97-105</code></li>
+<li id="src-29"><code>coworld_manifest_template.json:292-331</code></li>
+<li id="src-30"><code>README.md:49-54</code></li></ol></section>
+</article>
+
+<!-- ================================================================
+     DC-COMMENTS BEGIN — markup + script (copy verbatim; do not modify)
+     ================================================================ -->
+<aside id="dc-sidebar" aria-label="Comments">
+  <h2 class="dc-title">Comments <span id="dc-count"></span></h2>
+  <div class="dc-actions">
+    <button class="dc-btn" id="dc-export">Export JSON</button>
+    <button class="dc-btn" id="dc-copy">Copy JSON</button>
+    <button class="dc-btn" id="dc-import">Import…</button>
+    <input type="file" id="dc-file" accept=".json,application/json" hidden>
+  </div>
+  <div id="dc-status" role="status"></div>
+  <div id="dc-list"><p class="dc-empty">No comments yet. Select text in the document to add one.</p></div>
+</aside>
+<button id="dc-fab" type="button">+ Comment</button>
+<button id="dc-toggle" type="button">Comments</button>
+
+<script>
+(() => {
+  'use strict';
+  const FORMAT = 'dc-comments/1';
+  const CTX = 32; // prefix/suffix context length, chars
+  const doc = document.getElementById('doc');
+  const fab = document.getElementById('dc-fab');
+  const listEl = document.getElementById('dc-list');
+  const countEl = document.getElementById('dc-count');
+  const statusEl = document.getElementById('dc-status');
+  const sidebar = document.getElementById('dc-sidebar');
+  const storeKey = 'dc:' + document.title;
+
+  let comments = []; // {id, exact, prefix, suffix, text, created, resolved}
+  let ranges = new Map(); // id -> Range (null if orphaned)
+  let seq = 0;
+
+  // ---- text indexing: one global string over #doc's text nodes ----
+  function docText() {
+    const r = document.createRange();
+    r.selectNodeContents(doc);
+    return r.toString();
+  }
+  function globalOffset(container, offset) {
+    const r = document.createRange();
+    r.setStart(doc, 0);
+    r.setEnd(container, offset);
+    return r.toString().length;
+  }
+  function offsetsToRange(start, end) {
+    const walker = document.createTreeWalker(doc, NodeFilter.SHOW_TEXT);
+    let pos = 0, range = document.createRange(), haveStart = false;
+    while (walker.nextNode()) {
+      const node = walker.currentNode, len = node.data.length;
+      if (!haveStart && pos + len >= start) {
+        range.setStart(node, start - pos);
+        haveStart = true;
+      }
+      if (haveStart && pos + len >= end) {
+        range.setEnd(node, end - pos);
+        return range;
+      }
+      pos += len;
+    }
+    return null;
+  }
+
+  // ---- anchoring: TextQuoteSelector-style exact + prefix/suffix ----
+  function selectorFromRange(range) {
+    const text = docText();
+    const start = globalOffset(range.startContainer, range.startOffset);
+    const end = globalOffset(range.endContainer, range.endOffset);
+    return {
+      exact: text.slice(start, end),
+      prefix: text.slice(Math.max(0, start - CTX), start),
+      suffix: text.slice(end, end + CTX),
+    };
+  }
+  function locate(c) {
+    const text = docText();
+    let i = text.indexOf(c.prefix + c.exact + c.suffix);
+    if (i >= 0) return offsetsToRange(i + c.prefix.length, i + c.prefix.length + c.exact.length);
+    i = text.indexOf(c.exact);
+    if (i >= 0) return offsetsToRange(i, i + c.exact.length);
+    return null;
+  }
+  function reanchorAll() {
+    ranges = new Map(comments.map(c => [c.id, locate(c)]));
+    paint();
+  }
+
+  // ---- painting via CSS Custom Highlight API ----
+  const hl = typeof Highlight !== 'undefined' ? new Highlight() : null;
+  const hlActive = typeof Highlight !== 'undefined' ? new Highlight() : null;
+  if (hl) { CSS.highlights.set('dc-hl', hl); CSS.highlights.set('dc-hl-active', hlActive); }
+  function paint(activeId) {
+    if (!hl) return;
+    hl.clear(); hlActive.clear();
+    for (const [id, r] of ranges) {
+      if (!r) continue;
+      (id === activeId ? hlActive : hl).add(r);
+    }
+  }
+
+  // ---- persistence (best-effort; file:// storage varies by browser) ----
+  function save() {
+    try { localStorage.setItem(storeKey, JSON.stringify(comments)); } catch (e) { /* unavailable on some file:// setups */ }
+  }
+  function load() {
+    try {
+      const raw = localStorage.getItem(storeKey);
+      if (raw) comments = JSON.parse(raw);
+    } catch (e) { /* ignore */ }
+  }
+
+  // ---- sidebar rendering ----
+  function flash(msg) {
+    statusEl.textContent = msg;
+    setTimeout(() => { if (statusEl.textContent === msg) statusEl.textContent = ''; }, 2500);
+  }
+  function sortedComments() {
+    const pos = c => {
+      const r = ranges.get(c.id);
+      return r ? globalOffset(r.startContainer, r.startOffset) : Infinity; // orphans last
+    };
+    return [...comments].sort((a, b) => pos(a) - pos(b));
+  }
+  function render(editingId) {
+    countEl.textContent = comments.length ? '(' + comments.length + ')' : '';
+    listEl.textContent = '';
+    if (!comments.length) {
+      const p = document.createElement('p');
+      p.className = 'dc-empty';
+      p.textContent = 'No comments yet. Select text in the document to add one.';
+      listEl.appendChild(p);
+      return;
+    }
+    for (const c of sortedComments()) {
+      const item = document.createElement('div');
+      item.className = 'dc-item' + (c.resolved ? ' dc-resolved' : '');
+      item.dataset.id = c.id;
+
+      const quote = document.createElement('div');
+      quote.className = 'dc-quote';
+      quote.textContent = c.exact.length > 90 ? c.exact.slice(0, 90) + '…' : c.exact;
+      if (!ranges.get(c.id)) {
+        const tag = document.createElement('span');
+        tag.className = 'dc-orphan-tag';
+        tag.textContent = 'orphaned';
+        quote.appendChild(tag);
+      }
+      item.appendChild(quote);
+
+      if (c.id === editingId) {
+        const ta = document.createElement('textarea');
+        ta.value = c.text;
+        ta.placeholder = 'Write a comment… (⌘/Ctrl+Enter to save, Esc to cancel)';
+        ta.addEventListener('keydown', e => {
+          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') commit();
+          if (e.key === 'Escape') cancel();
+        });
+        ta.addEventListener('click', e => e.stopPropagation());
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'dc-btn';
+        saveBtn.textContent = 'Save';
+        saveBtn.style.marginTop = '6px';
+        saveBtn.addEventListener('click', e => { e.stopPropagation(); commit(); });
+        function commit() {
+          c.text = ta.value.trim();
+          if (!c.text) return cancel();
+          save(); render();
+        }
+        function cancel() {
+          if (!c.text) { comments = comments.filter(x => x.id !== c.id); ranges.delete(c.id); paint(); }
+          save(); render();
+        }
+        item.appendChild(ta);
+        item.appendChild(saveBtn);
+        listEl.appendChild(item);
+        requestAnimationFrame(() => ta.focus());
+        continue;
+      }
+
+      const text = document.createElement('div');
+      text.className = 'dc-text';
+      text.textContent = c.text;
+      item.appendChild(text);
+
+      const meta = document.createElement('div');
+      meta.className = 'dc-meta';
+      const when = document.createElement('span');
+      when.textContent = c.created.slice(0, 10);
+      const resolved = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!c.resolved;
+      cb.addEventListener('click', e => e.stopPropagation());
+      cb.addEventListener('change', () => { c.resolved = cb.checked; save(); render(); });
+      resolved.append(cb, 'resolved');
+      const del = document.createElement('button');
+      del.className = 'dc-del';
+      del.textContent = 'delete';
+      del.addEventListener('click', e => {
+        e.stopPropagation();
+        comments = comments.filter(x => x.id !== c.id);
+        ranges.delete(c.id);
+        paint(); save(); render();
+      });
+      meta.append(when, resolved, del);
+      item.appendChild(meta);
+
+      item.addEventListener('click', () => {
+        const r = ranges.get(c.id);
+        if (!r) return flash('Anchor not found in this version of the document.');
+        const rect = r.getBoundingClientRect();
+        window.scrollTo({ top: window.scrollY + rect.top - 160, behavior: 'smooth' });
+        paint(c.id);
+        setTimeout(() => paint(), 2000);
+      });
+      // double-click text to edit
+      text.addEventListener('dblclick', e => { e.stopPropagation(); render(c.id); });
+      listEl.appendChild(item);
+    }
+  }
+
+  // ---- selection -> floating Comment button ----
+  document.addEventListener('mouseup', e => {
+    if (fab.contains(e.target)) return;
+    setTimeout(() => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) { fab.style.display = 'none'; return; }
+      const range = sel.getRangeAt(0);
+      if (!doc.contains(range.commonAncestorContainer) || !range.toString().trim()) {
+        fab.style.display = 'none';
+        return;
+      }
+      const rect = range.getBoundingClientRect();
+      fab.style.display = 'block';
+      fab.style.left = Math.min(rect.right + 8 + window.scrollX, window.scrollX + document.documentElement.clientWidth - 120) + 'px';
+      fab.style.top = (rect.top + window.scrollY - 4) + 'px';
+      fab.dataset.pending = '1';
+    }, 0);
+  });
+  fab.addEventListener('click', () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    const range = sel.getRangeAt(0);
+    const c = Object.assign({ id: 'c' + Date.now().toString(36) + (seq++), text: '', created: new Date().toISOString(), resolved: false }, selectorFromRange(range));
+    comments.push(c);
+    ranges.set(c.id, range.cloneRange());
+    paint(c.id);
+    sel.removeAllRanges();
+    fab.style.display = 'none';
+    sidebar.classList.add('dc-open');
+    render(c.id);
+  });
+
+  // ---- export / import ----
+  function payload() {
+    return JSON.stringify({
+      format: FORMAT,
+      doc: document.title,
+      exported: new Date().toISOString(),
+      comments: comments,
+    }, null, 2);
+  }
+  document.getElementById('dc-export').addEventListener('click', () => {
+    const blob = new Blob([payload()], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (document.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'doc') + '.comments.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    flash('Downloaded.');
+  });
+  document.getElementById('dc-copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(payload()); flash('Copied to clipboard.'); }
+    catch (e) { flash('Clipboard blocked — use Export instead.'); }
+  });
+  document.getElementById('dc-import').addEventListener('click', () => document.getElementById('dc-file').click());
+  document.getElementById('dc-file').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    file.text().then(raw => {
+      const data = JSON.parse(raw);
+      if (data.format !== FORMAT || !Array.isArray(data.comments)) { flash('Not a dc-comments file.'); return; }
+      const byId = new Map(comments.map(c => [c.id, c]));
+      for (const c of data.comments) byId.set(c.id, c);
+      comments = [...byId.values()];
+      reanchorAll(); save(); render();
+      flash('Imported ' + data.comments.length + ' comment(s).');
+    }).catch(() => flash('Could not parse that file.'));
+    e.target.value = '';
+  });
+
+  document.getElementById('dc-toggle').addEventListener('click', () => sidebar.classList.toggle('dc-open'));
+
+  // ---- init ----
+  load();
+  reanchorAll();
+  render();
+})();
+</script>
+<!-- ============ DC-COMMENTS END ============ -->
+</div>
+</body>
+</html>

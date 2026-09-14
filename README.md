@@ -35,6 +35,22 @@ coworld certify dist/coworld_manifest.json
 coworld upload-coworld dist/coworld_manifest.json
 ```
 
+The model evaluation harness (which hosted models play Heartleaf well, and at
+what cost) lives separately under [`eval/`](eval/README.md). It is operator
+tooling, not part of the game or its Docker image.
+
+OpenRouter Qwen 3.5 requests explicitly disable optional thinking through
+Converse's `additionalModelRequestFields`, preserving the normal 20-second
+action deadline and leaving the output budget for the action itself. OpenRouter
+GPT-5/GPT-6 and newer Claude families omit unsupported temperature parameters
+without extending that deadline or increasing the configured output cap.
+
+The LLM client disables curl's connection-multiplexing wait so one slow
+response cannot delay other villagers before their requests are sent.
+The nine-request limit and action deadline are unchanged. A pinned
+[Curly module](vendor/curly/README.md) provides the per-client setting;
+other HTTP consumers keep the normal dependency.
+
 > **AI disclaimer: Much of this game was AI generated.**
 
 ## Gameplay
@@ -124,7 +140,41 @@ To call a real model locally, set `BEDROCK_KEY` (or AWS credentials) in the
 game's environment instead of `HEARTLEAF_MOCK_REPLY`. Hosted games get
 Bedrock from the platform automatically.
 
-### Developing
+Deadline-sensitive evaluations can set `HEARTLEAF_TIMEOUT_AS_WAIT=true` in the
+game environment. A client timeout then spends the decision on a wait action and
+records `llm timeout action=wait`, allowing the village to continue. It does not
+fabricate a model response. The default is `false`, which retains retries; other
+transport errors still retry in either mode. Pin the runtime manifest when
+comparing results, since this setting changes how missed deadlines affect play.
+
+For strict evaluations, set `HEARTLEAF_UNUSABLE_AS_WAIT=true`. This extends the
+policy to empty, truncated, malformed, invalid-action, and failed responses:
+each consumes its decision without retry. It also makes `BEDROCK_TIMEOUT_SECONDS`
+the hard client deadline for every model family. A structured `llm failure` event
+retains response text/body, stop reason, usage, timestamps, seat/tag, and the
+platform call ID from `X-Softmax-Llm-Call-Id` when received. Request credentials
+and system prompts are not copied into that diagnostic event.
+
+When `HEARTLEAF_EVAL_ARTIFACT=true`, each results JSON also contains a versioned
+`evaluation` object: accepted seats and every LLM lifecycle event, with an event
+count and contiguous sequence numbers. This is the durable eval record; it does
+not depend on the platform's 10,000-line stdout tail. It excludes system prompts
+and general conversation history, while failure events retain response evidence.
+The manifest results schema must allow `evaluation` (the checked-in template does);
+eval manifests should require it. Batch configs set `eval_artifact_required: true`
+to prevent missing evidence from silently falling back to stdout.
+
+## Developing
+
+The transport regression uses a local fake sidecar, with no model calls:
+
+```sh
+nim c tests/bedrock_transport.nim
+python3 tests/test_bedrock_transport.py --probe out/bedrock_transport
+```
+
+It requires the other eight requests to finish while the first response is
+held open, on both a new and a reused client.
 
 From a clean machine, clone the repository and sync the lock into a
 workspace in the parent directory:
@@ -133,7 +183,7 @@ workspace in the parent directory:
 git clone <this repository>
 cd <parent of the checkout>
 nimby create
-nimby sync heartleaf-conversations/nimby.lock
+nimby sync coworld-heartleaf/nimby.lock
 ```
 
 Nimby 0.2 refuses to create a workspace inside a git checkout, and Nim

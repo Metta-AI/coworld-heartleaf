@@ -1,0 +1,18 @@
+{
+  "seeds": [
+    91002
+  ],
+  "meetings": 2,
+  "max_days": 7,
+  "day_seconds": 180,
+  "canary_days": 1,
+  "canary_seed": 91001,
+  "max_ignored_fraction": 0.0,
+  "stop_threshold_usd": 10.0,
+  "projected_game_usd": 3.0,
+  "projected_canary_usd": 0.8,
+  "public_replays_accepted": false,
+  "evaluation_mode": "measurement",
+  "cost_authorization": "",
+  "max_parallel_games": 1
+}
