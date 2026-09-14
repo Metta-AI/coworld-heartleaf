@@ -531,6 +531,26 @@ block:
   doAssert grok["inferenceConfig"]["maxTokens"].getInt() >= 1024
   let llama = parseJson(converseBody(turns, "us.meta.llama4-maverick-17b-instruct-v1:0"))
   doAssert llama["inferenceConfig"].hasKey("temperature"), "chat models keep the temperature"
+  doAssert not llama.hasKey("additionalModelRequestFields")
+  let qwen = parseJson(converseBody(turns, "qwen/qwen3.5-35b-a3b"))
+  doAssert qwen["additionalModelRequestFields"]["thinking"]["type"].getStr() == "disabled",
+    "Qwen's optional reasoning must leave the action budget for text"
+  doAssert qwen["inferenceConfig"].hasKey("temperature")
+  doAssert modelTuning("qwen/qwen3.5-35b-a3b").minTimeoutSeconds == 0,
+    "Qwen keeps the default action deadline rather than extending it"
+  doAssert qwen["inferenceConfig"]["maxTokens"] == llama["inferenceConfig"]["maxTokens"],
+    "disabling reasoning must not increase the output cap"
+  doAssert not parseJson(converseBody(turns, "openai/gpt-oss-120b")).hasKey("additionalModelRequestFields"),
+    "the Qwen change must not alter other eval models"
+  for model in ["anthropic/claude-fable-5.1", "openai/gpt-6-astra",
+      "openai/gpt-5.6-luna"]:
+    let body = parseJson(converseBody(turns, model))
+    doAssert not body["inferenceConfig"].hasKey("temperature"),
+      "OpenRouter rejects sampling for this model family"
+    doAssert modelTuning(model).minTimeoutSeconds == 0,
+      "parameter compatibility must not extend the evaluation deadline"
+    doAssert body["inferenceConfig"]["maxTokens"] == llama["inferenceConfig"]["maxTokens"],
+      "parameter compatibility must not change the configured output cap"
   doAssert bedrockUsageText("""{"output":{},"usage":{"inputTokens":12,"outputTokens":3}}""") ==
     "in=12 cacheRead=0 cacheWrite=0 out=3"
 
@@ -895,7 +915,87 @@ block:
   doAssert "later" in chats, "the bye line lands"
   doAssert not brains.villagers[1].talking, "bye leaves the conversation"
 
+echo "Testing deadline outcomes consume eval turns"
+for timeoutAsWait in [false, true]:
+  for error in ["Timeout was reached", "Could not connect to server"]:
+    var sim = initSimServer(7)
+    doAssert sim.addPlayer("alice", 0) == 0
+    let client = newScriptedBedrockClient()
+    let brains = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, 1)
+    brains.timeoutAsWait = timeoutAsWait
+    brains.attachSoul(0, parseSoul("#!test-model\nYour name is {name}.\n"))
+    let observations = {0: sim.observe(0)}.toTable
+    doAssert brains.advance(observations, 1000.0).paused
+    doAssert client.started.len == 1
+    client.scriptReply(BedrockReply(
+      tag: client.started[0].tag, statusCode: 0, error: error
+    ))
+    let frame = brains.advance(observations, 1020.0)
+    if timeoutAsWait and error == "Timeout was reached":
+      doAssert not frame.paused, "a timed-out eval decision must release the village"
+      doAssert brains.phase == MovePhase
+      doAssert brains.villagers[0].retryAt == 0.0
+      doAssert client.started.len == 1, "the timed-out decision must not be retried"
+    else:
+      doAssert frame.paused, "normal runtime and non-timeout errors retain retries"
+      doAssert brains.villagers[0].retryAt > 1020.0
+
 echo "Testing leapfrog turns"
+block:
+  echo "Testing unusable eval responses consume one turn and retain evidence"
+  var headers: HttpHeaders
+  headers["x-softmax-llm-call-id"] = "call-test-123"
+  headers["x-amzn-requestid"] = "provider-test-456"
+  var limited = BedrockReply(statusCode: 200)
+  limited.captureResponse("""{"output":{"message":{"content":[]}},"stopReason":"max_tokens","usage":{"outputTokens":2048}}""", headers)
+  doAssert limited.tokenLimited()
+  doAssert limited.platformCallId == "call-test-123"
+  doAssert limited.providerRequestId == "provider-test-456"
+  limited.error = "Bedrock response did not include text."
+  for sample in [
+    limited,
+    BedrockReply(statusCode: 200, text: "hello", responseBody: "{\"text\":\"hello\"}", usage: "out=1", platformCallId: "low-token-call"),
+    BedrockReply(statusCode: 200, error: "Bedrock response did not include text.", usage: "out=2"),
+    BedrockReply(statusCode: 200, text: "{\"action\":\"wait\"}", stopReason: "max_tokens"),
+    BedrockReply(statusCode: 200, text: "{\"action\":\"fly_to_moon\"}"),
+    BedrockReply(statusCode: 0, error: "Timeout was reached"),
+    BedrockReply(statusCode: 503, error: "Service unavailable"),
+    BedrockReply(statusCode: 400, error: "maximum context length exceeded"),
+    BedrockReply(statusCode: 403, error: "Forbidden")
+  ]:
+    var sim = initSimServer(7)
+    doAssert sim.addPlayer("alice", 0) == 0
+    let client = newScriptedBedrockClient()
+    let brains = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, 1)
+    brains.unusableAsWait = true
+    brains.attachSoul(0, parseSoul("#!test-model\nYour name is {name}.\n"))
+    let observations = {0: sim.observe(0)}.toTable
+    doAssert brains.advance(observations, 1000.0).paused
+    var reply = sample
+    reply.tag = client.started[0].tag
+    client.scriptReply(reply)
+    doAssert not brains.advance(observations, 1020.0).paused
+    doAssert brains.villagers[0].retryAt == 0
+    doAssert not brains.villagers[0].failed
+    doAssert client.started.len == 1
+    let events = brains.gameLog.entries.filterIt(parseJson(it){"kind"}.getStr() == "failure")
+    doAssert events.len == 1
+    let text = parseJson(events[0]){"text"}.getStr()
+    let event = parseJson(text[text.find("event=") + 6 .. ^1])
+    doAssert event["response_text"].getStr() == sample.text
+    doAssert event["response_body"].getStr() == sample.responseBody
+    doAssert event["platform_call_id"].getStr() == sample.platformCallId
+    doAssert event["request_started_at"].getFloat() == 1000.0
+    doAssert event["elapsed_seconds"].getFloat() == 20.0
+    doAssert event["action"].getStr() == "wait"
+    let evidence = brains.evaluationEvidence()
+    doAssert evidence["schema"].getStr() == "heartleaf-eval-evidence/1"
+    doAssert evidence["event_count"].getInt() == evidence["events"].len
+    doAssert evidence["accepted_seats"].len == 1
+    for i, row in evidence["events"].getElems():
+      doAssert row["sequence"].getInt() == i
+      doAssert row["role"].getStr() == "llm"
+    doAssert ($evidence).contains("platform_call_id")
 block:
   var sim = initSimServer(7)
   doAssert sim.addPlayer("alice", 0) == 0

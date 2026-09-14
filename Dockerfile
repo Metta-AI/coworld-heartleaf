@@ -49,5 +49,6 @@ RUN apt-get update && \
 WORKDIR /workspace/heartleaf
 COPY --from=build /workspace/heartleaf/heartleaf /bin/heartleaf
 COPY --from=build /workspace/heartleaf/data ./data
+COPY --from=build /workspace/heartleaf/vendor/curly/LICENSE /usr/share/licenses/heartleaf/curly/LICENSE
 
 CMD ["/bin/heartleaf"]
