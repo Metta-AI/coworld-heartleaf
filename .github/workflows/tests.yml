@@ -8,6 +8,20 @@ on:
   workflow_dispatch:
 
 jobs:
+  eval-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          # The pinned coworld and softmax-cli wheels declare Python >=3.11,<3.13.
+          python-version: '3.12'
+      - name: Evaluation runner contract tests
+        run: |
+          python -m venv tmp/heartleaf-eval-venv
+          tmp/heartleaf-eval-venv/bin/pip install -r eval/requirements.txt
+          tmp/heartleaf-eval-venv/bin/python -m unittest discover -s eval/tests -p 'test_heartleaf_eval*.py'
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -44,6 +58,10 @@ jobs:
           nim r tests/viewer_controls.nim
           nim r tests/routes.nim
           nim r tools/record_viewer_scenario.nim out/viewer-scenario.replay
+      - name: Bedrock transport concurrency regression
+        run: |
+          nim c tests/bedrock_transport.nim
+          python3 tests/test_bedrock_transport.py --probe out/bedrock_transport
 
       - name: Integration tests
         run: HEARTLEAF_SERVER=out/heartleaf nim r tests/integration.nim

@@ -6,7 +6,7 @@
 
 import
   std/[json, options, os, strutils],
-  curly,
+  ../../vendor/curly/curly,
   heartleaf/[bedrock_auth, decisions]
 
 const
@@ -42,6 +42,10 @@ type
     text*: string
     usage*: string
     error*: string
+    responseBody*: string
+    platformCallId*: string
+    providerRequestId*: string
+    stopReason*: string
     retryAfter*: float
       ## Seconds the endpoint asked us to wait, 0 when it did not say.
     dailyQuota*: bool
@@ -58,6 +62,7 @@ type
     kind: TransportKind
     curl: Curly
     promptCacheEnabled*: bool
+    strictDeadline*: bool
     mockReply*: string
     inFlight*: int
     started*: seq[BedrockRequest]
@@ -179,7 +184,23 @@ proc modelTuning*(modelId: string): ModelTuning =
   ## Request shape for one Bedrock model id.
   let id = modelId.toLowerAscii()
   result.minMaxTokens = 0
+  let fiveFamily = "opus-5" in id or "sonnet-5" in id or "fable-5" in id or
+    "mythos" in id
+  let noSampling = fiveFamily or "opus-4-7" in id or "opus-4-8" in id or
+    "opus-4.7" in id or "opus-4.8" in id
   if not modelId.isAnthropicModel():
+    if id.startsWith("openai/gpt-5") or id.startsWith("openai/gpt-6") or
+        (id.startsWith("anthropic/") and noSampling):
+      # These OpenRouter models reject temperature. Omit it without changing
+      # the configured output budget or extending the action deadline.
+      result.sampling = false
+      return
+    if id.startsWith("qwen/qwen3.5-"):
+      # OpenRouter Qwen 3.5 defaults to reasoning, which can consume the
+      # entire action budget. Keep the normal 20-second action deadline.
+      result.sampling = true
+      result.disableThinking = true
+      return
     # Reasoning models (Grok, GPT-5.x, gpt-oss, GLM, DeepSeek) spend output
     # tokens thinking before the reply and reject sampling parameters, so
     # give them room and send none; plain chat models keep the temperature.
@@ -190,9 +211,6 @@ proc modelTuning*(modelId: string): ModelTuning =
       result.minMaxTokens = 1024
       result.minTimeoutSeconds = 60
     return
-  let fiveFamily = "opus-5" in id or "sonnet-5" in id or "fable-5" in id or
-    "mythos" in id
-  let noSampling = fiveFamily or "opus-4-7" in id or "opus-4-8" in id
   result.sampling = not noSampling
   if "fable-5" in id or "mythos" in id:
     result.lowEffort = true
@@ -299,6 +317,10 @@ proc converseBody*(
   if tuning.sampling:
     inference["temperature"] = %BedrockTemperature
   let body = %*{"messages": turns, "inferenceConfig": inference}
+  if tuning.disableThinking:
+    body["additionalModelRequestFields"] = %*{
+      "thinking": {"type": "disabled"}
+    }
   if systemPrompt.len > 0:
     body["system"] = %*[{"text": systemPrompt}]
   $body
@@ -379,6 +401,26 @@ proc classify*(reply: var BedrockReply) =
   else:
     reply.outcome = Transient
 
+proc tokenLimited*(reply: BedrockReply): bool =
+  reply.stopReason in ["max_tokens", "length", "model_length"]
+
+proc captureResponse*(reply: var BedrockReply, body: string, headers: HttpHeaders) =
+  ## Retain response evidence only; never copy request headers or credentials.
+  reply.responseBody = body
+  if headers.contains("X-Softmax-Llm-Call-Id"):
+    reply.platformCallId = headers["X-Softmax-Llm-Call-Id"]
+  if headers.contains("x-amzn-requestid"):
+    reply.providerRequestId = headers["x-amzn-requestid"]
+  elif headers.contains("request-id"):
+    reply.providerRequestId = headers["request-id"]
+  try:
+    let data = parseJson(body)
+    reply.stopReason = data{"stopReason"}.getStr()
+    if reply.stopReason.len == 0:
+      reply.stopReason = data{"stop_reason"}.getStr()
+  except CatchableError:
+    discard # The original malformed body remains available for diagnosis.
+
 proc newBedrockClient*(maxInFlight: int, mockReply = ""): BedrockClient =
   ## A client for the live endpoint, or the mock when one is configured
   ## (by game config, or by the environment for local runs). Hosted games
@@ -387,10 +429,13 @@ proc newBedrockClient*(maxInFlight: int, mockReply = ""): BedrockClient =
   result = BedrockClient(
     kind: Live,
     promptCacheEnabled: getEnv("BEDROCK_PROMPT_CACHE").strip() != "0",
+    strictDeadline: parseBool(getEnv("HEARTLEAF_UNUSABLE_AS_WAIT", "false")),
     mockReply: if mockReply.len > 0: mockReply else: mockBedrockReply()
   )
   if result.mockReply.len == 0:
-    result.curl = newCurly(max(1, maxInFlight))
+    # A slow first response must not hold other villagers behind connection
+    # negotiation and consume their action deadlines before they are sent.
+    result.curl = newCurly(max(1, maxInFlight), pipeWait = false)
 
 proc newScriptedBedrockClient*(): BedrockClient =
   ## A client whose replies tests push with scriptReply.
@@ -432,8 +477,8 @@ proc start*(client: BedrockClient, request: BedrockRequest) =
       bedrockUrl(request.modelId),
       bedrockHeaders(body, request.modelId, request.playerSlot),
       body,
-      max(bedrockTimeoutSeconds(), modelTuning(
-          request.modelId).minTimeoutSeconds),
+      (if client.strictDeadline: bedrockTimeoutSeconds()
+       else: max(bedrockTimeoutSeconds(), modelTuning(request.modelId).minTimeoutSeconds)),
       request.tag
     )
 
@@ -457,6 +502,7 @@ proc pollLive(client: BedrockClient): Option[BedrockReply] =
   if answer.isNone:
     return none(BedrockReply)
   var reply = BedrockReply(tag: answer.get.response.request.tag)
+  reply.captureResponse(answer.get.response.body, answer.get.response.headers)
   if answer.get.error.len > 0:
     reply.error = answer.get.error
   else:

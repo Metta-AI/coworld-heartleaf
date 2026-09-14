@@ -1,0 +1,3 @@
+# Isolated operator environment; do not install these packages globally.
+coworld==0.1.46
+softmax-cli==0.26.32

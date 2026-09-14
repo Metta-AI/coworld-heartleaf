@@ -1,0 +1,10 @@
+{
+  "experiment_sha256": "COPY_FROM_EXPERIMENT_FINGERPRINT_JSON",
+  "observed_at": "REPLACE_WITH_CURRENT_UTC_TIMESTAMP",
+  "authorized_limit_usd": 10.0,
+  "known_prior_usd": null,
+  "unresolved_prior_items": [],
+  "unresolved_reserve_usd": null,
+  "reserve_basis": "Describe which missing historical charges the reserve covers and why it is adequate.",
+  "evidence_file": "budget-evidence.json"
+}

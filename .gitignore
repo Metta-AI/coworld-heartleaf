@@ -18,6 +18,7 @@ nimcache
 *.pdb
 *.ilk
 *.out
+__pycache__/
 
 # Project specific ignores.
 out/
