@@ -67,7 +67,7 @@ for this implementation. Update pins deliberately if release checks require
 it, and record the versions actually used.
 
 ```sh
-uv venv tmp/heartleaf-eval-venv
+uv venv --python 3.12 tmp/heartleaf-eval-venv
 uv pip install --python tmp/heartleaf-eval-venv/bin/python -r eval/requirements.txt
 tmp/heartleaf-eval-venv/bin/python -m unittest discover -s eval/tests -p test_heartleaf_eval.py
 tmp/heartleaf-eval-venv/bin/python eval/tools/heartleaf_eval.py --help

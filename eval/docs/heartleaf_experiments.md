@@ -46,7 +46,7 @@ conversation cadence.
 Run from the repository root using the isolated project environment:
 
 ```sh
-uv venv tmp/heartleaf-eval-venv
+uv venv --python 3.12 tmp/heartleaf-eval-venv
 uv pip install --python tmp/heartleaf-eval-venv/bin/python \
   -r eval/requirements.txt
 ```

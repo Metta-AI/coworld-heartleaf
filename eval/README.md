@@ -36,12 +36,13 @@ records, not maintained references.
 From the repository root:
 
 ```sh
-uv venv tmp/heartleaf-eval-venv
+uv venv --python 3.12 tmp/heartleaf-eval-venv
 uv pip install --python tmp/heartleaf-eval-venv/bin/python -r eval/requirements.txt
 tmp/heartleaf-eval-venv/bin/python -m unittest discover -s eval/tests -p 'test_heartleaf_*.py'
 ```
 
-CI runs the same discovery in the `eval-tools` job of `.github/workflows/tests.yml`.
+The pinned `coworld` and `softmax-cli` wheels declare Python 3.11 or 3.12. CI runs
+the same discovery on 3.12 in the `eval-tools` job of `.github/workflows/tests.yml`.
 
 ## Where the data lives
 
