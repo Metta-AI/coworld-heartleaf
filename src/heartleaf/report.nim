@@ -66,6 +66,27 @@ proc dinnerBellText*(
     return "Dinner bell: you are inside. Stay through 6:00pm to eat here."
   "Dinner bell: leave now if you want to be inside a house by 6:00pm."
 
+proc gardenSearchText(
+  villager: Villager,
+  observation: Observation
+): string =
+  ## Reports only the garden state already tracked for this villager. The
+  ## completed checklist distinguishes a finished action from a search that
+  ## still has unchecked stops even though all village food has been picked.
+  var checkedEvery = villager.gardenChecked.len > 0
+  for checked in villager.gardenChecked:
+    if not checked:
+      checkedEvery = false
+      break
+  if checkedEvery:
+    return "Garden search: you checked every garden. Gathering is complete " &
+      "for today; gather_plants now stands still, so choose a different " &
+      "action if you want to move."
+  if observation.gardensWithFood <= 0:
+    return "Garden search: no food remains in the village gardens. " &
+      "gather_plants will finish checking your remaining gardens, then stand still."
+  "Garden search: food remains in the village gardens."
+
 proc stateReport*(
   villager: Villager,
   observation: Observation,
@@ -95,6 +116,7 @@ proc stateReport*(
   if carry.len > 0 and carry != "none":
     result.add("Food collected: " & carry & "\n")
   result.add("Food looking for: " & observation.foodLookingForText & "\n")
+  result.add(villager.gardenSearchText(observation) & "\n")
   if villager.connectionsText.len > 0:
     result.add("Connections: " & villager.connectionsText & "\n")
   result.add("Return JSON now.")

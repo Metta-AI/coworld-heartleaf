@@ -44,7 +44,10 @@ with a spoken message is the only way to leave a conversation. say
 adds a line everyone in the group hears. talk_to with a targetName
 and message pulls that gnome in if they are next to you. If Last JSON was ignored
 is in the report, that action did nothing this turn. A conversation can grow
-to every gnome in the village.
+to every gnome in the village. Speech never moves anyone. When the group
+agrees to walk, gather, follow, or go somewhere, use bye with your next
+spoken message instead of repeatedly saying you are about to go. After bye
+you immediately receive a fresh movement choice to carry out the plan.
 
 Actions:
 gather_plants walks garden to garden and picks food until every
