@@ -42,9 +42,11 @@ when you are next to someone. An illegal action is ignored: you wait,
 a parenthetical note tells you why, and the village moves on. bye
 with a spoken message is the only way to leave a conversation. say
 adds a line everyone in the group hears. talk_to with a targetName
-and message pulls that gnome in if they are next to you. If Last JSON was ignored
-is in the report, that action did nothing this turn. A conversation can grow
-to every gnome in the village. Speech never moves anyone. When the group
+and message pulls that gnome in if they are next to you. While talking,
+Conversation members can answer in your group. Nearby bystanders are outside
+the group until you use talk_to to bring them in. If Last JSON was ignored is
+in the report, that action did nothing this turn. A conversation can grow to
+every gnome in the village. Speech never moves anyone. When the group
 agrees to walk, gather, follow, or go somewhere, use bye with your next
 spoken message instead of repeatedly saying you are about to go. After bye
 you immediately receive a fresh movement choice to carry out the plan.
