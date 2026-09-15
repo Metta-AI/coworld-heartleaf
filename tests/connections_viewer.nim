@@ -1,6 +1,6 @@
 ## Real replay + shared viewer transport. Optional output directory captures frames.
 import std/[importutils, os, strutils, tables]
-import heartleaf, replays, heartleaf/connections
+import heartleaf, replays, heartleaf/[connections, encounters]
 import bitworld/[spriteprotocol, sprites]
 import ../tools/viewer_review_render
 privateAccess(SimServer)
@@ -125,4 +125,33 @@ for tick in [8880,4000,9000,10,4560,4320,100,9119]:
   seek(tick)
   let strength = sim.connectionTimeline.bondsAt(sim.tickCount).strength(0,1)
   doAssert strength == (if tick>=4320:1.0 else:0.5)
-echo "Connection viewer: recorded scenario, ten-heart rows, default-hidden full graph, node selection, pause, mixed transport and backward seeks passed."
+block:
+  # A nearby bystander can hear speech before the actual peer in player order.
+  # The connection card must still describe the recorded conversation partner.
+  let audience = initSimServer(42)
+  for seat in [3, 4, 8]:
+    let index = audience.addPlayer("audience", seat)
+    privateAccess(typeof(audience.players[0]))
+    audience.players[index].mapIndex = 0
+    audience.players[index].x = 320 + index * 10
+    audience.players[index].y = 300
+  audience.conversationTimeline = parseConversationTimeline("""
+{"kind":"convo-enter","tick":0,"day":1,"seat":3,"text":"conversation id=1 members=Sasha,Egor turn=1"}
+""")
+  audience.applyPlayerChat(0, "Hello, Egor!")
+  audience.step(newSeq[InputState](3))
+  privateAccess(typeof(audience.chatFeed[0]))
+  privateAccess(typeof(audience.chatFeed[0].hearers[0]))
+  doAssert audience.chatFeed.len == 1
+  doAssert audience.chatFeed[0].hearers[0].name == "Maxim"
+  doAssert audience.chatFeed[0].connectionPartner == "Egor",
+    "a bystander must not replace the speaker's conversation peer"
+  doAssert audience.chatFeed[0].hearers.len == 2,
+    "connection display must not change who actually heard the speech"
+  audience.conversationTimeline = ConversationTimeline()
+  audience.applyPlayerChat(0, "Hello, everyone!")
+  audience.step(newSeq[InputState](3))
+  doAssert audience.chatFeed[^1].connectionPartner.len == 0
+  doAssert audience.chatFeed[^1].hearers.len == 2,
+    "live and legacy conversations retain the nearby-listener fallback"
+echo "Connection viewer: recorded scenario, ten-heart rows, default-hidden full graph, node selection, pause, mixed transport, backward seeks and recorded-peer cards passed."

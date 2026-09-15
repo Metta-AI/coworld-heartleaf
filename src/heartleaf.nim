@@ -396,6 +396,8 @@ type
     mapIndex: int
     speaker: ChatFeedPerson
     hearers: seq[ChatFeedPerson]
+    connectionPartner: string
+      ## A recorded conversation peer, preferred over a nearby bystander.
     message: string
     aired: bool
       ## Shown by the feed in this camera shot; never expose queued future lines.
@@ -3600,6 +3602,8 @@ proc directorCard(sim: SimServer, item: ChatFeedItem, playerIndex, width: int): 
     seat = player.homeFlag - HomeMapIndexBase
   var listener = -1
   for hearer in item.hearers:
+    if item.connectionPartner.len > 0 and hearer.name != item.connectionPartner:
+      continue
     for i, candidate in sim.players:
       if candidate.playerName == hearer.name:
         listener = i
@@ -5533,6 +5537,10 @@ proc captureChatFeed(sim: SimServer) =
       encounterId: sim.encounterIdForSeat(seat)
     )
     for slot in audience:
+      let listenerSeat = sim.players[slot].homeFlag - HomeMapIndexBase
+      if item.connectionPartner.len == 0 and item.encounterId > 0 and
+          sim.encounterIdForSeat(listenerSeat) == item.encounterId:
+        item.connectionPartner = sim.players[slot].playerName
       item.hearers.add(ChatFeedPerson(
         name: sim.players[slot].playerName,
         gnomeIndex: sim.players[slot].gnomeIndex
