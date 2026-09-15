@@ -61,6 +61,7 @@ jobs:
           nim r tests/viewer_navigation.nim
           nim r tests/viewer_controls.nim
           nim r tests/real_replay_director.nim
+          nim r tests/replay_dialogue_boundaries.nim
           nim r tests/bedtime_viewer.nim
           nim r tests/routes.nim
           nim r tools/record_viewer_scenario.nim out/viewer-scenario.replay

@@ -24,7 +24,7 @@ var state = newReplayViewerState()
 state.setViewerSize(1440,900)
 var visited: HashSet[int]
 var nights: HashSet[string]
-var frames, firstShotFrames, currentShotFrames, previousId: int
+var frames, firstShotFrames, currentShotFrames, previousId, endedShotFrames: int
 var captured: HashSet[int]
 var aired: HashSet[string]
 while replay.playing and frames < 18000:
@@ -33,6 +33,13 @@ while replay.playing and frames < 18000:
   if sim.replayNightActive:
     nights.incl($sim.replayNights[sim.replayNightIndex].day & ":" & $min(9,int(sim.replayNightTime/8.0)))
   let id = sim.directorCommitEncounter
+  if sim.convQueueCommitted and
+      sim.tickCount >= sim.convQueue[sim.convQueueIndex].deathTick:
+    inc endedShotFrames
+  else:
+    endedShotFrames = 0
+  doAssert endedShotFrames < 24,
+    "dialogue must finish before actors leave; no invisible backlog at curfew"
   if id != previousId: currentShotFrames = 0
   previousId = id
   inc currentShotFrames
@@ -64,7 +71,7 @@ doAssert not replay.playing and sim.tickCount==replay.replayMaxTick()
 doAssert nights.len==20, "all nine rankings and update must appear on both nights"
 doAssert visited.len==12, "every recorded conversation must receive a turn"
 doAssert sim.convQueueIndex==sim.convQueue.len
-doAssert aired.len >= 20, "dialogue must still appear while empty time is compressed"
+doAssert aired.len >= 49, "room cuts must preserve all previously aired dialogue"
 echo "Real replay director: ",frames," frames, ",visited.len,
   " conversations, ",aired.len," distinct aired lines; first shot ",
   float(firstShotFrames)/24.0,"s. All replay hashes match."
@@ -79,11 +86,18 @@ for setting in 0..7:
   run.speedIndex = setting
   trial.buildConversationQueue(run.replayMaxTick())
   var count = 0
+  var endedFrames = 0
   var seen:HashSet[int]
   var seenNights:HashSet[int]
   while run.playing and count < 96000:
     trial.advanceReplayPresentation(run)
     inc count
+    if trial.convQueueCommitted and
+        trial.tickCount >= trial.convQueue[trial.convQueueIndex].deathTick:
+      inc endedFrames
+    else:
+      endedFrames = 0
+    doAssert endedFrames < 24, "no invisible dialogue backlog at any speed"
     if trial.replayNightActive:seenNights.incl(trial.replayNightIndex)
     if trial.directorCommitEncounter>0:seen.incl(trial.directorCommitEncounter)
     doAssert not run.hashValidationFailed

@@ -399,6 +399,8 @@ type
     message: string
     aired: bool
       ## Shown by the feed in this camera shot; never expose queued future lines.
+    everAired: bool
+      ## Reading progress survives room cuts; a seek rebuilds the feed.
     encounterId: int
       ## The conversation this line was spoken in, from the replay's
       ## records; zero when unknown (live play, dinner talk, shouts).
@@ -531,6 +533,8 @@ type
       ## Overview-to-full-window framing follows the same camera glide.
     replayPresentationDirty: bool
       ## A paused seek redraws its destination once, without animating.
+    replayBoundaryChatsCaptured: bool
+      ## The final tick's chats were queued before its actors leave the scene.
     replayPresentationTime: float
       ## Playback time for dialogue; pausing freezes its remaining read time.
     directorWideTicks: int
@@ -3283,6 +3287,20 @@ proc releaseDirectorCommit(sim: SimServer) =
     sim.startDirectorTween()
     echo "Director commit out at tick ", sim.tickCount
 
+proc committedDialogueMap(sim: SimServer): int =
+  ## Follow unread dialogue even when a conversation moves into a dinner room.
+  ## The room tour resumes after the committed speaker's reading time.
+  if sim.convQueueCommitted:
+    let index = sim.chatFeedIndex
+    if index >= 0 and index < sim.chatFeed.len and
+        sim.chatFeed[index].encounterId == sim.chatFeedScope and
+        sim.replayPresentationTime - sim.chatFeedShownAt < ChatFeedShowSeconds:
+      return sim.chatFeed[index].mapIndex
+    for item in sim.chatFeed:
+      if not item.everAired and item.encounterId == sim.chatFeedScope:
+        return item.mapIndex
+  -1
+
 proc updateDirectorCamera*(sim: SimServer, snap = false) =
   ## Advances the director cut's camera one frame. The cut is fully
   ## automated: the wide shot of the village while nothing happens, a
@@ -3317,6 +3335,12 @@ proc updateDirectorCamera*(sim: SimServer, snap = false) =
     if host >= 0 and sim.players[host].mapIndex == mapIndex and
         sim.homeVisitors(mapIndex, host).len > 0:
       dinnerHouses.add(houseIndex)
+  let dialogueMap = sim.committedDialogueMap()
+  if dialogueMap == MainMapIndex:
+    dinnerHouses.setLen(0)
+  elif dialogueMap >= HomeMapIndexBase and
+      dialogueMap < HomeMapIndexBase + HouseCount:
+    dinnerHouses = @[dialogueMap - HomeMapIndexBase]
   if dinnerHouses.len > 0:
     if sim.directorDinnerTtl <= 0 or
         sim.directorDinnerHouse notin dinnerHouses:
@@ -3342,6 +3366,8 @@ proc updateDirectorCamera*(sim: SimServer, snap = false) =
       sim.directorTweenLeft = 0
       sim.chatFeedIndex = -1
       for item in sim.chatFeed.mitems: item.aired = false
+      # Clear the visible cards, retaining each line's reading progress so
+      # visiting another room cannot replay the outdoor dialogue history.
     sim.directorFrameBlend = 1.0
     if snap:
       sim.directorCamX = 0
@@ -3357,6 +3383,8 @@ proc updateDirectorCamera*(sim: SimServer, snap = false) =
   sim.directorDinnerTtl = 0
   if sim.directorSceneMap != MainMapIndex:
     sim.directorSceneMap = MainMapIndex
+    sim.chatFeedIndex = -1
+    for item in sim.chatFeed.mitems: item.aired = false
     sim.directorCamX = 0
     sim.directorCamY = 0
     sim.directorCamW = mapW
@@ -5554,7 +5582,7 @@ proc chatFeedNextIndex(sim: SimServer, fromIndex: int): int =
   ## admits, or -1 when none has been captured yet.
   var i = max(fromIndex, 0)
   while i < sim.chatFeed.len:
-    if sim.chatFeedScopeMatches(i):
+    if not sim.chatFeed[i].everAired and sim.chatFeedScopeMatches(i):
       return i
     inc i
   -1
@@ -5562,6 +5590,8 @@ proc chatFeedNextIndex(sim: SimServer, fromIndex: int): int =
 proc replayDialoguePending(sim: SimServer): bool =
   ## A queued or still-readable line in the current shot. Empty time
   ## between model replies must not inherit the dialogue slow motion.
+  if sim.committedDialogueMap() >= 0:
+    return true
   let index = sim.chatFeedIndex
   if index < 0 or index >= sim.chatFeed.len or
       not sim.chatFeedScopeMatches(index):
@@ -5594,6 +5624,7 @@ proc advanceChatFeed*(sim: SimServer, now = epochTime()) =
     if first >= 0:
       sim.chatFeedIndex = first
       sim.chatFeed[first].aired = true
+      sim.chatFeed[first].everAired = true
       sim.chatFeedShownAt = now
     return
   if sim.chatFeedIndex >= sim.chatFeed.len or
@@ -5605,17 +5636,20 @@ proc advanceChatFeed*(sim: SimServer, now = epochTime()) =
     if next >= 0:
       sim.chatFeedIndex = next
       sim.chatFeed[next].aired = true
+      sim.chatFeed[next].everAired = true
       sim.chatFeedShownAt = now
     else:
       sim.chatFeedIndex = sim.chatFeed.len
     return
   sim.chatFeed[sim.chatFeedIndex].aired = true
+  sim.chatFeed[sim.chatFeedIndex].everAired = true
   if now - sim.chatFeedShownAt < ChatFeedShowSeconds:
     return
   let next = sim.chatFeedNextIndex(sim.chatFeedIndex + 1)
   if next >= 0:
     sim.chatFeedIndex = next
     sim.chatFeed[next].aired = true
+    sim.chatFeed[next].everAired = true
     sim.chatFeedShownAt = now
 
 proc advanceChatFeedNow*(sim: SimServer, now = epochTime()) =
@@ -5635,23 +5669,28 @@ proc advanceChatFeedNow*(sim: SimServer, now = epochTime()) =
     sim.advanceChatFeed(now)
     return
   sim.chatFeed[sim.chatFeedIndex].aired = true
+  sim.chatFeed[sim.chatFeedIndex].everAired = true
   let next = sim.chatFeedNextIndex(sim.chatFeedIndex + 1)
   if next >= 0:
     sim.chatFeedIndex = next
     sim.chatFeed[next].aired = true
+    sim.chatFeed[next].everAired = true
     sim.chatFeedShownAt = now
 
 proc step*(sim: SimServer, inputs: openArray[InputState]) =
   ## Advances the Heartleaf simulation by one tick.
   inc sim.tickCount
   if sim.scoreTicks > 0:
+    sim.replayBoundaryChatsCaptured = false
     dec sim.scoreTicks
     sim.updateMessages()
     if sim.scoreTicks <= 0:
       sim.startDay()
     return
 
-  sim.captureChatFeed()
+  if not sim.replayBoundaryChatsCaptured:
+    sim.captureChatFeed()
+  sim.replayBoundaryChatsCaptured = false
   for i in 0 ..< sim.players.len:
     let input =
       if i < inputs.len:
@@ -5844,6 +5883,7 @@ proc restoreKeyframe(sim: SimServer, bytes: string) =
   sim.dayNumber = state.dayNumber
   sim.scoreTicks = state.scoreTicks
   sim.dinnerDone = state.dinnerDone
+  sim.replayBoundaryChatsCaptured = false
 
 proc buildReplayKeyframes*(
   replay: var ReplayPlayer,
@@ -6379,6 +6419,15 @@ proc advanceReplayPresentation*(
       sim.releaseDirectorCommit()
       sim.updateDirectorCamera(snap=true)
       return
+    if sim.convQueueCommitted and
+        sim.tickCount == sim.convQueue[sim.convQueueIndex].deathTick - 1 and
+        not sim.replayBoundaryChatsCaptured:
+      # Chats stamped at this tick normally enter the feed on the next step,
+      # which may send everyone home. Air them while their actors are visible;
+      # the eventual simulation step must not capture those same chats twice.
+      replay.applyReplayEvents(sim)
+      sim.captureChatFeed()
+      sim.replayBoundaryChatsCaptured = true
     # Speed is a multiplier of the director's current base pace at every
     # setting. Slow motion must never advance faster than the 1X show.
     let
@@ -6402,8 +6451,11 @@ proc advanceReplayPresentation*(
     sim.directorShowAccum = sim.directorShowAccum mod denominator
     if sim.convQueue.len > 0:
       if sim.convQueueCommitted:
+        # Drain dialogue while its speakers are still in the scene. Crossing
+        # curfew first sends them home and hides cards during their read time.
         ticksThisFrame = min(ticksThisFrame, max(0,
-          sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount))
+          sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount -
+          (if dialoguePending or not sim.replayBoundaryChatsCaptured: 1 else: 0)))
       elif sim.convQueueIndex < sim.convQueue.len:
         ticksThisFrame = min(ticksThisFrame, max(0,
           sim.convQueue[sim.convQueueIndex].birthTick - sim.tickCount))

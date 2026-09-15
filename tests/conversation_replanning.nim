@@ -2,8 +2,8 @@
 ## into fresh plans without restarting the unrelated villagers' plans.
 import std/[algorithm, os, sequtils, tables]
 import heartleaf
-import heartleaf/[brains, bedrock_client, common, decisions, executor, observation,
-  protocol, souls, villager]
+import heartleaf/[brains, bedrock_client, decisions, executor, observation, protocol,
+  souls, villager]
 
 putEnv("HEARTLEAF_CONVERSATION_GAP_MINUTES", "1")
 putEnv("HEARTLEAF_CONVERSATION_TICK_SECONDS", "0.5")
