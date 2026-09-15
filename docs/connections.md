@@ -3,7 +3,7 @@
 Viewer stability PR #50 is merged. This branch includes master at `4ee856b`,
 including PR #52’s evaluation tooling. Bedtime interviews retain their own
 validation while ordinary actions preserve the strict evaluation failure policy.
-Merge #50 first, then rebase onto master; the connections work stays in PR #51.
+The connections work stays in PR #51.
 
 [Bedtime ranking screenshots](connections/bedtime-review-2026-09-11/README.md) ·
 [World and director screenshots](connections/director-repair-2026-09-11/README.md) ·
