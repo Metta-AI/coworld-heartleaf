@@ -87,3 +87,19 @@ usage: `python3 tests/claude_subscription_bridge_test.py`.
 The recorded two-day evaluation, its failure cases and behavioral observations are
 [available here](connections/claude-observations.md). Reproduce its offline viewer
 frames with `nim r tools/render_connection_replay.nim docs/connections/claude/two-day.bitreplay out/claude-review`.
+
+## PR replay evidence
+
+For a Heartleaf PR, include a reviewed replay link and its source/replay hashes
+in the PR description. Behavior changes need a fresh real episode; viewer-only
+changes may reuse a clearly identified recording rendered with the new viewer.
+Watch early, middle, dinner and bedtime stages, inspect movement against the
+actual decisions, and exercise mixed playback controls. Do not treat a successful
+build or matching simulation hashes as a substitute for watching the replay.
+
+The [September 14 review](connections/review-2026-09-14/README.md) is a complete
+example with a public interactive viewer and MP4 video. Publish a new immutable
+revision directory on the existing `codex/replay-pages` branch; preserve old links.
+Share only the portable recording, viewer/video and curated evidence, not local
+provider logs or credentials. Record unsuccessful outcomes and remaining model
+limitations alongside the successful checks.

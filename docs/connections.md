@@ -5,7 +5,8 @@ including PR #52’s evaluation tooling. Bedtime interviews retain their own
 validation while ordinary actions preserve the strict evaluation failure policy.
 The connections work stays in PR #51.
 
-[Bedtime ranking screenshots](connections/bedtime-review-2026-09-11/README.md) ·
+[September 14 movement and replay review](connections/review-2026-09-14/README.md) ·
+[Earlier bedtime ranking screenshots](connections/bedtime-review-2026-09-11/README.md) ·
 [World and director screenshots](connections/director-repair-2026-09-11/README.md) ·
 [Run a real local Claude-subscription playtest](claude-subscription-replays.md).
 
@@ -18,20 +19,39 @@ Play resumes the sequence. Each gnome gets eight seconds at 1X, followed by the
 **Connections updated** screen, with before/after hearts. The left leaderboard
 keeps the old hearts through the rankings and switches at the update screen.
 
-The **Night 1** and **Night 2** buttons jump directly to those moments and pause.
+The **Night** buttons jump directly to each recorded night and pause.
 The graph stays an optional debug view. Missing or timed-out interviews are
 labelled as unavailable, with zero contribution; no ranking is invented.
 
 Both nights, all nine gnome pages and both update screens appear in continuous
-playback of the real recording. All 12 conversations and 49 distinct aired lines
-remain; the full 1X presentation now takes **12,993 frames (~9 minutes)** including
-bedtime reading time. All eight speeds complete with matching simulation hashes.
+playback of the earlier two-day recording. All 12 conversations and at least 49
+distinct aired lines remain. All eight speeds complete with matching simulation hashes.
 `tests/bedtime_viewer.nim` also checks page/rank selection, pause, jump, rewind,
-next conversation, restart and compact layouts. Reviewed images are actual
-protocol renders; browser/GPU interaction is unverified while the Mac is locked.
+next conversation, restart and compact layouts. Current browser checks and fresh
+model-run evidence are recorded in the September 14 review above; older galleries
+remain dated historical evidence.
 
-This uses the existing recorded game. Its sparse decision timing and stationary
-gnomes are historical actions, and have not been replaced by a new simulation.
+## Movement and dialogue follow-up — September 14
+
+Leaving a conversation now requests fresh movement decisions immediately for both
+the departing gnome and a dissolved singleton. Abandoned conversation replies
+cannot overwrite those new plans. Unrelated gnomes retain their current plans.
+The movement schedule and game rules otherwise stay unchanged.
+
+The action prompt explains that speech does not move a gnome: use `bye`, then
+choose the movement action. Observations distinguish unchecked gardens from an
+already-completed gathering task, so the model can choose what to do next. There
+is no forced wandering, conversation limit or reward change.
+While talking, the report names actual conversation members separately from
+nearby bystanders. A gnome can use `talk_to` to bring a bystander into the group
+instead of repeatedly expecting an answer from someone outside its speaking turn.
+
+The viewer reads final dialogue before a dinner/curfew transition and follows the
+map where it was spoken. Room cuts preserve which lines have already aired, so
+old outdoor speech is not repeated at bedtime. Connection cards prefer a recorded
+conversation peer over a nearby bystander who happened to hear the same line.
+A goodbye stamped on the conversation exit tick remains in its original shot
+and is read once before the director moves on.
 
 ## Director repair — September 11 (before bedtime presentation)
 
@@ -52,8 +72,8 @@ The unchanged real recording now reaches all **12 conversations** in **8,821 fra
 at 1X, with **49 distinct aired lines**; the first shot is **36.7 seconds**.
 `tests/real_replay_director.nim` drives the same frame entry point as the static
 viewer, checks pause and every conversation, and runs all eight playback speeds.
-These are native/protocol checks; browser/GPU click-through remains unavailable
-while the Mac is locked. The old game trace is preserved, including its historical
+Those September 11 figures describe native/protocol checks. The September 14
+review adds actual Chrome click-through and a fresh complete recording. The old game trace is preserved, including its historical
 model decisions and interview timeouts.
 
 ## What ships
@@ -141,13 +161,14 @@ the static WASM build. New viewer checks exercise selection, reflection pages,
 pause, next/previous, speeds, end/restart, and forward/backward seeks across days.
 
 The authored fixture does not validate model ranking quality or request latency.
-The [current screenshot gallery](connections/director-repair-2026-09-11/README.md) uses the
-separate **real Claude replay**, rendered with the latest viewer code. It shows
+The [September 11 screenshot gallery](connections/director-repair-2026-09-11/README.md) uses the
+separate **historical real Claude replay**, rendered with that dated viewer code. It shows
 numeric points, ten Connections hearts, the “Connection with Anton” card label,
-and the full debug graph both closed and explicitly opened. These are offline
-renders of actual drawing packets; OS/browser click-through remains unverified.
+and the full debug graph both closed and explicitly opened. These historical
+images are offline protocol renders; current native and browser evidence is in
+the [September 14 review](connections/review-2026-09-14/README.md).
 
-## Real Claude-subscription playtest
+## Earlier real Claude-subscription playtest — September 10
 
 A separate nine-gnome, two-day run uses the normal example souls and actual Haiku
 4.5 replies through the local Claude.ai subscription. It produced 15 valid bedtime
@@ -180,6 +201,7 @@ transitions, map geometry, font sizes, muted ground texture and original portrai
 pixels are preserved; the director repair above changes pacing through silence.
 Its removed logo and bricks are not restored.
 
-The September 14 shipping scope is frozen to the implemented connections and
-replay features. Movement replanning, fresh model campaigns, reward/winner
-changes and additional UI design are deferred.
+The September 14 follow-up includes the user-requested immediate replanning
+repair, explicit action observations and fresh local episode. Further model
+campaigns, strategic behavior tuning, reward/winner changes and additional UI
+design are deferred.
