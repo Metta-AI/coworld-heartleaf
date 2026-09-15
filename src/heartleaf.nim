@@ -5501,19 +5501,22 @@ proc observe*(sim: SimServer, playerIndex: int): Observation =
           ViewportWidth, ViewportHeight
         )
 
-proc encounterIdForSeat(sim: SimServer, seat: int): int =
-  ## The open conversation this house seat sits in at the current
-  ## tick, from the replay's conversation records; zero in live play
-  ## or when the seat is not in one.
+proc encounterIdForSeat(sim: SimServer, seat, speechTick: int): int =
+  ## Membership when a fresh line was spoken, including a farewell stamped
+  ## on that member's exit tick. Never carry an old group into later speech.
   if seat < 0 or sim.conversationTimeline.events.len == 0:
     return 0
-  for group in sim.conversationTimeline.encounterGroupsAt(sim.tickCount):
+  for group in sim.conversationTimeline.encounterGroupsAt(speechTick):
     for member in group.members:
       if member == seat:
         return group.id
+  for event in sim.conversationTimeline.events:
+    if event.tick == speechTick and event.seat == seat and
+        not event.enter and not event.reset and not event.spokenTurn:
+      return event.encounterId
   0
 
-proc captureChatFeed(sim: SimServer) =
+proc captureChatFeed(sim: SimServer, speechTick: int) =
   ## Queues freshly spoken chats with their audience for the delay chat.
   ## Messages nobody heard are skipped.
   for i, player in sim.players:
@@ -5534,12 +5537,12 @@ proc captureChatFeed(sim: SimServer) =
         gnomeIndex: player.gnomeIndex
       ),
       message: player.message,
-      encounterId: sim.encounterIdForSeat(seat)
+      encounterId: sim.encounterIdForSeat(seat, speechTick)
     )
     for slot in audience:
       let listenerSeat = sim.players[slot].homeFlag - HomeMapIndexBase
       if item.connectionPartner.len == 0 and item.encounterId > 0 and
-          sim.encounterIdForSeat(listenerSeat) == item.encounterId:
+          sim.encounterIdForSeat(listenerSeat, speechTick) == item.encounterId:
         item.connectionPartner = sim.players[slot].playerName
       item.hearers.add(ChatFeedPerson(
         name: sim.players[slot].playerName,
@@ -5697,7 +5700,7 @@ proc step*(sim: SimServer, inputs: openArray[InputState]) =
     return
 
   if not sim.replayBoundaryChatsCaptured:
-    sim.captureChatFeed()
+    sim.captureChatFeed(sim.tickCount - 1)
   sim.replayBoundaryChatsCaptured = false
   for i in 0 ..< sim.players.len:
     let input =
@@ -5949,6 +5952,13 @@ proc buildConversationQueue*(sim: SimServer, finalTick: int) =
   sim.convQueue = sim.conversationTimeline.conversationSpans(finalTick)
   # Bedtime closes the day's talk even in recordings missing curfew exits.
   for span in sim.convQueue.mitems:
+    # An explicit goodbye is recorded on the exit tick. Include that tick so
+    # the boundary preloader can air it before the queue releases the shot.
+    for event in sim.conversationTimeline.events:
+      if event.encounterId == span.id and event.tick == span.deathTick and
+          not event.enter and not event.reset and not event.spokenTurn:
+        span.deathTick = min(finalTick, span.deathTick + 1)
+        break
     for night in sim.replayNights:
       if span.birthTick < night.tick and span.deathTick > night.tick:
         span.deathTick = night.tick
@@ -6434,7 +6444,7 @@ proc advanceReplayPresentation*(
       # which may send everyone home. Air them while their actors are visible;
       # the eventual simulation step must not capture those same chats twice.
       replay.applyReplayEvents(sim)
-      sim.captureChatFeed()
+      sim.captureChatFeed(sim.tickCount)
       sim.replayBoundaryChatsCaptured = true
     # Speed is a multiplier of the director's current base pace at every
     # setting. Slow motion must never advance faster than the 1X show.

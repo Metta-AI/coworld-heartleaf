@@ -2,6 +2,8 @@
 ## even when dinner-room cuts compete with a committed outdoor conversation.
 import std/[importutils, sets, strutils, tables]
 import heartleaf, replays
+import heartleaf/encounters
+import bitworld/spriteprotocol
 
 privateAccess(SimServer)
 
@@ -146,3 +148,65 @@ for key, count in selectionCounts:
 doAssert not replay.hashValidationFailed
 
 echo "Replay boundary dialogue airs once on its speakers' map, survives room cuts, and replays after a seek."
+
+# A real `bye` is stamped on the conversation's exit tick, rather than on
+# curfew's preceding tick. Keep the shot until that last line has been read.
+block departureTick:
+  let
+    finalPath = "docs/connections/review-2026-09-14/episode.bitreplay"
+    finalData = loadReplay(finalPath)
+    finalCfg = finalData.replaySimConfig()
+    finalSim = initSimServer(finalCfg.seed, finalCfg.dayTicks)
+  finalSim.attachConversationTimeline(finalData, finalPath)
+  var finalReplay = initReplayPlayer(finalData)
+  finalReplay.buildReplayKeyframes(finalCfg.seed, finalCfg.dayTicks)
+  finalReplay.looping = false
+  finalSim.buildConversationQueue(finalReplay.replayMaxTick())
+  var departureQueue = -1
+  for i, span in finalSim.convQueue:
+    if span.id == 6: departureQueue = i
+  doAssert departureQueue >= 0
+  finalReplay.applyReplayConversation(finalSim, departureQueue)
+  let farewell = "The portal calls. Tomorrow waits at Yura's door."
+  var aired = false
+  var count = 0
+  for frame in 0 ..< 4000:
+    finalSim.advanceReplayPresentation(finalReplay)
+    var copies = 0
+    for item in finalSim.chatFeed:
+      if item.message == farewell:
+        inc copies
+        if item.everAired:
+          aired = true
+          doAssert item.encounterId == 6
+          doAssert item.connectionPartner == "Anton"
+          doAssert finalSim.directorSceneMap == item.mapIndex
+    count = max(count, copies)
+    if finalSim.convQueueIndex > departureQueue: break
+  doAssert aired, "Dima's farewell on the exit tick must air in his conversation"
+  doAssert count == 1, "preloaded departure speech must not be queued twice"
+  doAssert not finalReplay.hashValidationFailed
+
+echo "Recorded departure-tick farewell stays with its conversation and actual partner."
+
+block departureAttributionExpires:
+  let talk = initSimServer(42)
+  for seat in [1, 7]:
+    let player = talk.addPlayer("departure", seat)
+    talk.players[player].mapIndex = 0
+    talk.players[player].x = 320 + player * 10
+    talk.players[player].y = 300
+  talk.conversationTimeline = parseConversationTimeline("""
+{"kind":"convo-enter","tick":0,"day":1,"seat":1,"text":"conversation id=1 members=Anton,Dima turn=1"}
+{"kind":"convo-exit","tick":1,"day":1,"seat":7,"text":"conversation id=1 turn=2"}
+{"kind":"convo-exit","tick":1,"day":1,"seat":1,"text":"conversation id=1 turn=2"}
+""")
+  talk.step(newSeq[InputState](2))
+  talk.applyPlayerChat(1, "Goodbye, Anton!")
+  talk.step(newSeq[InputState](2))
+  doAssert talk.chatFeed[^1].encounterId == 1
+  doAssert talk.chatFeed[^1].connectionPartner == "Anton"
+  talk.applyPlayerChat(1, "A new day awaits.")
+  talk.step(newSeq[InputState](2))
+  doAssert talk.chatFeed[^1].encounterId == 0,
+    "later speech must not inherit an already-departed conversation"
