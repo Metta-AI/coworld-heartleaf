@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Heartleaf Model Eval</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #fffdf4;
+    --surface-alt: #f8f6ef;
+    --fg: #111827;
+    --fg-subtle: #555555;
+    --fg-muted: #6b6560;
+    --navy: #1a3875;
+    --navy-soft: #5573a0;
+    --sage: #5d6d41;
+    --terracotta: #945637;
+    --gold: #80601f;
+    --border: #e4dac8;
+    --border-strong: #d4c9b5;
+    --grid: #ece5d6;
+    --series-1: #1a3875;
+    --series-2: #945637;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #1a1917;
+      --surface-alt: #2d2a28;
+      --fg: #efeae3;
+      --fg-subtle: #c6bfb4;
+      --fg-muted: #978f84;
+      --navy: #aeb8d2;
+      --navy-soft: #929fbb;
+      --sage: #a3b88c;
+      --terracotta: #d19a7a;
+      --gold: #c9a45a;
+      --border: #3c3835;
+      --border-strong: #4d4843;
+      --grid: #2f2c29;
+      --series-1: #aeb8d2;
+      --series-2: #d19a7a;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #1a1917;
+    --surface-alt: #2d2a28;
+    --fg: #efeae3;
+    --fg-subtle: #c6bfb4;
+    --fg-muted: #978f84;
+    --navy: #aeb8d2;
+    --navy-soft: #929fbb;
+    --sage: #a3b88c;
+    --terracotta: #d19a7a;
+    --gold: #c9a45a;
+    --border: #3c3835;
+    --border-strong: #4d4843;
+    --grid: #2f2c29;
+    --series-1: #aeb8d2;
+    --series-2: #d19a7a;
+  }
+
+  html { scroll-snap-type: y mandatory; scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 18px;
+    line-height: 1.45;
+    padding-inline: clamp(16px, 4vw, 40px);
+  }
+  .slide {
+    scroll-snap-align: start;
+    min-height: 100svh;
+    box-sizing: border-box;
+    max-width: 1120px;
+    margin-inline: auto;
+    padding-block: clamp(32px, 6vh, 64px) 56px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 24px;
+    position: relative;
+  }
+  .slide + .slide { border-top: 1px solid var(--border); }
+  .eyebrow {
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .eyebrow .count { font-variant-numeric: tabular-nums; font-weight: 400; }
+  h1, h2 {
+    font-family: "Newsreader", Georgia, "Times New Roman", serif;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0;
+    line-height: 1.08;
+  }
+  h1 { font-size: clamp(38px, 6vw, 64px); }
+  h2 { font-size: clamp(30px, 4.2vw, 46px); }
+  h3 {
+    font-family: "Source Sans 3", sans-serif;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--navy);
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+  p { margin: 0; max-width: 62ch; }
+  .lede { font-size: clamp(20px, 2.2vw, 24px); line-height: 1.4; color: var(--fg-subtle); max-width: 40ch; font-family: "Newsreader", Georgia, serif; font-style: italic; }
+  .kicker { color: var(--fg-subtle); }
+  strong { font-weight: 600; }
+  .num { font-variant-numeric: tabular-nums; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 28px 40px; }
+  .cols-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 28px 48px; }
+  ul { margin: 0; padding-left: 1.1em; }
+  li { margin-block: 6px; }
+  li::marker { color: var(--fg-muted); }
+
+  /* Ranked lists on the results slide */
+  ol.rank { list-style: none; padding: 0; margin: 0; }
+  ol.rank li {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 12px;
+    padding-block: 6px;
+    border-bottom: 1px solid var(--border);
+    margin: 0;
+    align-items: baseline;
+  }
+  ol.rank li:last-child { border-bottom: none; }
+  ol.rank .name { font-weight: 600; }
+  ol.rank .name small { font-weight: 400; color: var(--fg-muted); font-size: 14px; margin-left: 6px; }
+  ol.rank .val { font-variant-numeric: tabular-nums; color: var(--fg-subtle); white-space: nowrap; }
+  ol.rank .val b { color: var(--fg); font-weight: 600; }
+
+  /* Selection slide: tasks table */
+  table { border-collapse: collapse; width: 100%; font-size: 17px; }
+  th, td { text-align: left; padding: 6px 12px 6px 0; vertical-align: top; border-bottom: 1px solid var(--border); }
+  th { font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  .table-wrap { overflow-x: auto; }
+
+  /* Results slide: balanced 2x2 */
+  .results { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 24px 56px; align-items: start; }
+  .results h3 { min-height: 2.6em; display: flex; align-items: end; }
+  .results .foot { min-height: 2.6em; }
+
+  /* Slide 2: the 41 split */
+  .split { display: grid; gap: 14px; }
+  .split-num { display: grid; grid-template-columns: 64px 1fr; gap: 16px; align-items: start; }
+  .split-num .big { font-family: "Newsreader", Georgia, serif; font-size: 56px; line-height: 0.9; color: var(--navy); font-variant-numeric: tabular-nums; text-align: center; }
+  .split-num p { color: var(--fg-subtle); font-size: 17px; max-width: 80ch; }
+  svg.bracket { display: block; margin-block: -10px -6px; }
+  svg.bracket line { stroke: var(--border-strong); stroke-width: 1.5; }
+  .under-35 { gap: 24px 48px; }
+  @media (max-width: 700px) { svg.bracket { display: none; } }
+
+  /* Slide 3: process diagram */
+  svg.flow text { font-size: 14px; }
+  svg.flow .step-label { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; fill: var(--navy); font-weight: 600; }
+  svg.flow .step-title { font-size: 16px; font-weight: 600; fill: var(--fg); }
+  svg.flow .step-body { fill: var(--fg-subtle); }
+  svg.flow .arrow { stroke: var(--border-strong); stroke-width: 1.5; }
+  svg.flow .arrhead { fill: var(--border-strong); }
+  svg.flow .seat { fill: var(--navy); }
+  svg.flow .seat.q { fill: var(--navy-soft); opacity: 0.5; }
+  svg.flow .seat.out { fill: var(--bg); stroke: var(--terracotta); stroke-width: 2; }
+
+  .facts { display: flex; flex-wrap: wrap; gap: 8px 32px; color: var(--fg-subtle); font-size: 16px; }
+  .facts span b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* Charts */
+  figure { margin: 0; }
+  figcaption { font-size: 14px; color: var(--fg-muted); margin-top: 6px; max-width: 70ch; }
+  .chart-title { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+  svg { width: 100%; height: auto; display: block; overflow: visible; }
+  svg text { font-family: "Source Sans 3", sans-serif; fill: var(--fg-subtle); font-size: 12px; font-variant-numeric: tabular-nums; }
+  svg .axis line, svg .axis path { stroke: var(--border-strong); }
+  svg .grid line { stroke: var(--grid); }
+  svg .lbl { fill: var(--fg); font-size: 12px; }
+  svg .axis-title { fill: var(--fg-muted); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+  svg .pt { fill: var(--series-1); stroke: var(--bg); stroke-width: 2; }
+  svg .pt.hollow { fill: var(--bg); stroke: var(--series-1); stroke-width: 2; }
+  svg .bar { fill: var(--series-1); }
+  svg .bar.dim { fill: var(--navy-soft); opacity: 0.55; }
+  svg .hit { fill: transparent; }
+  svg .region { fill: none; stroke: var(--navy-soft); stroke-width: 1.5; stroke-dasharray: 6 5; }
+  svg .region-label { fill: var(--navy-soft); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; }
+  .legend { display: flex; gap: 20px; font-size: 13px; color: var(--fg-subtle); margin-top: 4px; flex-wrap: wrap; }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; background: var(--series-1); }
+  .legend span.hollow::before { background: var(--bg); border: 2px solid var(--series-1); width: 7px; height: 7px; }
+  .legend span.dim::before { background: var(--navy-soft); opacity: 0.55; border-radius: 2px; }
+  .tip {
+    position: fixed; pointer-events: none; background: var(--fg); color: var(--bg);
+    padding: 6px 10px; font-size: 13px; border-radius: 3px; opacity: 0; transition: opacity .1s;
+    max-width: 260px; z-index: 5; font-variant-numeric: tabular-nums;
+  }
+
+  .verdict { font-family: "Newsreader", Georgia, serif; font-size: clamp(22px, 2.6vw, 30px); line-height: 1.3; max-width: 36ch; }
+  .verdict em { color: var(--navy); font-style: italic; }
+  .foot { font-size: 14px; color: var(--fg-muted); margin-top: 8px; }
+  .nav-hint { position: fixed; right: 20px; bottom: 14px; font-size: 12px; color: var(--fg-muted); letter-spacing: 0.04em; }
+  @media (max-width: 600px) { .nav-hint { display: none; } body { font-size: 17px; } }
+  :focus-visible { outline: 2px solid var(--navy-soft); outline-offset: 3px; }
+</style>
+</head>
+<body>
+
+<!-- 1 · Why -->
+<section class="slide" id="s1">
+  <div class="eyebrow"><span>Heartleaf model evaluation &middot; September 9&ndash;11, 2026</span><span class="count">1 / 7</span></div>
+  <h1>Which models can play our coworlds well, and cheaply?</h1>
+  <p class="lede">A preliminary test: how well does each hosted model play Heartleaf when given the current best soul file?</p>
+  <div class="cols">
+    <div>
+      <h3>The larger question</h3>
+      <p>Inference is most of what a coworld game costs. We want to know which models play well, and which cheaper ones we could restrict players to without hurting their play.</p>
+    </div>
+    <div>
+      <h3>This experiment</h3>
+      <p>Hold the strategy constant and vary only the model. The soul file is the leaderboard's rank-1 Heartleaf policy, "tablekeeper v2". Each model gets the same prompt, the same seats, the same seeds, and the same 20-second clock.</p>
+    </div>
+  </div>
+  <div class="facts">
+    <span><b>41</b> models</span><span><b>50</b> seven-day games</span><span><b>450</b> model-game observations</span><span><b>$1,222</b> total spend</span>
+  </div>
+</section>
+
+<!-- 2 · Model selection -->
+<section class="slide" id="s2">
+  <div class="eyebrow"><span>Experimental design &middot; model selection</span><span class="count">2 / 7</span></div>
+  <h2>41 models tested</h2>
+  <div class="split">
+    <div class="split-num"><span class="big">6</span><p>hand-picked for the first round, before the candidate list existed: GPT-6 Astra, Fable 5.1, Haiku 4.5, Gemini 3.8 Flash, and dated snapshots of DeepSeek V4 Pro and Qwen 3.8 Max.</p></div>
+    <div class="split-num"><span class="big">35</span><p>from OpenRouter's public task rankings: the top ten by <strong>token share</strong> and by <strong>spend share</strong> for each of six tasks, deduplicated. 21 came from token share, 22 from spend share, 8 from both.</p></div>
+  </div>
+  <svg class="bracket" aria-hidden="true" height="34" width="100%">
+    <line x1="32" y1="0" x2="32" y2="17"/>
+    <line x1="32" y1="17" x2="75%" y2="17"/>
+    <line x1="25%" y1="17" x2="25%" y2="34"/>
+    <line x1="75%" y1="17" x2="75%" y2="34"/>
+  </svg>
+  <div class="cols-2 under-35">
+    <div class="table-wrap">
+      <h3>The six tasks</h3>
+      <table>
+        <tr><th>OpenRouter task</th><th>What it stands in for</th></tr>
+        <tr><td>Roleplay &amp; Fiction</td><td>Staying in character as the soul</td></tr>
+        <tr><td>Conversation</td><td>Invitations, persuasion, negotiation</td></tr>
+        <tr><td>Multi-step Planning</td><td>Gathering food, then hosting dinner</td></tr>
+        <tr><td>Tool Dispatch</td><td>Emitting a legal game action</td></tr>
+        <tr><td>Memory Extraction</td><td>Remembering promises and guests</td></tr>
+        <tr><td>Summarization</td><td>Keeping useful history in context</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Fine print</h3>
+      <ul>
+        <li>30-day usage window, through September 8. Rankings measure popularity, not quality.</li>
+        <li>Free variants and dated snapshots kept as separate entries; Ox Alpha folded into its revealed GLM 5.3 Flash identity.</li>
+        <li>Every model ran through OpenRouter, so latency and availability are the route's, not only the weights'.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 3 · Game setup -->
+<section class="slide" id="s3">
+  <div class="eyebrow"><span>Experimental design &middot; the tournament</span><span class="count">3 / 7</span></div>
+  <h2>Nine seats, five games a round, replace the worst four</h2>
+  <figure>
+    <svg viewBox="0 0 1000 320" role="img" aria-label="Process diagram: a candidate queue feeds a nine-seat round of five games, each seat is scored and billed, the worst four are dropped, and open seats are refilled from the queue" class="flow">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="arrhead"/></marker>
+      </defs>
+      <g transform="translate(20,40)">
+        <text class="step-label" x="0" y="0">1 &middot; Queue</text>
+        <text class="step-title" x="0" y="26">Unseen candidates</text>
+        <text class="step-body" x="0" y="48">cheapest listed price first</text>
+        <g transform="translate(0,72)">
+          <rect x="0" y="0" width="14" height="14" rx="2" class="seat q"/><rect x="20" y="0" width="14" height="14" rx="2" class="seat q"/><rect x="40" y="0" width="14" height="14" rx="2" class="seat q"/><rect x="60" y="0" width="14" height="14" rx="2" class="seat q"/><rect x="80" y="0" width="14" height="14" rx="2" class="seat q"/><rect x="100" y="0" width="14" height="14" rx="2" class="seat q"/><rect x="120" y="0" width="14" height="14" rx="2" class="seat q"/><text class="step-body" x="146" y="12">&hellip; 35</text>
+        </g>
+      </g>
+      <line x1="215" y1="90" x2="262" y2="90" class="arrow" marker-end="url(#arr)"/>
+      <g transform="translate(275,40)">
+        <text class="step-label" x="0" y="0">2 &middot; Round</text>
+        <text class="step-title" x="0" y="26">9 seats &times; 5 games &times; 7 days</text>
+        <text class="step-body" x="0" y="48">same soul, seeds 91002&ndash;91006</text>
+        <g transform="translate(0,72)">
+          <circle cx="7" cy="7" r="7" class="seat"/><circle cx="29" cy="7" r="7" class="seat"/><circle cx="51" cy="7" r="7" class="seat"/><circle cx="73" cy="7" r="7" class="seat"/><circle cx="95" cy="7" r="7" class="seat"/><circle cx="117" cy="7" r="7" class="seat"/><circle cx="139" cy="7" r="7" class="seat"/><circle cx="161" cy="7" r="7" class="seat"/><circle cx="183" cy="7" r="7" class="seat"/>
+        </g>
+        <text class="step-body" x="0" y="112">all five games run at once</text>
+        <text class="step-body" x="0" y="130">20 s deadline &middot; 2,048 output tokens</text>
+        <text class="step-body" x="0" y="148">late, empty, or illegal = turn wasted, no retry</text>
+      </g>
+      <line x1="520" y1="90" x2="567" y2="90" class="arrow" marker-end="url(#arr)"/>
+      <g transform="translate(580,40)">
+        <text class="step-label" x="0" y="0">3 &middot; Rank</text>
+        <text class="step-title" x="0" y="26">Score and bill each seat</text>
+        <text class="step-body" x="0" y="48">dinner score, known $ per point,</text>
+        <text class="step-body" x="0" y="66">wasted turns</text>
+      </g>
+      <line x1="775" y1="90" x2="822" y2="90" class="arrow" marker-end="url(#arr)"/>
+      <g transform="translate(835,40)">
+        <text class="step-label" x="0" y="0">4 &middot; Drop</text>
+        <text class="step-title" x="0" y="26">Worst 2 by $/pt</text>
+        <text class="step-title" x="0" y="48">+ worst 2 by failures</text>
+        <text class="step-body" x="0" y="70">union, so 2&ndash;4 leave</text>
+        <g transform="translate(0,92)">
+          <circle cx="7" cy="7" r="7" class="seat out"/><circle cx="29" cy="7" r="7" class="seat out"/><circle cx="51" cy="7" r="7" class="seat out"/><circle cx="73" cy="7" r="7" class="seat out"/>
+        </g>
+      </g>
+      <path d="M 890 165 L 890 240 L 100 240 L 100 172" class="arrow" fill="none" marker-end="url(#arr)"/>
+      <text class="step-body" x="495" y="233" text-anchor="middle">refill the open seats from the queue &middot; survivors keep their seats &middot; decisions frozen before the next round starts</text>
+      <text class="step-body" x="495" y="295" text-anchor="middle">Repeat until every candidate has played: 10 rounds, 50 games, watched against a $1,500 new-spend cap.</text>
+    </svg>
+  </figure>
+  <p class="foot">Survivors keep their seats and accumulate games. That is what made 35 models affordable, and also what makes the result a tournament rather than a controlled comparison. More on that in the caveats.</p>
+</section>
+
+<!-- 4 · Results -->
+<section class="slide" id="s4">
+  <div class="eyebrow"><span>Results &middot; pooled over all games each model played</span><span class="count">4 / 7</span></div>
+  <h2>Who played well, who played cheaply, who could not take a turn</h2>
+  <div class="results">
+    <div>
+      <h3>Best overall &middot; score per game</h3>
+      <ol class="rank">
+        <li><span class="name">GPT-5.5<small>5 games</small></span><span class="val"><b>168</b> pts</span></li>
+        <li><span class="name">Kimi K3<small>10 games</small></span><span class="val"><b>162</b> pts</span></li>
+        <li><span class="name">GPT-6 Astra<small>5 games</small></span><span class="val"><b>150</b> pts</span></li>
+        <li><span class="name">Gemini 3.8 Flash<small>15 games</small></span><span class="val"><b>147</b> pts</span></li>
+        <li><span class="name">MiMo v2.5 Pro<small>20 games</small></span><span class="val"><b>126</b> pts</span></li>
+        <li><span class="name">GLM 5.3 Flash<small>35 games</small></span><span class="val"><b>125</b> pts</span></li>
+      </ol>
+      <p class="foot">Median across all 41 models: 70 points per game.</p>
+    </div>
+    <div>
+      <h3>Best per price &middot; $ per point, among models scoring 90+</h3>
+      <ol class="rank">
+        <li><span class="name">MiMo v2.5 Pro<small>126 pts</small></span><span class="val"><b>$0.0014</b></span></li>
+        <li><span class="name">GLM 5.3 Flash<small>125 pts</small></span><span class="val"><b>$0.0018</b></span></li>
+        <li><span class="name">DeepSeek V4 Flash<small>92 pts</small></span><span class="val"><b>$0.0019</b></span></li>
+        <li><span class="name">GPT-5.6 Luna<small>103 pts</small></span><span class="val"><b>$0.0074</b></span></li>
+        <li><span class="name">Gemini 3.8 Flash<small>147 pts</small></span><span class="val"><b>$0.010</b></span></li>
+        <li><span class="name">GPT-5.5<small>168 pts</small></span><span class="val"><b>$0.013</b></span></li>
+      </ol>
+      <p class="foot">For scale: Fable 5.1 cost $0.39 per point, Opus 4.8 $0.84.</p>
+    </div>
+    <div>
+      <h3>Most unreliable &middot; wasted turns per game</h3>
+      <ol class="rank">
+        <li><span class="name">MiniMax M3 free<small>never served</small></span><span class="val"><b>85</b> turns</span></li>
+        <li><span class="name">Hy4 preview<small>all timeouts</small></span><span class="val"><b>84</b> turns</span></li>
+        <li><span class="name">Nemotron 550B free<small>timeouts</small></span><span class="val"><b>67</b> turns</span></li>
+        <li><span class="name">Laguna S 2.1 free<small>rate limited</small></span><span class="val"><b>66</b> turns</span></li>
+        <li><span class="name">Qwen 3.8 Max<small>timeouts</small></span><span class="val"><b>62</b> turns</span></li>
+        <li><span class="name">Grok 4.6<small>timeouts</small></span><span class="val"><b>54</b> turns</span></li>
+      </ol>
+      <p class="foot">Best in class: Gemini 3.5 Flash and GPT-5.6 Sol, about 1 wasted turn per game.</p>
+    </div>
+    <div>
+      <h3>Slowest &middot; median response, against a 20 s deadline</h3>
+      <ol class="rank">
+        <li><span class="name">Nemotron 550B free<small>p95 78 s</small></span><span class="val"><b>31.7</b> s</span></li>
+        <li><span class="name">Hy4 preview<small>p95 36 s</small></span><span class="val"><b>30.4</b> s</span></li>
+        <li><span class="name">Qwen 3.8 Max<small>p95 59 s</small></span><span class="val"><b>27.7</b> s</span></li>
+        <li><span class="name">Grok 4.6<small>p95 45 s</small></span><span class="val"><b>21.8</b> s</span></li>
+        <li><span class="name">GPT-OSS-120B<small>p95 45 s</small></span><span class="val"><b>17.5</b> s</span></li>
+        <li><span class="name">DeepSeek V4 Flash 0731<small>p95 74 s</small></span><span class="val"><b>13.3</b> s</span></li>
+      </ol>
+      <p class="foot">The fast routes answer in 1&ndash;3 s. Half of Nemotron's calls missed the deadline.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 5 · Charts -->
+<section class="slide" id="s5">
+  <div class="eyebrow"><span>Results &middot; score against cost</span><span class="count">5 / 7</span></div>
+  <h2>Cheap and good is a real region, and it's mostly open-weight</h2>
+  <div class="cols-2" style="align-items:start">
+    <figure>
+      <div class="chart-title">Score per game vs. cost per point</div>
+      <div id="scatter"></div>
+      <div class="legend"><span>Evaluated in healthy rounds</span><span class="hollow">Evaluated only in rounds 8&ndash;9 (service outage)</span></div>
+      <figcaption>Total known cost (inference plus a ninth of each game's compute) divided by pooled score, log scale. Models with zero score are omitted. The dashed arc marks the cheap-and-good corner. Hover a point for the numbers.</figcaption>
+    </figure>
+    <figure>
+      <div class="chart-title">Score per game, top 14 models</div>
+      <div id="bars"></div>
+      <div class="legend"><span>Open weights</span><span class="dim">Closed</span></div>
+      <figcaption>Games played in parentheses. Survivors played more games against changing opponents, so these are pooled means, not a controlled ranking.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- 6 · Caveats -->
+<section class="slide" id="s6">
+  <div class="eyebrow"><span>Caveats</span><span class="count">6 / 7</span></div>
+  <h2>What this does not tell us</h2>
+  <div class="cols">
+    <div>
+      <h3>One soul, one coworld</h3>
+      <p>Every model played the same personality in the same game. A model that is mediocre with this prompt may be excellent with another, and Heartleaf is one social game, not a proxy for all coworlds.</p>
+    </div>
+    <div>
+      <h3>Rounds 8 and 9 were broken</h3>
+      <p>Our shared OpenRouter keys hit their spend caps mid-round, and the sidecar reported the 403s as generic internal errors. Round 8 lost <span class="num">26%</span> of all calls and round 9 lost <span class="num">14%</span>. Mean score fell from <span class="num">103</span> per model-game in round 7 to <span class="num">31</span>. Opus 4.6, 4.8, 5, Sonnet 4.6, and Fable 5 were tested <em>only</em> in those rounds, so their numbers are not evidence about them. GPT-5.5 topped the table despite playing only in round 9.</p>
+    </div>
+    <div>
+      <h3>A tournament, not a round-robin</h3>
+      <p>Survivors played up to 35 games, newcomers 5, against different opponents each round. Nine-player scores are coupled. Five games is a small sample and per-model variance was large.</p>
+    </div>
+    <div>
+      <h3>Route, not just model</h3>
+      <p>Latency and availability measure the OpenRouter route we hit, under a strict 20-second clock. A "free" or preview route timing out says little about the underlying weights served properly.</p>
+    </div>
+    <div>
+      <h3>The prompt argues with itself</h3>
+      <p>The soul tells gnomes the "connection score" wins, but the evaluator scores dinners. Models that dutifully optimized conversation were following instructions, not being dumb.</p>
+    </div>
+    <div>
+      <h3>Money</h3>
+      <p>Five transport failures are unpriced, so the $1,222 total is reconciled but not a certified invoice. Costs are realized bills, and cache behavior meant list price did not predict them well.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 7 · Conclusions -->
+<section class="slide" id="s7">
+  <div class="eyebrow"><span>Wrap-up</span><span class="count">7 / 7</span></div>
+  <h2>What we take away</h2>
+  <div class="cols-2">
+    <div>
+      <p class="verdict">A handful of open-weight models play nearly as well as the frontier models <em>at a hundredth of the price.</em></p>
+      <ul style="margin-top:16px">
+        <li><strong>GLM 5.3 Flash</strong>, <strong>MiMo v2.5 Pro</strong>, and <strong>DeepSeek V4 Flash</strong> scored 90&ndash;126 points per game across 20&ndash;35 games each, for a fifth of a cent per point.</li>
+        <li><strong>GPT-5.5</strong>, <strong>Kimi K3</strong>, and <strong>Gemini 3.8 Flash</strong> were the top raw scorers and still cheap in absolute terms, at one to two cents per point.</li>
+        <li>The Anthropic models scored respectably when the service was healthy but cost 10&ndash;60&times; more per point, so the elimination rule removed them early.</li>
+      </ul>
+    </div>
+    <div>
+      <p class="verdict">Some open routes are <em>unusable</em>, not merely weak.</p>
+      <ul style="margin-top:16px">
+        <li><strong>Hy4 preview</strong> and <strong>MiniMax M3 free</strong> scored zero across five games: one never beat the clock, the other was never served.</li>
+        <li><strong>Nemotron 550B</strong>, <strong>Qwen 3.8 Max</strong>, and <strong>Grok 4.6</strong> have a median response slower than the 20-second deadline. Their transcripts show gnomes narrating that they missed dinner while waiting outside.</li>
+        <li>Reliability was the stronger filter than intelligence. Fast-but-wrong models lost turns to illegal actions; slow models lost them to the clock.</li>
+      </ul>
+      <p class="foot">Next: re-run rounds 8&ndash;9 with fixed key capacity, then test the promising cheap models across several souls and a second coworld.</p>
+    </div>
+  </div>
+</section>
+
+<div class="tip" id="tip"></div>
+<div class="nav-hint">&uarr; &darr; or space to move between slides</div>
+
+<script>
+(function () {
+  // model, score/game, total $/score, games, open-weights?, tested only in rounds 8-9?
+  const M = [
+    ["GPT-5.5",168.4,0.01283,5,false,true],["Kimi K3",161.5,0.01566,10,true,false],["GPT-6 Astra",150.2,0.24953,5,false,false],
+    ["Gemini 3.8 Flash",147.3,0.01046,15,false,false],["MiMo v2.5 Pro",125.9,0.00142,20,true,false],["GLM 5.3 Flash",124.6,0.00176,35,true,false],
+    ["Fable 5.1",115.2,0.39097,5,false,false],["Sonnet 4.5",114.4,0.13919,5,false,false],["GPT-5.6 Luna",102.9,0.00736,25,false,false],
+    ["Gemini 3.5 Flash",99.6,0.01519,5,false,false],["Haiku 4.5",96.0,0.01060,20,false,false],["DeepSeek V4 Flash",91.5,0.00194,30,true,false],
+    ["DeepSeek V4 Pro",87.7,0.00567,15,true,false],["GPT-5.6 Sol",87.4,0.07947,5,false,false],["GLM 5.2",86.7,0.00614,25,true,false],
+    ["Gemini 3 Flash Preview",81.7,0.00716,25,false,false],["DeepSeek V3.2",73.6,0.00638,5,true,false],["Gemini 3.1 Pro Preview",72.4,0.02846,15,false,false],
+    ["GLM 5.3",71.2,0.01768,5,true,false],["Gemma 4 31B",70.8,0.01801,5,true,false],["GPT-5.6 Terra",69.1,0.06832,15,false,false],
+    ["MiMo v2.5",66.3,0.00140,10,true,false],["DeepSeek V4 Pro 0813",65.7,0.00945,15,true,false],["Hy3",60.6,0.00248,20,true,false],
+    ["Sonnet 5",60.4,0.17426,5,false,false],["Qwen 3.8 Max",59.2,0.01802,5,true,false],["DeepSeek V4 Flash 0731",55.2,0.00178,10,true,false],
+    ["Sonnet 4.6",53.1,0.13557,10,false,true],["Step 3.7 Flash",46.2,0.00557,5,true,false],["Gemma 4 26B",41.0,0.00427,5,true,false],
+    ["Gemini 2.5 Flash Lite",39.4,0.00595,5,false,false],["Opus 5",37.4,0.22723,5,false,true],["Fable 5",37.0,0.55964,5,false,true],
+    ["GPT-OSS-120B",32.4,0.00333,10,true,false],["Opus 4.6",27.6,0.35815,5,false,true],["Laguna S 2.1 free",24.3,0.00194,10,true,false],
+    ["Grok 4.6",24.2,0.09042,5,false,false],["Nemotron 550B free",18.3,0.00258,10,true,false],["Opus 4.8",14.6,0.83981,5,false,true]
+  ];
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (n, a, t) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); if (t != null) e.textContent = t; return e; };
+  const tip = document.getElementById("tip");
+  function hover(target, text) {
+    target.addEventListener("mousemove", ev => { tip.textContent = text; tip.style.opacity = 1; tip.style.left = (ev.clientX + 14) + "px"; tip.style.top = (ev.clientY + 14) + "px"; });
+    target.addEventListener("mouseleave", () => { tip.style.opacity = 0; });
+  }
+
+  // ---- Scatter: x = $/point (log), y = score/game
+  (function () {
+    const W = 540, H = 380, L = 44, R = 16, T = 12, B = 44;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Scatter of score per game against dollars per point for 39 models" });
+    const xmin = Math.log10(0.001), xmax = Math.log10(1);
+    const X = v => L + (Math.log10(v) - xmin) / (xmax - xmin) * (W - L - R);
+    const Y = v => T + (1 - v / 180) * (H - T - B);
+    const grid = el("g", { class: "grid" }), axis = el("g", { class: "axis" });
+    [0, 30, 60, 90, 120, 150, 180].forEach(v => { grid.appendChild(el("line", { x1: L, x2: W - R, y1: Y(v), y2: Y(v) })); svg.appendChild(el("text", { x: L - 6, y: Y(v) + 4, "text-anchor": "end" }, v)); });
+    [0.001, 0.01, 0.1, 1].forEach(v => { grid.appendChild(el("line", { y1: T, y2: H - B, x1: X(v), x2: X(v) })); svg.appendChild(el("text", { x: X(v), y: H - B + 16, "text-anchor": "middle" }, v === 1 ? "$1" : v === 0.1 ? "10¢" : v === 0.01 ? "1¢" : "0.1¢")); });
+    svg.appendChild(grid);
+    axis.appendChild(el("line", { x1: L, x2: W - R, y1: H - B, y2: H - B }));
+    axis.appendChild(el("line", { x1: L, x2: L, y1: T, y2: H - B }));
+    svg.appendChild(axis);
+    svg.appendChild(el("text", { class: "axis-title", x: W - R, y: H - 4, "text-anchor": "end" }, "Cost per point (log)"));
+    svg.appendChild(el("text", { class: "axis-title", x: L, y: T - 2, "text-anchor": "start", transform: "" }, "Score / game"));
+    // Dashed quarter-circle from the top-left corner marks the cheap-and-good region.
+    const r = 200;
+    const arc = el("path", { id: "sweet", class: "region", d: `M ${L} ${T + r} A ${r} ${r} 0 0 0 ${L + r} ${T}` });
+    svg.appendChild(arc);
+    svg.appendChild(el("text", { class: "region-label", x: L + 8, y: T + r - 14 }, "cheap and good"));
+    const label = { "GPT-5.5": [8, -6], "Kimi K3": [8, 4], "GPT-6 Astra": [-8, 4], "Gemini 3.8 Flash": [8, 4], "MiMo v2.5 Pro": [8, -4], "GLM 5.3 Flash": [8, 10], "Fable 5.1": [-8, 4], "DeepSeek V4 Flash": [8, 4], "Opus 4.8": [-8, 4], "Fable 5": [-8, -6], "Nemotron 550B free": [8, 4], "Hy3": [8, 4], "Sonnet 4.5": [-8, -6], "GPT-5.6 Luna": [8, 4] };
+    M.forEach(([n, s, c, g, open, late]) => {
+      const cx = X(c), cy = Y(s);
+      const dot = el("circle", { class: "pt" + (late ? " hollow" : ""), cx, cy, r: 5 });
+      svg.appendChild(dot);
+      const hit = el("circle", { class: "hit", cx, cy, r: 12 });
+      hover(hit, `${n}: ${s.toFixed(0)} pts/game, $${c.toFixed(4)}/pt, ${g} games`);
+      svg.appendChild(hit);
+      if (label[n]) { const [dx, dy] = label[n]; svg.appendChild(el("text", { class: "lbl", x: cx + dx, y: cy + dy, "text-anchor": dx < 0 ? "end" : "start" }, n)); }
+    });
+    document.getElementById("scatter").appendChild(svg);
+  })();
+
+  // ---- Bars: top 14 by score/game
+  (function () {
+    const rows = M.slice().sort((a, b) => b[1] - a[1]).slice(0, 14);
+    const W = 540, rowH = 24, L = 150, R = 40, T = 6, B = 26, H = T + rows.length * rowH + B;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Bar chart of score per game for the top fourteen models" });
+    const X = v => L + v / 180 * (W - L - R);
+    const grid = el("g", { class: "grid" });
+    [0, 60, 120, 180].forEach(v => { grid.appendChild(el("line", { x1: X(v), x2: X(v), y1: T, y2: H - B })); svg.appendChild(el("text", { x: X(v), y: H - B + 14, "text-anchor": "middle" }, v)); });
+    svg.appendChild(grid);
+    rows.forEach(([n, s, c, g, open], i) => {
+      const y = T + i * rowH;
+      svg.appendChild(el("text", { class: "lbl", x: L - 8, y: y + 15, "text-anchor": "end" }, n));
+      const bar = el("rect", { class: "bar" + (open ? "" : " dim"), x: X(0), y: y + 4, width: X(s) - X(0), height: rowH - 8, rx: 2 });
+      hover(bar, `${n}: ${s.toFixed(1)} pts/game over ${g} games`);
+      svg.appendChild(bar);
+      svg.appendChild(el("text", { x: X(s) + 5, y: y + 15 }, `${s.toFixed(0)} (${g})`));
+    });
+    const ax = el("g", { class: "axis" }); ax.appendChild(el("line", { x1: L, x2: L, y1: T, y2: H - B })); svg.appendChild(ax);
+    document.getElementById("bars").appendChild(svg);
+  })();
+
+  // ---- Keyboard navigation
+  const slides = [...document.querySelectorAll(".slide")];
+  document.addEventListener("keydown", ev => {
+    if (["ArrowDown", "ArrowRight", " ", "PageDown"].includes(ev.key) || ["ArrowUp", "ArrowLeft", "PageUp"].includes(ev.key)) {
+      ev.preventDefault();
+      const y = window.scrollY + 10;
+      let idx = slides.findIndex((s, i) => i === slides.length - 1 || slides[i + 1].offsetTop > y);
+      const next = ["ArrowDown", "ArrowRight", " ", "PageDown"].includes(ev.key) ? idx + 1 : idx - 1;
+      if (slides[next]) slides[next].scrollIntoView();
+    }
+  });
+})();
+</script>
+</body>
+</html>

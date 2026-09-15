@@ -160,6 +160,82 @@
           "items": {
             "type": "integer"
           }
+        },
+        "evaluation": {
+          "type": "object",
+          "required": [
+            "schema",
+            "event_count",
+            "events",
+            "accepted_seats"
+          ],
+          "properties": {
+            "schema": {
+              "const": "heartleaf-eval-evidence/1"
+            },
+            "event_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "events": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "sequence",
+                  "seat",
+                  "gnome",
+                  "role",
+                  "text"
+                ],
+                "properties": {
+                  "sequence": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "seat": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8
+                  },
+                  "gnome": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "const": "llm"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            },
+            "accepted_seats": {
+              "type": "array",
+              "maxItems": 9,
+              "items": {
+                "type": "object",
+                "required": [
+                  "slot",
+                  "model"
+                ],
+                "properties": {
+                  "slot": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8
+                  },
+                  "model": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false,
+          "description": "Complete eval lifecycle evidence, written with scores when HEARTLEAF_EVAL_ARTIFACT=true; independent of stdout retention."
         }
       }
     },

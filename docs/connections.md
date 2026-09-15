@@ -1,6 +1,8 @@
 # Connections
 
-This feature branch is rebased onto viewer stability PR #50 at `e164a7e`.
+Viewer stability PR #50 is merged. This branch includes master at `4ee856b`,
+including PR #52’s evaluation tooling. Bedtime interviews retain their own
+validation while ordinary actions preserve the strict evaluation failure policy.
 Merge #50 first, then rebase onto master; the connections work stays in PR #51.
 
 [Bedtime ranking screenshots](connections/bedtime-review-2026-09-11/README.md) ·
@@ -177,3 +179,7 @@ and automatic live-model quality evaluation. PR #50's replay control layout, cam
 transitions, map geometry, font sizes, muted ground texture and original portrait
 pixels are preserved; the director repair above changes pacing through silence.
 Its removed logo and bricks are not restored.
+
+The September 14 shipping scope is frozen to the implemented connections and
+replay features. Movement replanning, fresh model campaigns, reward/winner
+changes and additional UI design are deferred.

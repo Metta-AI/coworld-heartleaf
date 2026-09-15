@@ -43,6 +43,11 @@ type
     navigation*: Navigation
     layout*: WorldLayout
     onSeatFailure*: SeatFailureHandler
+    timeoutAsWait*: bool
+      ## Eval mode consumes a client timeout as a missed turn instead of
+      ## retrying the same decision while the entire village waits.
+    unusableAsWait*: bool
+      ## Strict eval policy: every unusable response spends the decision.
     pausedSince*: float
     gameNumber*: int
     phase*: TurnPhase
@@ -111,6 +116,8 @@ proc newBrains*(
     layout: layout,
     gameNumber: 1,
     phase: LlmPhase,
+    timeoutAsWait: parseBool(getEnv("HEARTLEAF_TIMEOUT_AS_WAIT", "false")),
+    unusableAsWait: parseBool(getEnv("HEARTLEAF_UNUSABLE_AS_WAIT", "false")),
     turnIndex: 0,
     book: initEncounterBook(),
     interviewTimeoutSeconds: configuredInterviewTimeout(),
@@ -143,6 +150,24 @@ proc attachSoul*(brains: Brains, houseIndex: int, soul: Soul) =
   villager.logTurn("llm", brains.turnIndex)
   villager.log("soul attached model=" & soul.modelId &
     " prompt=" & $villager.systemPrompt.len & " chars")
+
+proc evaluationEvidence*(brains: Brains): JsonNode =
+  ## Durable eval evidence lives with results, independent of stdout retention.
+  ## Keep lifecycle events, not system prompts or conversation history.
+  var events = newJArray()
+  for line in brains.gameLog.entries:
+    var event = parseJson(line)
+    if event["role"].getStr() != "llm":
+      continue
+    event["sequence"] = %events.len
+    events.add(event)
+  var accepted = newJArray()
+  for slot in 0 ..< brains.layout.gardens.len:
+    if slot in brains.villagers:
+      accepted.add(%*{"slot": slot, "model": brains.villagers[slot].soul.modelId})
+  %*{"schema": "heartleaf-eval-evidence/1", "event_count": events.len,
+     "events": events, "accepted_seats": accepted}
+
 
 proc resetForNewGame*(brains: Brains) =
   ## Fresh minds for a fresh village, same souls; log records start a
@@ -201,6 +226,31 @@ proc abandonRequest(villager: Villager) =
   villager.requestInFlight = false
   villager.lastHeldInterrupt = ""
 
+proc spendFailedDecision(
+  brains: Brains, villager: Villager, observation: Observation,
+  reply: BedrockReply, reason: string, now: float
+) =
+  ## One JSON event retains exact response bytes and stable join fields.
+  villager.logLlm("failure", "event=" & $(%*{
+    "schema": "heartleaf-call-outcome/1", "outcome": reason, "action": "wait",
+    "tag": reply.tag, "slot": villager.houseIndex, "model": villager.soul.modelId,
+    "platform_call_id": reply.platformCallId, "provider_request_id": reply.providerRequestId,
+    "pod": getEnv("HOSTNAME"), "request_started_at": villager.lastRequestAt,
+    "response_received_at": now, "elapsed_seconds": now - villager.lastRequestAt,
+    "http_status": reply.statusCode, "stop_reason": reply.stopReason,
+    "usage": reply.usage, "error": reply.error, "response_text": reply.text,
+    "response_body": reply.responseBody
+  }))
+  villager.retryAt = 0.0
+  villager.retryBackoffSeconds = 0.0
+  villager.failures = 0
+  villager.applyDecision(observation, brains.layout, waitDecision(), fromModel = false)
+  villager.turnReady = true
+  villager.log("llm unusable action=wait reason=" & reason)
+  if reason == "deadline_exceeded":
+    villager.log("llm timeout action=wait")
+  villager.noteLog("The model's response was unusable; this turn was spent waiting.")
+
 proc startRequest(
   brains: Brains,
   villager: Villager,
@@ -232,6 +282,11 @@ proc startRequest(
     brains.client.start(request)
   except CatchableError as e:
     villager.lastError = e.msg
+    if brains.unusableAsWait:
+      villager.lastRequestAt = now
+      brains.spendFailedDecision(villager, observation,
+        BedrockReply(tag: request.tag, error: e.msg), "request_start_failed", now)
+      return
     let wait = villager.noteTransientFailure(brains.budget, now)
     villager.log("llm start error " & e.msg & ", retry in " &
       formatFloat(wait, ffDecimal, 1) & "s")
@@ -640,12 +695,31 @@ proc handleReply(
       tick:observation.tick,day:brains.interviewDay,seat:villager.houseIndex,
       interview:interview))
     return
+  if brains.unusableAsWait and (reply.outcome != Usable or reply.tokenLimited()):
+    let reason =
+      if reply.tokenLimited(): "token_limit"
+      elif reply.contextTooLong: "context_limit"
+      elif reply.statusCode == 0 and "Timeout was reached" in reply.error: "deadline_exceeded"
+      elif reply.statusCode == 200 and reply.text.len == 0: "empty_response"
+      elif reply.statusCode == 200: "invalid_response"
+      elif reply.outcome == Permanent: "request_rejected"
+      else: "upstream_error"
+    villager.logLlm("reply", "tag=" & reply.tag & " outcome=transient took=" & took & "s")
+    villager.log("llm error status=" & $reply.statusCode & " " & reply.error.replace("\n", " "))
+    brains.spendFailedDecision(villager, observation, reply, reason, now)
+    return
   case reply.outcome
   of Usable:
     villager.appendHistory("assistant", reply.text)
     let decision = parseDecision(reply.text, villager.selfNames())
     if decision.malformed:
       villager.lastError = decision.error
+      if brains.unusableAsWait:
+        villager.logLlm("reply", "tag=" & reply.tag & " outcome=parse took=" & took & "s")
+        var diagnostic = reply
+        diagnostic.error = decision.error
+        brains.spendFailedDecision(villager, observation, diagnostic, "invalid_response", now)
+        return
       let wait = villager.noteTransientFailure(brains.budget, now)
       villager.logLlm("reply", "tag=" & reply.tag &
         " outcome=parse took=" & took & "s")
@@ -680,6 +754,11 @@ proc handleReply(
         extra.add(" ignored=wait")
         villager.logLlm("reply", extra)
         villager.recordEvent("Your action was ignored: " & error)
+        if brains.unusableAsWait:
+          var diagnostic = reply
+          diagnostic.error = error
+          brains.spendFailedDecision(villager, observation, diagnostic, "invalid_action", now)
+          return
         villager.applyDecision(
           observation, brains.layout, waitDecision(), fromModel = true
         )
@@ -691,6 +770,16 @@ proc handleReply(
       " outcome=transient took=" & took & "s")
     villager.log("llm error status=" & $reply.statusCode & " " &
       reply.error.replace("\n", " "))
+    if brains.timeoutAsWait and reply.statusCode == 0 and
+        "Timeout was reached" in reply.error:
+      villager.retryAt = 0.0
+      villager.applyDecision(
+        observation, brains.layout, waitDecision(), fromModel = false
+      )
+      villager.turnReady = true
+      villager.log("llm timeout action=wait")
+      villager.noteLog("The model missed its deadline; this turn was spent waiting.")
+      return
     villager.noteLog("llm error status=" & $reply.statusCode & " " &
       reply.error.replace("\n", " ") & " (will retry)")
     if reply.cacheRejected and brains.client.promptCacheEnabled:
@@ -1042,4 +1131,3 @@ proc allFailed*(brains: Brains): bool =
     if not villager.failed:
       return false
   brains.villagers.len > 0
-

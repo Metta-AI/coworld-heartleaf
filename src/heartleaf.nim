@@ -6954,10 +6954,14 @@ when not defined(emscripten):
 
   proc writeArtifacts(
     sim: SimServer,
-    runtimeConfig: RuntimeConfig
+    runtimeConfig: RuntimeConfig,
+    brains: Brains
   ) =
-    ## Writes the results artifact for the current day.
-    runtimeConfig.writeResults(sim.dailyResultsJson() & "\n")
+    ## Scores and eval evidence are one complete JSON artifact.
+    var results = parseJson(sim.dailyResultsJson())
+    if getEnv("HEARTLEAF_EVAL_ARTIFACT") == "true":
+      results["evaluation"] = brains.evaluationEvidence()
+    runtimeConfig.writeResults($results & "\n")
 
   proc runServerLoop*(
     host = DefaultHost,
@@ -7007,7 +7011,6 @@ when not defined(emscripten):
       lastTick: MonoTime
       runTicks = 0
       gamesFinished = 0
-      lastWrittenDay = 0
       seatPlayers: array[HouseCount, int]
       simStarted = tokens.len == 0
       pausedSince = 0.0
@@ -7088,8 +7091,7 @@ when not defined(emscripten):
       sim.advanceChatFeed()
       replayWriter.writeHash(uint32(sim.tickCount), sim.gameHash())
       if not wasScoring and sim.scoreTicks > 0:
-        sim.writeArtifacts(runtimeConfig)
-        lastWrittenDay = sim.dayNumber
+        sim.writeArtifacts(runtimeConfig, brains)
       inc runTicks
 
     while true:
@@ -7236,8 +7238,7 @@ when not defined(emscripten):
               sim.removePlayer(globalSockets[i])
 
       if totalTicks > 0 and runTicks >= totalTicks:
-        if lastWrittenDay == 0:
-          sim.writeArtifacts(runtimeConfig)
+        sim.writeArtifacts(runtimeConfig, brains)
         if replayWriter.enabled:
           # Only the first game of a run is recorded and uploaded.
           replayWriter.closeReplayWriter()
@@ -7252,7 +7253,6 @@ when not defined(emscripten):
         if tokens.len > 0:
           sim.seatCount = tokens.len
         runTicks = 0
-        lastWrittenDay = 0
         for seat in 0 ..< HouseCount:
           seatPlayers[seat] = -1
         brains.resetForNewGame()

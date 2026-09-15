@@ -55,10 +55,12 @@ block:
   doAssert parseConnections("not JSON\n{\"kind\":\"connection-update\",\"version\":9}").events.len == 0
   doAssert parseConnections("").bondsAt(100).len == 0, "old replay has no invented ranking"
 
-block:
+# Both normal play and strict evaluation must retain the bedtime lifecycle.
+for strictEval in [false, true]:
   let sim = initSimServer(22)
   let client = newScriptedBedrockClient()
   let minds = newBrains(sim.navigationFor(),sim.worldLayoutFor(),client,22)
+  minds.unusableAsWait = strictEval
   let soul = parseSoul("#!test-model\nYou are {name}.")
   var obs: Table[int,Observation]
   for seat in 0..2:
@@ -109,6 +111,28 @@ block:
   client.scriptReply(BedrockReply(tag:stale.tag,statusCode:200,text:reply(@[2,1])))
   discard minds.advance(obs,54)
   doAssert minds.villagers[0].requestInFlight, "a prior game's reply cannot settle a new request"
+
+# Failed interviews are recorded as unavailable, not ordinary missed actions.
+block:
+  let sim = initSimServer(25)
+  let client = newScriptedBedrockClient()
+  let minds = newBrains(sim.navigationFor(),sim.worldLayoutFor(),client,25)
+  minds.unusableAsWait = true
+  var obs: Table[int,Observation]
+  for seat in 0..1:
+    discard sim.addPlayer(seat.playerNameForHouse(),seat)
+    minds.attachSoul(seat,parseSoul("#!test-model\nYou are {name}."))
+    obs[seat] = sim.observe(seat)
+    obs[seat].minutes = DayEndMinutes
+    obs[seat].scene = Overlay
+  doAssert minds.advance(obs,0).paused
+  for request in client.started:
+    client.scriptReply(BedrockReply(tag:request.tag,error:"Timeout was reached"))
+  doAssert not minds.advance(obs,1).paused
+  let reviews = minds.connectionTimeline.events.filterIt(it.kind == "connection-interview")
+  doAssert reviews.len == 2 and reviews.allIt(not it.interview.valid)
+  doAssert minds.connections.appliedDay == 1
+  doAssert minds.connections.bonds.strength(0,1) == 0.5
 
 block:
   let sim = initSimServer(23)
