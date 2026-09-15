@@ -47,6 +47,7 @@ class ClaudeSubscriptionBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
             "ANTHROPIC_API_KEY": "hidden", "ANTHROPIC_AUTH_TOKEN": "hidden",
             "ANTHROPIC_BASE_URL": "https://invalid", "CLAUDE_CODE_USE_BEDROCK": "1",
+            "MAX_THINKING_TOKENS": "32000",
         }), patch.object(subprocess, "run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, json.dumps(envelope), "")
             result = bridge_module.Bridge(args(str(Path(temp) / "trace.jsonl"))).invoke(
@@ -55,6 +56,9 @@ class ClaudeSubscriptionBridgeTests(unittest.TestCase):
             child_env = run.call_args.kwargs["env"]
             for name in bridge_module.SECRET_ENV_NAMES:
                 self.assertNotIn(name, child_env)
+            self.assertEqual(child_env["MAX_THINKING_TOKENS"], "0")
+            record = json.loads((Path(temp) / "trace.jsonl").read_text())
+            self.assertEqual(record["thinking_requested"], "disabled")
             self.assertEqual(result["content"][0]["text"], '{"action":"wait"}')
             self.assertEqual(result["model"], "claude-haiku-4-5-20251001")
 

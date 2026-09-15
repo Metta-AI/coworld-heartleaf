@@ -16,7 +16,7 @@ root, start the bridge in one terminal:
 
 ```sh
 python3 tools/claude_subscription_bridge.py \
-  --model haiku --port 8099 --max-parallel 3 --timeout 300 \
+  --model haiku --port 8099 --max-parallel 9 --timeout 300 \
   --trace out/claude-playtest/bridge-trace.jsonl
 ```
 
@@ -27,10 +27,11 @@ env -u HEARTLEAF_MOCK_REPLY \
   AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://127.0.0.1:8099 \
   BEDROCK_TIMEOUT_SECONDS=300 \
   HEARTLEAF_INTERVIEW_TIMEOUT_SECONDS=300 \
-  HEARTLEAF_CONVERSATION_TICK_SECONDS=120 \
-  HEARTLEAF_PLAN_TURN_MINUTES=180 \
-  HEARTLEAF_CONVERSATION_GAP_MINUTES=60 \
-  nim r tools/play.nim --days:2 --seed:20260912 --port:8084 \
+  HEARTLEAF_CONVERSATION_TICK_SECONDS=300 \
+  HEARTLEAF_PLAN_TURN_MINUTES=60 \
+  HEARTLEAF_CONVERSATION_GAP_MINUTES=4 \
+  HEARTLEAF_UNUSABLE_AS_WAIT=false HEARTLEAF_TIMEOUT_AS_WAIT=false \
+  nim r tools/play.nim --days:1 --seed:20260914 --port:8084 \
     --no-browser --log-dir:out/claude-playtest
 ```
 
@@ -51,9 +52,11 @@ another machine running the PR's viewer.
 
 ## Timing and interpretation
 
-These are deliberately slower decision settings for the local CLI transport:
-planning every three game hours and conversation slots every game hour. The normal
-game defaults are hourly planning and four game minutes between conversation slots.
+This profile keeps the normal game cadence: hourly planning and four game minutes
+between conversation slots. Only the wall-clock allowances for local model calls
+are extended. Do not slow the game cadence merely to reduce CLI calls: the older
+two-day recording used three-hour plans and hourly conversation slots, which
+amplified visible waiting after completed tasks.
 Conversation slots remain enabled: gnomes already talking skip ordinary planning
 calls, so disabling conversation slots would prevent normal replies.
 
@@ -61,15 +64,22 @@ Our first attempt used short waits. Every first-night interview missed the 45-se
 deadline and the neutral fallback kept every pair at 0.5. CLI request time can be
 much longer than model generation time, and old requests can still occupy the
 request budget after the game stops waiting for them. The profile above gives local
-conversation turns up to 120 seconds and bedtime interviews up to 300 seconds,
-with at most three CLI calls running concurrently. The ordinary interview default
+conversation turns and bedtime interviews up to 300 seconds,
+with at most nine CLI calls running concurrently. The ordinary interview default
 stays 45 seconds; its override is bounded to 5–300 seconds.
 
 The CLI does not expose an equivalent to the Bedrock output-token cap. The bridge
 records the requested cap and `max_tokens_enforced: false`; it does not pretend to
-enforce it. Transcripts are passed as labelled messages in a print-mode prompt.
-These differences, sparse decision timing and a small sample limit what this
-playtest establishes about normal league behavior.
+enforce it. It explicitly requests no extended thinking with
+`MAX_THINKING_TOKENS=0`, matching Heartleaf's ordinary non-thinking requests, and
+records `thinking_requested: disabled`. The coding CLI's default thinking budget
+otherwise produced thousands of output tokens for short JSON actions and greatly
+lengthened local playtests. See [Claude's documented environment setting](https://code.claude.com/docs/en/env-vars).
+Transcripts are passed as labelled messages in a print-mode prompt.
+These transport differences and a small sample limit what this playtest
+establishes about normal league behavior. A completed replay with valid hashes
+does not by itself prove healthy agent behavior: inspect the decisions and watch
+the episode, including dinner and every bedtime ranking.
 
 Tests for the bridge use mocked subprocess results and do not spend subscription
 usage: `python3 tests/claude_subscription_bridge_test.py`.

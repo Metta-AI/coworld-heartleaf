@@ -132,6 +132,9 @@ class Bridge:
         if system:
             command.extend(["--system-prompt", system])
         clean_env = clean_environment()
+        # Heartleaf sends ordinary action/interview requests without extended
+        # thinking. Do not inherit the coding CLI's much larger thinking budget.
+        clean_env["MAX_THINKING_TOKENS"] = "0"
         started = time.time()
         slot = headers.get("X-Coworld-Player-Slot", "")
         acquired = self.slots.acquire(timeout=self.args.timeout)
@@ -220,6 +223,7 @@ class Bridge:
             "requested_model": alias,
             "requested_max_tokens": body.get("max_tokens", 0),
             "max_tokens_enforced": False,
+            "thinking_requested": "disabled",
             "actual_models": actual_models,
             "provider": sorted({
                 item.get("provider", "")
