@@ -905,6 +905,11 @@ block:
   now += 0.1
   frame = brains.advance(observations(), now)
   drainChats()
+  doAssert frame.paused and client.started.len == 4,
+    "both released gnomes get a fresh plan before movement resumes"
+  for request in client.started[2..^1]:
+    client.scriptReply(BedrockReply(tag:request.tag, statusCode:200,
+      text:"""{"action":"keep_gathering_plants"}"""))
   var guard = 0
   while ("later" notin chats or "wait I had more" notin chats) and guard < 60:
     now += 0.05
@@ -1228,10 +1233,11 @@ block:
   for round in 1 .. 6:
     now += 4.0
     frame = brains.advance(observations(), now)
-    doAssert not frame.paused, "an expired slot releases the world"
     if not brains.villagers[0].talking:
+      doAssert frame.paused, "a dissolved conversation holds for fresh plans"
       dissolvedAt = round
       break
+    doAssert not frame.paused, "an expired speaking slot releases the world"
     guard = 0
     while not frame.paused and guard < 40:
       now += 0.05

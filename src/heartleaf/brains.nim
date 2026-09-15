@@ -378,6 +378,15 @@ proc logJoin(brains: Brains, encounter: Encounter, houseIndex: int) =
       "enter", brains.conversationExtra(encounter)
     )
 
+proc releaseConversation(villager: Villager) =
+  ## A finished conversation needs a fresh plan, not the old idle speech action.
+  ## Drop any late reply composed for the conversation that just ended.
+  villager.abandonRequest()
+  villager.encounterId = 0
+  villager.turnReady = false
+  villager.pendingTalkName = ""
+  villager.pendingTalkMessage = ""
+
 proc dissolveIfAlone(brains: Brains, encounter: Encounter) =
   ## Drops a group that has 0 or 1 members left.
   if encounter == nil:
@@ -390,7 +399,7 @@ proc dissolveIfAlone(brains: Brains, encounter: Encounter) =
       villager.logConversation(
         "exit", "id=" & $encounter.id & " turn=" & $brains.turnIndex
       )
-      villager.encounterId = 0
+      villager.releaseConversation()
   brains.book.dissolve(encounter)
 
 proc replayTalk*(
@@ -464,13 +473,14 @@ proc leaveEncounter*(brains: Brains, speaker: Villager) =
   ## Removes a gnome from their conversation; a leftover singleton leaves.
   let encounter = brains.book.encounter(speaker.encounterId)
   if encounter == nil:
-    speaker.encounterId = 0
+    if speaker.encounterId > 0:
+      speaker.releaseConversation()
     return
   speaker.logConversation(
     "exit", "id=" & $encounter.id & " turn=" & $brains.turnIndex
   )
   encounter.removeMember(speaker.houseIndex)
-  speaker.encounterId = 0
+  speaker.releaseConversation()
   brains.dissolveIfAlone(encounter)
 
 proc recordConnection(brains: Brains, event: ConnectionEvent) =
@@ -593,7 +603,7 @@ proc dissolveSilent(brains: Brains, encounter: Encounter) =
         "exit", "id=" & $encounter.id & " turn=" & $brains.turnIndex
       )
       villager.recordEvent("(The conversation fell quiet and ended.)")
-      villager.encounterId = 0
+      villager.releaseConversation()
   brains.book.dissolve(encounter)
 
 proc closeConversationSlot(brains: Brains, now: float) =
@@ -728,6 +738,7 @@ proc handleReply(
         formatFloat(wait, ffDecimal, 1) & "s")
       villager.noteLog("reply could not be used: " & decision.error)
     else:
+      villager.turnReady = true
       villager.noteUsableReply()
       brains.budget.noteHealthy()
       var extra = "tag=" & reply.tag & " outcome=usable took=" & took & "s"
@@ -763,7 +774,6 @@ proc handleReply(
           observation, brains.layout, waitDecision(), fromModel = true
         )
         villager.log("llm ignored " & error & ", waiting")
-      villager.turnReady = true
   of Transient:
     villager.lastError = reply.error
     villager.logLlm("reply", "tag=" & reply.tag &
@@ -850,9 +860,7 @@ proc scheduleRequests(
   observations: Table[int, Observation],
   now: float
 ) =
-  ## Starts requests for villagers that still owe an action this LLM turn.
-  if brains.phase != LlmPhase:
-    return
+  ## Starts missing plans, including gnomes released during a movement turn.
   var ready: seq[Villager]
   for houseIndex, villager in brains.villagers.pairs:
     if houseIndex notin observations:
@@ -1037,22 +1045,24 @@ proc advance*(
         )
       ))
     return
+  if not brains.everyoneReady(observations):
+    result.paused = true
+    return
   if brains.phase == LlmPhase:
-    if brains.everyoneReady(observations):
-      brains.phase = MovePhase
-      inc brains.turnIndex
-      brains.moveTicksLeft = brains.planTurnTicks
-      brains.logPhase("move")
-      brains.slotMoveTicks = 0
-    else:
-      result.paused = true
-      return
+    brains.phase = MovePhase
+    inc brains.turnIndex
+    brains.moveTicksLeft = brains.planTurnTicks
+    brains.logPhase("move")
+    brains.slotMoveTicks = 0
   # The conversation clock inside a movement turn: every interval each
   # circle gets one speaking slot, and the world holds while the line
   # is composed. Game time advances only between the holds.
   if brains.slotSpeakerFor.len > 0:
     if brains.slotSettled(now):
       brains.closeConversationSlot(now)
+      if not brains.everyoneReady(observations):
+        result.paused = true
+        return
     else:
       result.paused = true
       for seat in brains.slotWaitSeats:
@@ -1070,6 +1080,9 @@ proc advance*(
           if seat in brains.villagers:
             result.blockedNames.add(brains.villagers[seat].name)
         return
+  if not brains.everyoneReady(observations):
+    result.paused = true
+    return
   brains.tickTalks(observations)
   result.paused = false
   for houseIndex, villager in brains.villagers.pairs:
