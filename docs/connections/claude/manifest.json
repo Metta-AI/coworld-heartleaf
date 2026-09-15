@@ -1,0 +1,83 @@
+{
+  "schema": "heartleaf-claude-subscription-run/v1",
+  "label": "run-9g-2d-seed-20260912-full",
+  "authored_fixture": false,
+  "model_decisions": "real",
+  "transport": {
+    "client": "Claude CLI 2.1.263",
+    "auth": "logged-in claude.ai subscription",
+    "provider": "firstParty",
+    "requested_model": "haiku",
+    "actual_model": "claude-haiku-4-5-20251001",
+    "tools_enabled": false,
+    "api_and_aws_overrides_removed": true,
+    "startup_auth_preflight_loaded_for_this_run": false,
+    "auth_verification_note": "Subscription auth was independently verified before the run. The reusable bridge gained an automatic startup preflight while this run was active, so that guard was not loaded in this process.",
+    "bridge_max_parallel": 3,
+    "bridge_total_timeout_seconds": 300,
+    "bedrock_client_timeout_seconds": 300,
+    "max_tokens_enforced": false,
+    "max_tokens_note": "The Claude CLI has no output-token limit flag. Requested Bedrock budgets were recorded but could not be enforced by this local transport."
+  },
+  "simulation": {
+    "seed": 20260912,
+    "gnomes": 9,
+    "days_completed": 2,
+    "ticks": 9120,
+    "day_seconds": 180,
+    "plan_turn_minutes": 180,
+    "conversation_gap_minutes": 60,
+    "conversation_wait_seconds": 120,
+    "interview_timeout_seconds": 300,
+    "normal_example_souls": true,
+    "mock_replies": false,
+    "scripted_replies": false,
+    "simulation_commit_at_start": "exact dirty tree unavailable; based on 15079c6 with local connection and transport changes later represented by c17ec1c",
+    "render_commit": "a4eacd0"
+  },
+  "evidence_counts": {
+    "model_calls_completed_by_bridge": 124,
+    "bridge_errors": 0,
+    "model_actions_applied": 107,
+    "conversation_encounters": 12,
+    "conversation_opportunities": 42,
+    "conversation_turns_spoken": 23,
+    "conversation_turns_silent": 19,
+    "deliberate_reactions": 2,
+    "reaction_moods": ["happy", "very_happy"],
+    "bedtime_interviews_total": 18,
+    "bedtime_interviews_valid": 15,
+    "bedtime_interviews_invalid": 3,
+    "daily_connection_commits": 2
+  },
+  "interviews_by_day": [
+    {"day": 1, "valid": 9, "invalid": 0},
+    {"day": 2, "valid": 6, "invalid": 3, "invalid_seats": [2, 5, 6], "cause": "Responses exceeded the 300-second game deadline and contributed zero."}
+  ],
+  "validation": {
+    "replay_ticks": 9120,
+    "hashes": "ok",
+    "replay_sha256": "6428c9ef463dacc00d31bd5e718f336af05098bb19a4a7dd90f2f071810d8804"
+  },
+  "artifacts": {
+    "replay": "two-day.bitreplay",
+    "initial_world": "01-overview.png",
+    "real_conversation": "02-conversation.png",
+    "final_debug_graph": "03-debug-graph.png",
+    "final_world": "05-final-world.png",
+    "raw_local_run": "out/claude-subscription/run-9g-2d-seed-20260912-full/"
+  },
+  "limitations": [
+    "The subscription CLI scheduled concurrent calls slowly; the run used longer local waits than production defaults.",
+    "Three day-two interviews missed even the 300-second local deadline; their contributions were correctly zero.",
+    "The replay records two deliberate reactions, but the offline still renderer did not produce a frame where either emoji was visibly identifiable, so no reaction image is claimed.",
+    "The game binary started before the final viewer-only PR50 rebase; simulation code was unchanged. Images were rendered afterward with the listed render commit."
+  ],
+  "failed_timing_run": {
+    "label": "run-9g-2d-seed-20260910-plan180",
+    "raw_local_path": "out/claude-subscription/run-9g-2d-seed-20260910-plan180/",
+    "seed": 20260910,
+    "status": "stopped during day 2 after preserving one complete day and a replay prefix",
+    "finding": "The default 45-second bedtime deadline yielded 0 of 9 valid day-one interviews because queued subscription CLI calls occupied the transport. All day-one strengths remained 0.5. This run is failure evidence and is excluded from relationship-quality claims."
+  }
+}

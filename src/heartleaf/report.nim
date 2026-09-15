@@ -17,6 +17,35 @@ proc peopleNextToText(observation: Observation): string =
       names.add(player.name)
   names.join(", ")
 
+proc conversationMembersText(
+  villager: Villager,
+  encounter: Encounter
+): string =
+  ## Other gnomes who can answer in this villager's current group.
+  if encounter == nil:
+    return ""
+  var names: seq[string]
+  for houseIndex in encounter.members:
+    if houseIndex != villager.houseIndex:
+      names.add(houseIndex.playerNameForHouse())
+  names.join(", ")
+
+proc nearbyBystandersText(
+  observation: Observation,
+  encounter: Encounter
+): string =
+  ## Nearby gnomes who are visible but not part of this conversation.
+  if encounter == nil:
+    return ""
+  var names: seq[string]
+  for player in observation.visiblePlayers:
+    if distanceSquared(
+      observation.foot.x, observation.foot.y, player.foot.x, player.foot.y
+    ) <= PersonStandRadius * PersonStandRadius and
+        not encounter.hasMember(player.houseIndex):
+      names.add(player.name)
+  names.join(", ")
+
 proc housesNextToText(
   observation: Observation,
   layout: WorldLayout
@@ -66,6 +95,27 @@ proc dinnerBellText*(
     return "Dinner bell: you are inside. Stay through 6:00pm to eat here."
   "Dinner bell: leave now if you want to be inside a house by 6:00pm."
 
+proc gardenSearchText(
+  villager: Villager,
+  observation: Observation
+): string =
+  ## Reports only the garden state already tracked for this villager. The
+  ## completed checklist distinguishes a finished action from a search that
+  ## still has unchecked stops even though all village food has been picked.
+  var checkedEvery = villager.gardenChecked.len > 0
+  for checked in villager.gardenChecked:
+    if not checked:
+      checkedEvery = false
+      break
+  if checkedEvery:
+    return "Garden search: you checked every garden. Gathering is complete " &
+      "for today; gather_plants now stands still, so choose a different " &
+      "action if you want to move."
+  if observation.gardensWithFood <= 0:
+    return "Garden search: no food remains in the village gardens. " &
+      "gather_plants will finish checking your remaining gardens, then stand still."
+  "Garden search: food remains in the village gardens."
+
 proc stateReport*(
   villager: Villager,
   observation: Observation,
@@ -75,7 +125,6 @@ proc stateReport*(
 ): string =
   ## One current-state report for the model. Empty food and next-to
   ## lines are omitted. Where you are is always said.
-  discard encounter
   result = "Day " & $observation.dayNumber & " " &
     observation.minutes.clockName() & "\n"
   result.add("Where: " & observation.whereYouAre(layout) & "\n")
@@ -88,13 +137,25 @@ proc stateReport*(
     result.add(bell & "\n")
   if villager.lastError.len > 0:
     result.add("Last JSON was ignored: " & villager.lastError & "\n")
-  let people = observation.peopleNextToText()
-  if people.len > 0:
-    result.add("People next to: " & people & "\n")
+  if villager.talking and encounter != nil:
+    let members = villager.conversationMembersText(encounter)
+    if members.len > 0:
+      result.add("Conversation members: " & members & "\n")
+    let bystanders = observation.nearbyBystandersText(encounter)
+    if bystanders.len > 0:
+      result.add("Nearby bystanders (not in this conversation): " &
+        bystanders & "\n")
+      result.add("Use talk_to with a nearby bystander's name to bring them " &
+        "into this conversation.\n")
+  else:
+    let people = observation.peopleNextToText()
+    if people.len > 0:
+      result.add("People next to: " & people & "\n")
   let carry = observation.foodCollectedText
   if carry.len > 0 and carry != "none":
     result.add("Food collected: " & carry & "\n")
   result.add("Food looking for: " & observation.foodLookingForText & "\n")
+  result.add(villager.gardenSearchText(observation) & "\n")
   if villager.connectionsText.len > 0:
     result.add("Connections: " & villager.connectionsText & "\n")
   result.add("Return JSON now.")

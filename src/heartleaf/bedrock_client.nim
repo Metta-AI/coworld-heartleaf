@@ -35,6 +35,7 @@ type
     playerSlot*: int
     playerName*: string
     messages*: seq[ConversationMessage]
+    maxTokens*: int
 
   BedrockReply* = object
     tag*: string
@@ -117,7 +118,7 @@ proc bedrockPerformanceLatency(): string =
 proc bedrockConfigured*(mockReply = ""): bool =
   ## True when the model can be called, or a mock reply stands in.
   mockReply.len > 0 or mockBedrockReply().len > 0 or
-    bedrockToken().len > 0 or hasAwsCredentialSignal()
+    hasSidecarEndpoint() or bedrockToken().len > 0 or hasAwsCredentialSignal()
 
 proc isAnthropicModel*(modelId: string): bool =
   ## True for Claude ids, which use the Anthropic InvokeModel body; every
@@ -229,7 +230,8 @@ proc bedrockBody*(
   messages: openArray[ConversationMessage],
   playerName: string,
   promptCache: bool,
-  modelId = ""
+  modelId = "",
+  maxTokens = 0
 ): string =
   ## One Anthropic Messages request body for Bedrock. Consecutive
   ## same-role messages are joined because the API requires user and
@@ -277,7 +279,7 @@ proc bedrockBody*(
   let tuning = modelTuning(modelId)
   let body = %*{
     "anthropic_version": BedrockVersion,
-    "max_tokens": max(bedrockMaxTokens(), tuning.minMaxTokens),
+    "max_tokens": max(max(bedrockMaxTokens(), tuning.minMaxTokens), maxTokens),
     "system": [textBlock(systemPrompt, promptCache)],
     "messages": chatMessages
   }
@@ -293,7 +295,8 @@ proc bedrockBody*(
 
 proc converseBody*(
   messages: openArray[ConversationMessage],
-  modelId: string
+  modelId: string,
+  maxTokens = 0
 ): string =
   ## One Bedrock Converse request body for a non-Claude model: the same
   ## turns, with consecutive same-role turns joined and a leading
@@ -313,7 +316,7 @@ proc converseBody*(
     else:
       turns.add(%*{"role": message.role, "content": [{"text": message.content}]})
   let tuning = modelTuning(modelId)
-  var inference = %*{"maxTokens": max(bedrockMaxTokens(), tuning.minMaxTokens)}
+  var inference = %*{"maxTokens": max(max(bedrockMaxTokens(), tuning.minMaxTokens), maxTokens)}
   if tuning.sampling:
     inference["temperature"] = %BedrockTemperature
   let body = %*{"messages": turns, "inferenceConfig": inference}
@@ -468,10 +471,10 @@ proc start*(client: BedrockClient, request: BedrockRequest) =
           request.messages,
           request.playerName,
           client.promptCacheEnabled,
-          request.modelId
+          request.modelId, request.maxTokens
         )
       else:
-        converseBody(request.messages, request.modelId)
+        converseBody(request.messages, request.modelId, request.maxTokens)
     client.curl.startRequest(
       "POST",
       bedrockUrl(request.modelId),

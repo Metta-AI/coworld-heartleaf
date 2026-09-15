@@ -3,7 +3,7 @@
 ## Run from the repo root: nim r tools/render_viewer_review.nim OUTPUT_DIR
 import std/[importutils, os, tables]
 import heartleaf
-import heartleaf/[common, viewer_layout]
+import heartleaf/[common, viewer_layout, connections]
 
 privateAccess(SimServer)
 let sim = initSimServer(42)
@@ -26,7 +26,10 @@ sim.players[0].x=405
 sim.players[0].y=305
 sim.players[1].x=445
 sim.players[1].y=315
-sim.heartLinks = @[(0,1,9)]
+let bonds = initConnections(@[0,1])
+sim.connectionTimeline.events = @[
+  ConnectionEvent(kind:"connection-start",tick:0,seats:bonds.seats,bonds:bonds.bonds),
+  ConnectionEvent(kind:"connection-emoji",tick:0,seat:0,target:1,emotion:VeryHappy)]
 sim.tickCount=25
 sim.updateDirectorCamera()
 proc capture(name: string, width=1280, height=720, forest=false) =

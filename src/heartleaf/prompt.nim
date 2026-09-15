@@ -12,10 +12,11 @@ const
   MechanicsBlock* = """Response format:
 Return only one JSON object and no prose. Allowed actions are
 gather_plants, talk_to, say, bye, follow, go_home, go_to_house,
-go_to_garden, wait, and wander. Fields are action, targetName,
+go_to_garden, wait, wander, and send_emoji. Fields are action, targetName,
 message, and reason. targetName is a gnome name (Ivan, Anton, Yura,
 Sasha, Maxim, Nikita, Vova, Dima, Egor). The message field is the line
 said out loud; the reason field is your notes to yourself.
+For a bedtime interview, return the requested ranking object instead of an action.
 
 Conversation memory:
 The conversation is the history of this game, all days so far,
@@ -34,16 +35,21 @@ always respond with only one JSON object.
 Talking:
 Talking is modal. Chat lines arrive as user turns, one spoken line
 each. The live report has Talking: yes or Talking: no. If Talking:
-yes, only talk_to, say, and bye do anything. If Talking: no, say and
+yes, only talk_to, say, bye, and send_emoji do anything. If Talking: no, say and
 bye do nothing; walk with wait, wander, gather_plants, follow,
 go_home, go_to_house, or go_to_garden, or start a chat with talk_to
 when you are next to someone. An illegal action is ignored: you wait,
 a parenthetical note tells you why, and the village moves on. bye
 with a spoken message is the only way to leave a conversation. say
 adds a line everyone in the group hears. talk_to with a targetName
-and message pulls that gnome in if they are next to you. If Last JSON was ignored
-is in the report, that action did nothing this turn. A conversation can grow
-to every gnome in the village.
+and message pulls that gnome in if they are next to you. While talking,
+Conversation members can answer in your group. Nearby bystanders are outside
+the group until you use talk_to to bring them in. If Last JSON was ignored is
+in the report, that action did nothing this turn. A conversation can grow to
+every gnome in the village. Speech never moves anyone. When the group
+agrees to walk, gather, follow, or go somewhere, use bye with your next
+spoken message instead of repeatedly saying you are about to go. After bye
+you immediately receive a fresh movement choice to carry out the plan.
 
 Actions:
 gather_plants walks garden to garden and picks food until every
@@ -84,16 +90,27 @@ something. Always use those names. Never say vegetable 0 or food 3.
 Ask nearby gnomes if they have one food you still need. Talk about
 the foods you gathered.
 
-Connections and winning:
-Connection points measure time truly spent together. Each spoken
-turn you take in a conversation, right after another member spoke,
-gives you and that member one connection point each. Nothing else
-earns them: shouting outside a conversation earns zero, standing
-silent in one earns zero, and dinners earn zero connection. Your
-connection score is the sum of the square root of your points with
-each gnome, so real talks with many different gnomes beat many
-words with one. The gnome with the highest connection score wins
-the game. Your current points appear in the state report."""
+Connections:
+Every pair of seated gnomes starts with a shared connection strength of 0.5
+(on a 0 to 1 scale), persistent across days of this game. At bedtime you
+will be interviewed: rank all other gnomes by felt connection TODAY and
+give brief reasons based on real events, especially help earning game
+points, care, kept/broken promises and dinner hosting/attendance.
+First rank contributes +0.5, last -0.5, with intermediate ranks spaced
+evenly. The average of both gnomes' contributions changes their shared
+connection, clamped to 0..1. With only one partner rankings are neutral.
+Missing interviews contribute zero. Your connection score sums your
+current connections; food/game score stays separate. No points for talk volume.
+You know your current connections from the report and can discuss actual changes.
+
+Send emoji:
+Use {"action":"send_emoji","targetName":"Anton","emotion":"very_happy",
+"reason":"You kept your promise and brought carrots."} to express how an
+interaction affected you. Emotions: happy, very_happy, sad, very_sad.
+Only send to a nearby visible gnome, deliberately when something matters.
+It is a visible reaction your partner notices. It does not speak a line,
+leave the conversation, or change connections immediately. Bedtime rankings
+are the only source of connection changes."""
 
 proc housesText*(): string =
   ## The fixed houses of the village, by owner name.

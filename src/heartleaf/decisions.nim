@@ -27,6 +27,7 @@ type
     GoToGarden
     Wait
     Wander
+    SendEmoji
 
   Decision* = object
     valid*: bool
@@ -38,6 +39,7 @@ type
     message*: string
     reason*: string
     error*: string
+    emotion*: string
 
 proc asciiPunctuation(text: string): string =
   ## Swaps the Unicode punctuation models like to write for the ASCII the
@@ -122,6 +124,8 @@ proc actionName*(action: Action): string =
     "wait"
   of Wander:
     "wander"
+  of SendEmoji:
+    "send_emoji"
 
 proc parseAction*(text: string): Action =
   ## Parses one strict JSON action name.
@@ -146,6 +150,8 @@ proc parseAction*(text: string): Action =
     Wait
   of "wander":
     Wander
+  of "send_emoji":
+    SendEmoji
   else:
     Invalid
 
@@ -251,6 +257,7 @@ proc parseDecision*(
   result.message = node.stringField("message")
     .stripSelfPrefix(selfNames).cleanDecisionText()
   result.reason = node.stringField("reason")
+  result.emotion = node.stringField("emotion")
   if result.houseIndex < 0 and result.targetName.len > 0:
     result.houseIndex = result.targetName.houseIndexForPlayerName()
 

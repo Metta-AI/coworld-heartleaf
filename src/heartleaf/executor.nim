@@ -648,7 +648,7 @@ proc decisionGoal(
     )
   of Wander:
     villager.wanderGoal(observation, navigation, layout)
-  of Say, Bye, Wait, Invalid:
+  of Say, Bye, Wait, Invalid, SendEmoji:
     idleGoal(observation.scene)
 
 proc goalReached(

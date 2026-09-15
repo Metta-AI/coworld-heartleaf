@@ -1,0 +1,34 @@
+Heartleaf genuine Claude subscription replay validation
+
+Replay: docs/connections/claude/two-day.bitreplay
+SHA-256: 6428c9ef463dacc00d31bd5e718f336af05098bb19a4a7dd90f2f071810d8804
+Simulation: 9 gnomes, 2 days, seed 20260912
+Model: claude-haiku-4-5-20251001, provider firstParty, claude.ai subscription
+Replies: normal example soul prompts; no mock or scripted decisions
+
+Full replay expansion result:
+summary ticks=9120 hash ok
+
+Recorded evidence:
+- 107 applied model actions
+- 12 conversation encounters and 42 conversation opportunities: 23 spoken, 19 silent
+- 2 deliberate reactions: happy and very_happy
+- 18 bedtime interviews: 15 valid, 3 deadline failures
+- 2 daily connection commits
+
+Day 1: 9/9 valid interviews.
+Day 2: 6/9 valid interviews. Seats 2, 5, and 6 exceeded the 300-second local deadline; their contributions were zero.
+
+Bridge trace: 124 completed first-party Claude calls, 0 bridge failures.
+Total bridge call duration, including queue wait: 5.103s minimum, 23.303s median, 83.830s maximum.
+Token totals reported by the CLI: 182,989 input and 312,147 output, without an independent token-type breakdown.
+
+Image SHA-256:
+- 01-overview.png: ac917cea044fdacbdeeadf63bb2ab49e21e6eef35903617e790dd7c95fb3a4d0
+- 02-conversation.png: eb9639a1cab18d27d0e1c66b570ecdbb69f1182d794c918a53d027c02627a706
+- 03-debug-graph.png: 52b0f7a07ef01e79ba37f88ad165384b3b54da66295d6cd8b54f7f5369d8e7de
+- 05-final-world.png: 71f190950d3f49f04348c4479cdad60d5460e154b784e27a6090eb2372232a9d
+
+The replay contains two reaction metadata events. The offline still renderer did not show an identifiable emoji at either exact event tick, so this package includes no claimed reaction screenshot.
+
+Runtime provenance: the exact dirty source tree was not recorded. The game started from commit 15079c6 plus local connection and transport changes later represented by c17ec1c. The bridge used bounded queue and subprocess timeouts. Its automatic auth preflight was added while this run was active and was not loaded in the running process; subscription auth had been verified independently before the run.

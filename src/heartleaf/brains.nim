@@ -6,7 +6,7 @@
 import
   std/[algorithm, json, options, os, sets, strutils, tables],
   heartleaf/[common, protocol, decisions, observation, navigation, villager,
-    executor, report, prompt, pacing, bedrock_client, souls, encounters]
+    executor, report, prompt, pacing, bedrock_client, souls, encounters, connections]
 
 const
   JoinGraceTicks = 12
@@ -54,8 +54,13 @@ type
     turnIndex*: int
     moveTicksLeft*: int
     book*: EncounterBook
-    heartLedger*: HeartLedger
-      ## Connection strengths minted by spoken conversation turns.
+    connections*: ConnectionLedger
+    connectionTimeline*: ConnectionTimeline
+    interviewDay*: int
+    interviewDeadline: float
+    interviewTimeoutSeconds: float
+    interviews*: Table[int, Interview]
+    interviewRequested: HashSet[int]
     gameLog*: GameLog
       ## One village log for LLM lifecycle and world stamps.
     conversationTick*: int
@@ -88,6 +93,14 @@ type
       ## member gets a short grace before the walker rule applies:
       ## a gnome enrolled mid-stride needs a moment to stop.
 
+proc configuredInterviewTimeout(): float =
+  ## Slow local model transports can opt into a longer, still bounded hold.
+  ## Keep the production default and neutral timeout behavior unchanged.
+  try:
+    float(clamp(parseInt(getEnv("HEARTLEAF_INTERVIEW_TIMEOUT_SECONDS", "45")),5,300))
+  except ValueError:
+    45.0
+
 proc newBrains*(
   navigation: Navigation,
   layout: WorldLayout,
@@ -107,6 +120,7 @@ proc newBrains*(
     unusableAsWait: parseBool(getEnv("HEARTLEAF_UNUSABLE_AS_WAIT", "false")),
     turnIndex: 0,
     book: initEncounterBook(),
+    interviewTimeoutSeconds: configuredInterviewTimeout(),
     gameLog: newGameLog(),
     slotSeconds: parseFloat(getEnv(
       "HEARTLEAF_CONVERSATION_TICK_SECONDS",
@@ -163,6 +177,11 @@ proc resetForNewGame*(brains: Brains) =
   for houseIndex, villager in brains.villagers.pairs:
     souls.add((houseIndex, villager.soul))
   brains.villagers.clear()
+  brains.connections = ConnectionLedger()
+  brains.connectionTimeline = ConnectionTimeline()
+  brains.interviewDay = 0
+  brains.interviews.clear()
+  brains.interviewRequested.clear()
   brains.phase = LlmPhase
   brains.turnIndex = 0
   brains.moveTicksLeft = 0
@@ -179,23 +198,24 @@ proc resetForNewGame*(brains: Brains) =
 
 proc requestTag(villager: Villager): string =
   ## The tag that routes a reply back to its villager and request.
-  $villager.houseIndex & ":" & $villager.requestSerial
+  $villager.houseIndex & ":" & $villager.requestSerial & ":" & $villager.gameNumber
 
 proc villagerForTag(brains: Brains, tag: string): Villager =
   ## The villager a reply tag belongs to, nil when stale or unknown.
   let parts = tag.split(':')
-  if parts.len != 2:
+  if parts.len != 3:
     return nil
-  var houseIndex, serial: int
+  var houseIndex, serial, game: int
   try:
     houseIndex = parseInt(parts[0])
     serial = parseInt(parts[1])
+    game = parseInt(parts[2])
   except ValueError:
     return nil
   if houseIndex notin brains.villagers:
     return nil
   let villager = brains.villagers[houseIndex]
-  if serial != villager.requestSerial or not villager.requestInFlight:
+  if game != villager.gameNumber or serial != villager.requestSerial or not villager.requestInFlight:
     return nil
   villager
 
@@ -235,19 +255,28 @@ proc startRequest(
   brains: Brains,
   villager: Villager,
   observation: Observation,
-  now: float
+  now: float,
+  interview = false
 ) =
   ## Starts one model request for a villager.
   inc villager.requestSerial
+  var messages: seq[ConversationMessage]
+  if interview:
+    messages.add(ConversationMessage(role:"system",content:villager.systemPrompt))
+    messages.add(villager.history)
+    let question = interviewPrompt(brains.connections.seats,villager.houseIndex)
+    villager.logLiveReport(question)
+    messages.add(ConversationMessage(role:"user",content:question))
+  else:
+    messages = villager.requestMessages(observation, brains.navigation,
+      brains.layout, brains.book.encounter(villager.encounterId))
   let request = BedrockRequest(
     tag: villager.requestTag(),
     modelId: villager.soul.modelId,
     playerSlot: villager.houseIndex,
     playerName: villager.name,
-    messages: villager.requestMessages(
-      observation, brains.navigation, brains.layout,
-      brains.book.encounter(villager.encounterId)
-    )
+    messages: messages,
+    maxTokens: (if interview: 1200 else: 0)
   )
   try:
     brains.client.start(request)
@@ -286,14 +315,20 @@ proc modeError*(villager: Villager, decision: Decision): string =
   if not decision.valid:
     return decision.error
   if villager.talking:
-    if decision.action notin {TalkTo, Say, Bye}:
-      return "Talking: yes, so action must be talk_to, say, or bye. " &
+    if decision.action notin {TalkTo, Say, Bye, SendEmoji}:
+      return "Talking: yes, so action must be talk_to, say, bye, or send_emoji. " &
         "bye to leave. " & decision.action.actionName() & " is rejected."
   elif decision.action in {Say, Bye} and not villager.askedWhileTalking:
     return "Talking: no, so say and bye are invalid. Use talk_to if " &
       "someone is next to you, or wait, wander, gather_plants, follow, " &
       "go_home, go_to_house, or go_to_garden."
   case decision.action
+  of SendEmoji:
+    var emotion: Emotion
+    if decision.targetName.houseIndexForPlayerName() < 0 or
+        decision.targetName == villager.name or
+        not parseEmotion(decision.emotion, emotion):
+      return "send_emoji needs another targetName and happy, very_happy, sad or very_sad."
   of TalkTo:
     if decision.targetName.len == 0 or decision.message.len == 0:
       return "talk_to needs targetName and message."
@@ -343,6 +378,15 @@ proc logJoin(brains: Brains, encounter: Encounter, houseIndex: int) =
       "enter", brains.conversationExtra(encounter)
     )
 
+proc releaseConversation(villager: Villager) =
+  ## A finished conversation needs a fresh plan, not the old idle speech action.
+  ## Drop any late reply composed for the conversation that just ended.
+  villager.abandonRequest()
+  villager.encounterId = 0
+  villager.turnReady = false
+  villager.pendingTalkName = ""
+  villager.pendingTalkMessage = ""
+
 proc dissolveIfAlone(brains: Brains, encounter: Encounter) =
   ## Drops a group that has 0 or 1 members left.
   if encounter == nil:
@@ -355,7 +399,7 @@ proc dissolveIfAlone(brains: Brains, encounter: Encounter) =
       villager.logConversation(
         "exit", "id=" & $encounter.id & " turn=" & $brains.turnIndex
       )
-      villager.encounterId = 0
+      villager.releaseConversation()
   brains.book.dissolve(encounter)
 
 proc replayTalk*(
@@ -429,14 +473,33 @@ proc leaveEncounter*(brains: Brains, speaker: Villager) =
   ## Removes a gnome from their conversation; a leftover singleton leaves.
   let encounter = brains.book.encounter(speaker.encounterId)
   if encounter == nil:
-    speaker.encounterId = 0
+    if speaker.encounterId > 0:
+      speaker.releaseConversation()
     return
   speaker.logConversation(
     "exit", "id=" & $encounter.id & " turn=" & $brains.turnIndex
   )
   encounter.removeMember(speaker.houseIndex)
-  speaker.encounterId = 0
+  speaker.releaseConversation()
   brains.dissolveIfAlone(encounter)
+
+proc recordConnection(brains: Brains, event: ConnectionEvent) =
+  brains.connectionTimeline.events.add(event)
+  var node = parseJson(event.record())
+  node["role"] = %"connection"
+  node["game"] = %brains.gameNumber
+  node["sequence"] = %brains.gameLog.entries.len
+  node["text"] = %event.kind
+  node["minutes"] = %DayStartMinutes
+  node["now"] = %0.0
+  let seat = if event.seat in brains.villagers: event.seat
+    elif brains.connections.seats.len > 0: brains.connections.seats[0] else: -1
+  if seat in brains.villagers:
+    node["minutes"] = %brains.villagers[seat].minutes
+    node["now"] = %brains.villagers[seat].now
+  let line = $node
+  brains.gameLog.add(line)
+  brains.gameLog.conversationLines.add(line)
 
 proc applySocial(
   brains: Brains,
@@ -447,6 +510,19 @@ proc applySocial(
   ## Starts, joins, speaks in, or leaves a conversation when the action
   ## is already in range. talk_to out of range waits for movement.
   case decision.action
+  of SendEmoji:
+    let target = decision.targetName.houseIndexForPlayerName()
+    var emotion: Emotion
+    if target in brains.villagers and
+        villager.visiblePlayerNear(observation, decision.targetName, PersonStandRadius) and
+        parseEmotion(decision.emotion, emotion):
+      brains.recordConnection(ConnectionEvent(kind:"connection-emoji",
+        tick:observation.tick,day:observation.dayNumber,seat:villager.houseIndex,
+        target:target,emotion:emotion))
+      villager.recordEvent("You sent " & decision.emotion & " to " & decision.targetName & ".")
+      brains.villagers[target].recordEvent(villager.name & " sent you " & decision.emotion & ".")
+    else:
+      villager.recordEvent("Emoji not sent: the target must be nearby and visible.")
   of Say:
     brains.speakInEncounter(villager, decision.message)
   of Bye:
@@ -509,8 +585,6 @@ proc logConversationTick(
   silent: bool
 ) =
   ## Stamps one closed conversation tick; the row rides into the replay.
-  if not silent:
-    brains.heartLedger.creditTurn(encounter.id, seat, encounter.members)
   if seat in brains.villagers:
     brains.villagers[seat].logConversation(
       "tick",
@@ -529,7 +603,7 @@ proc dissolveSilent(brains: Brains, encounter: Encounter) =
         "exit", "id=" & $encounter.id & " turn=" & $brains.turnIndex
       )
       villager.recordEvent("(The conversation fell quiet and ended.)")
-      villager.encounterId = 0
+      villager.releaseConversation()
   brains.book.dissolve(encounter)
 
 proc closeConversationSlot(brains: Brains, now: float) =
@@ -618,6 +692,19 @@ proc handleReply(
   villager.requestInFlight = false
   villager.lastHeldInterrupt = ""
   let took = formatFloat(now - villager.lastRequestAt, ffDecimal, 1)
+  if brains.interviewDay > brains.connections.appliedDay and
+      villager.houseIndex in brains.interviewRequested:
+    var interview = Interview(seat:villager.houseIndex,day:brains.interviewDay,
+      error:"Interview unavailable: " & reply.error)
+    if reply.outcome == Usable:
+      villager.appendHistory("assistant", reply.text)
+      interview = parseInterview(reply.text,villager.houseIndex,
+        brains.interviewDay,brains.connections.seats)
+    brains.interviews[villager.houseIndex] = interview
+    brains.recordConnection(ConnectionEvent(kind:"connection-interview",
+      tick:observation.tick,day:brains.interviewDay,seat:villager.houseIndex,
+      interview:interview))
+    return
   if brains.unusableAsWait and (reply.outcome != Usable or reply.tokenLimited()):
     let reason =
       if reply.tokenLimited(): "token_limit"
@@ -651,6 +738,7 @@ proc handleReply(
         formatFloat(wait, ffDecimal, 1) & "s")
       villager.noteLog("reply could not be used: " & decision.error)
     else:
+      villager.turnReady = true
       villager.noteUsableReply()
       brains.budget.noteHealthy()
       var extra = "tag=" & reply.tag & " outcome=usable took=" & took & "s"
@@ -661,6 +749,11 @@ proc handleReply(
         villager.applyDecision(
           observation, brains.layout, decision, fromModel = true
         )
+        brains.recordConnection(ConnectionEvent(kind:"connection-action",
+          tick:observation.tick,day:observation.dayNumber,seat:villager.houseIndex,
+          action:decision.action.actionName() &
+            (if decision.targetName.len > 0: " " & decision.targetName else: ""),
+          reason:decision.reason.cleanDecisionText()))
         brains.applySocial(villager, observation, decision)
       else:
         let error =
@@ -681,7 +774,6 @@ proc handleReply(
           observation, brains.layout, waitDecision(), fromModel = true
         )
         villager.log("llm ignored " & error & ", waiting")
-      villager.turnReady = true
   of Transient:
     villager.lastError = reply.error
     villager.logLlm("reply", "tag=" & reply.tag &
@@ -768,9 +860,7 @@ proc scheduleRequests(
   observations: Table[int, Observation],
   now: float
 ) =
-  ## Starts requests for villagers that still owe an action this LLM turn.
-  if brains.phase != LlmPhase:
-    return
+  ## Starts missing plans, including gnomes released during a movement turn.
   var ready: seq[Villager]
   for houseIndex, villager in brains.villagers.pairs:
     if houseIndex notin observations:
@@ -820,28 +910,65 @@ proc everyoneReady(
       return false
   counted > 0
 
-proc heartPairs*(brains: Brains): seq[tuple[a, b, links: int]] =
-  ## Every connected gnome pair with its strength, for the emotes.
-  brains.heartLedger.heartPairs()
-
 proc refreshConnectionTexts*(brains: Brains) =
-  ## Puts each villager's live connections into its state reports:
-  ## "Anton 2, Yura 1. Your connection score: 2.4".
   for seat, villager in brains.villagers:
     var parts: seq[string]
-    for pair in brains.heartLedger.heartPairs():
-      let other =
-        if pair.a == seat: pair.b
-        elif pair.b == seat: pair.a
-        else: -1
-      if other >= 0:
-        parts.add(other.playerNameForHouse() & " " & $pair.links)
-    villager.connectionsText =
-      if parts.len == 0:
-        ""
-      else:
-        parts.join(", ") & ". Your connection score: " &
-          formatFloat(brains.heartLedger.connectionScore(seat), ffDecimal, 1)
+    for other in brains.connections.seats:
+      if other != seat:
+        parts.add(other.playerNameForHouse() & " " &
+          formatFloat(brains.connections.bonds.strength(seat,other),ffDecimal,2))
+    villager.connectionsText = parts.join(", ") & ". Connection score: " &
+      formatFloat(brains.connections.bonds.connectionScore(seat),ffDecimal,2)
+
+proc bedtime(brains: Brains, observations: Table[int, Observation], now: float): bool =
+  ## Hold the score screen at bedtime, with a bounded wait for interviews.
+  var day, tick: int
+  for observation in observations.values:
+    if observation.minutes >= DayEndMinutes:
+      day = observation.dayNumber
+      tick = observation.tick
+  if day == 0 or day <= brains.connections.appliedDay: return false
+  if brains.interviewDay != day:
+    brains.interviewDay = day
+    brains.interviewDeadline = now + brains.interviewTimeoutSeconds
+    brains.interviews.clear()
+    brains.interviewRequested.clear()
+    for villager in brains.villagers.values:
+      villager.abandonRequest()
+      villager.recordDayEnd()
+  brains.pollReplies(observations,now)
+  for seat in brains.connections.seats:
+    let villager = brains.villagers[seat]
+    if seat in brains.interviews: continue
+    if villager.failed or now >= brains.interviewDeadline:
+      villager.abandonRequest()
+      let interview = Interview(seat:seat,day:day,
+        error:(if villager.failed: "Seat unavailable" else: "Interview deadline exceeded"))
+      brains.interviews[seat] = interview
+      brains.recordConnection(ConnectionEvent(kind:"connection-interview",
+        tick:tick,day:day,seat:seat,interview:interview))
+    elif seat notin brains.interviewRequested and brains.budget.canRequest(now):
+      brains.startRequest(villager,observations[seat],now,interview=true)
+      if villager.requestInFlight: brains.interviewRequested.incl(seat)
+  if brains.interviews.len < brains.connections.seats.len: return true
+  let before = brains.connections.bonds
+  if brains.connections.applyDay(day,brains.interviews):
+    brains.recordConnection(ConnectionEvent(kind:"connection-update",tick:tick,
+      day:day,seats:brains.connections.seats,bonds:brains.connections.bonds))
+    for seat,villager in brains.villagers:
+      for other in brains.connections.seats:
+        if other == seat: continue
+        let old = before.strength(seat,other)
+        let value = brains.connections.bonds.strength(seat,other)
+        var reason = "Their interview was unavailable."
+        let interview = brains.interviews[other]
+        for ranked in interview.ranking:
+          if ranked.seat == seat: reason = ranked.reason
+        villager.recordEvent("Bedtime connection with " & other.playerNameForHouse() &
+          ": " & formatFloat(old,ffDecimal,2) & " -> " &
+          formatFloat(value,ffDecimal,2) & ". Their reason: " & reason)
+    brains.refreshConnectionTexts()
+  false
 
 proc advance*(
   brains: Brains,
@@ -849,6 +976,21 @@ proc advance*(
   now: float
 ): BrainFrame =
   ## One frame: memories, LLM wait-for-all, or one movement tick.
+  var seats: seq[int]
+  var tick: int
+  for seat in brains.villagers.keys:
+    if seat in observations:
+      seats.add(seat)
+      tick = observations[seat].tick
+  seats.sort()
+  if seats.len > 0 and seats != brains.connections.seats:
+    let old = brains.connections
+    brains.connections = initConnections(seats)
+    brains.connections.appliedDay = old.appliedDay
+    for bond in brains.connections.bonds.mitems:
+      bond.strength = old.bonds.strength(bond.a,bond.b)
+    brains.recordConnection(ConnectionEvent(kind:"connection-start",tick:tick,
+      day:1,seats:brains.connections.seats,bonds:brains.connections.bonds))
   brains.refreshConnectionTexts()
   for houseIndex, villager in brains.villagers.pairs:
     if houseIndex notin observations:
@@ -856,6 +998,9 @@ proc advance*(
     let observation = observations[houseIndex]
     villager.now = now
     if observation.dayNumber != villager.dayNumber and villager.dayNumber > 0:
+      # startNewDay clears the villager's id; first remove their old
+      # membership so yesterday's book cannot schedule or detach them.
+      brains.leaveEncounter(villager)
       villager.abandonRequest()
       villager.turnReady = false
       brains.phase = LlmPhase
@@ -865,6 +1010,10 @@ proc advance*(
       brains.slotSpeakerFor.clear()
       brains.slotMoveTicks = 0
     villager.observeWorld(observation, brains.navigation, brains.layout)
+  if brains.bedtime(observations,now):
+    result.paused = true
+    result.blockedNames.add("bedtime interviews")
+    return
   brains.pollReplies(observations, now)
   brains.scheduleRequests(observations, now)
   if brains.client.mockReply.len > 0:
@@ -896,22 +1045,24 @@ proc advance*(
         )
       ))
     return
+  if not brains.everyoneReady(observations):
+    result.paused = true
+    return
   if brains.phase == LlmPhase:
-    if brains.everyoneReady(observations):
-      brains.phase = MovePhase
-      inc brains.turnIndex
-      brains.moveTicksLeft = brains.planTurnTicks
-      brains.logPhase("move")
-      brains.slotMoveTicks = 0
-    else:
-      result.paused = true
-      return
+    brains.phase = MovePhase
+    inc brains.turnIndex
+    brains.moveTicksLeft = brains.planTurnTicks
+    brains.logPhase("move")
+    brains.slotMoveTicks = 0
   # The conversation clock inside a movement turn: every interval each
   # circle gets one speaking slot, and the world holds while the line
   # is composed. Game time advances only between the holds.
   if brains.slotSpeakerFor.len > 0:
     if brains.slotSettled(now):
       brains.closeConversationSlot(now)
+      if not brains.everyoneReady(observations):
+        result.paused = true
+        return
     else:
       result.paused = true
       for seat in brains.slotWaitSeats:
@@ -929,6 +1080,9 @@ proc advance*(
           if seat in brains.villagers:
             result.blockedNames.add(brains.villagers[seat].name)
         return
+  if not brains.everyoneReady(observations):
+    result.paused = true
+    return
   brains.tickTalks(observations)
   result.paused = false
   for houseIndex, villager in brains.villagers.pairs:
