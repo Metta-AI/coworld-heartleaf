@@ -6627,6 +6627,12 @@ when not defined(emscripten):
     var results = parseJson(sim.dailyResultsJson())
     if getEnv("HEARTLEAF_EVAL_ARTIFACT") == "true":
       results["evaluation"] = brains.evaluationEvidence()
+    let trainingDir = getEnv("HEARTLEAF_TRAINING_DIR")
+    if trainingDir.len > 0:
+      createDir(trainingDir)
+      for seat, villager in brains.villagers.pairs:
+        writeFile(trainingDir / ("seat" & $seat & ".jsonl"),
+          villager.logEntries.join("\n") & "\n")
     runtimeConfig.writeResults($results & "\n")
 
   proc runServerLoop*(
