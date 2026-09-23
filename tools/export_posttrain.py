@@ -61,46 +61,43 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
                 for index, row in enumerate(rows)
             ):
                 raise ValueError(f"{seed}: incomplete seat {seat} transcript")
-            system = None
-            history = []
-            report = None
+            request = None
+            request_tag = None
             decision_id = 0
             for row in rows:
                 role, index, content = row["role"], row["index"], row["text"]
-                if role == "system":
-                    if system is not None or index != -1:
-                        raise ValueError(f"{seed}: duplicate system prompt for seat {seat}")
-                    system = {"role": "system", "content": content}
-                elif role == "user" and index == -1:
-                    report = {"role": "user", "content": content}
+                if role == "request":
+                    snapshot = json.loads(content)
+                    request_tag = snapshot["tag"]
+                    request = snapshot["messages"]
+                    if index != -1 or not request or request[0]["role"] != "system" or request[-1]["role"] != "user":
+                        raise ValueError(f"{seed}: invalid request for seat {seat}")
+                    if any(message["role"] not in ("system", "user", "assistant") for message in request):
+                        raise ValueError(f"{seed}: invalid request message for seat {seat}")
                 elif role == "assistant":
-                    if index != len(history) or system is None or report is None:
-                        raise ValueError(f"{seed}: incomplete prompt for seat {seat}")
+                    if request is None:
+                        raise ValueError(f"{seed}: missing exact request for seat {seat}")
                     if decision_id >= len(replies[seat]):
                         raise ValueError(f"{seed}: missing reply evidence for seat {seat}")
                     event = replies[seat][decision_id]
-                    if event["tick"] != row["tick"]:
-                        raise ValueError(f"{seed}: reply tick differs for seat {seat}")
+                    if event["tick"] != row["tick"] or f"tag={request_tag} " not in event["text"]:
+                        raise ValueError(f"{seed}: reply differs from request for seat {seat}")
                     if "outcome=usable" in event["text"] and "ignored=wait" not in event["text"]:
                         examples[split(seed)].append(
                             {
                                 "episode_id": digest(f"{source_revision}:{seed}:{seat}".encode())[:32],
                                 "seed": seed,
                                 "decision_id": decision_id,
-                                "prompt": [system, *history, report],
+                                "prompt": request,
                                 "completion": [{"role": "assistant", "content": content}],
                                 "game": "heartleaf",
                                 "action_schema_revision": "heartleaf-decisions-v1",
                             }
                         )
-                    history.append({"role": role, "content": content})
-                    report = None
+                    request = None
+                    request_tag = None
                     decision_id += 1
-                elif role == "user":
-                    if index != len(history):
-                        raise ValueError(f"{seed}: missing history for seat {seat}")
-                    history.append({"role": role, "content": content})
-                else:
+                elif role not in ("system", "user"):
                     raise ValueError(f"{seed}: unknown transcript role {role}")
             if decision_id != len(replies[seat]):
                 raise ValueError(f"{seed}: reply evidence differs for seat {seat}")
@@ -115,7 +112,7 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
 
     if not all(examples.values()):
         raise ValueError("Both splits need completed games with accepted decisions")
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
     for name, rows in examples.items():
         (output / f"{name}.jsonl").write_text(
             "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows)
