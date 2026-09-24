@@ -37,6 +37,12 @@ class TrainingBridgeTest(unittest.TestCase):
             self.assertNotIn(
                 "highest connection score wins", first["messages"][0]["content"]
             )
+            self.assertEqual(first["game"], "heartleaf")
+            self.assertEqual(first["engine_seat"], first["seat"])
+            self.assertEqual(first["semantic_view"], {"report": first["messages"][-1]["content"]})
+            self.assertEqual(first["inbox"], [])
+            self.assertEqual(first["speech_messages"], [])
+            self.assertIsNone(first["typed_question"])
             counts = [0] * players
             rejected = 0
             decisions = 0

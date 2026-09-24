@@ -27,7 +27,11 @@ supports Linux and macOS.
 ```
 
 Reset creates a fresh game with one through nine seats. Seeds are decimal integer strings. The result is a `decision`
-with `decision_id`, `seat`, `turn`, `messages`, and `action_schema`. Submit the model's unmodified response string:
+with `decision_id`, `game`, `seat`, `engine_seat`, `turn`, `semantic_view`, `inbox`,
+`messages`, `speech_messages`, `typed_question`, and `action_schema`. The
+semantic view repeats only the player-visible live report. Heartleaf's open
+text actions use the model's native tokenizer, so `typed_question` is null.
+Submit the model's unmodified response string:
 
 ```json
 { "kind": "step", "decision_id": 0, "response": "{\"action\":\"gather_plants\"}" }
@@ -45,10 +49,9 @@ A terminal observation has `kind: terminal` and seat-indexed `scores` copied fro
 only after the configured days finish. Reset is required before further steps. Malformed commands fail the process.
 There is no teacher endpoint or automatic model retry.
 
-**The current Metta collector cannot consume this bridge yet.** Its shared `Rejected` result has no next observation.
-Add `consumed_rejection` to the shared protocol and collectors before connecting them. Exclude those responses from
-positive supervised labels; keep the executed wait separate from model success. Do not convert consumed rejections into
-accepted actions or retry the same turn.
+The Metta collector consumes `consumed_rejection` as a spent turn. It excludes
+those responses from positive supervised labels and retains the executed wait
+separately from model success.
 
 ## Prompt and scoring condition
 

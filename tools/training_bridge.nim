@@ -63,8 +63,11 @@ proc nextObservation(): JsonNode =
     messages.add(%*{"role": message.role, "content": message.content})
   %*{
     "kind": "decision", "decision_id": serial,
-    "seat": request.playerSlot, "turn": brain.turnIndex,
-    "messages": messages,
+    "game": "heartleaf", "seat": request.playerSlot,
+    "engine_seat": request.playerSlot, "turn": brain.turnIndex,
+    "semantic_view": {"report": request.messages[^1].content},
+    "inbox": [], "messages": messages, "speech_messages": [],
+    "typed_question": newJNull(),
     "action_schema": {
       "type": "object", "required": ["action"],
       "properties": {

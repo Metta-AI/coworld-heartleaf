@@ -48,6 +48,12 @@ jobs:
       - name: Build the soul player
         run: nim c -d:release players/soul_player/soul_player.nim
 
+      - name: Build the offline training bridge
+        run: nim c -d:release tools/training_bridge.nim
+
+      - name: Offline training bridge protocol tests
+        run: python3 -m unittest discover -s tests -p 'test_training_bridge.py' -v
+
       - name: Unit tests
         run: nim r tests/tests.nim
 
