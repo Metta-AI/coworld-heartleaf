@@ -414,6 +414,7 @@ type
     nameX: int
 
   DirectorCard = object
+    portraitLift: int
     playerIndex: int
     lines: seq[string]
     connectionStrength: float
@@ -570,6 +571,7 @@ type
     chatFeedIndex: int
     chatFeedShownAt: float
       ## Live wall time, or replay presentation time, when the line appeared.
+    chatFeedTime: float          ## Presentation clock; pauses with replay.
     convQueue*: seq[ConversationSpan]
       ## The replay's conversations in birth order, for the
       ## conversation-queue show. Viewer-only, never hashed; empty in
@@ -3654,7 +3656,13 @@ proc activeDirectorCards(sim: SimServer, width: int): seq[DirectorCard] =
     for i, player in sim.players:
       if i notin speakers and player.playerName == item.speaker.name and
           player.mapIndex == sim.directorSceneMap:
-        result.add(sim.directorCard(item, i, width))
+        var card = sim.directorCard(item, i, width)
+        if index == sim.chatFeedIndex:
+          let age = sim.chatFeedTime - sim.chatFeedShownAt
+          # One small pixel-aligned hop for the newly aired speaker only.
+          if age >= 0 and age < 0.4:
+            card.portraitLift = int(round(4.0 * sin(PI * age / 0.4)))
+        result.add(card)
         speakers.add(i)
         break
 
@@ -3751,7 +3759,7 @@ proc addDirectorCard(
   packet.addRgbaSpriteCached(cache, faceId, source,
     "director portrait " & player.playerName)
   packet.addObject(28_100 + card.playerIndex, rect.x + 7,
-    rect.y + card.headerY - card.portraitSize, 2,
+    rect.y + card.headerY - card.portraitSize - card.portraitLift, 2,
     DirectorFrameLayerId, faceId)
   let
     headerWidth = card.headerWidths[0] + card.headerWidths[1]
@@ -5611,6 +5619,7 @@ proc replayDialoguePending(sim: SimServer): bool =
     sim.chatFeedNextIndex(index + 1) >= 0
 
 proc advanceChatFeed*(sim: SimServer, now = epochTime()) =
+  sim.chatFeedTime = now
   ## Advances the delay-chat cursor by wall clock, not sim ticks or
   ## render frames. Each queued line stays up ChatFeedShowSeconds so it
   ## can be read while the sim zips or the viewer runs at 60fps. While
@@ -5664,6 +5673,7 @@ proc advanceChatFeed*(sim: SimServer, now = epochTime()) =
     sim.chatFeedShownAt = now
 
 proc advanceChatFeedNow*(sim: SimServer, now = epochTime()) =
+  sim.chatFeedTime = now
   ## Steps the delay chat to the next line when its voice finishes. The
   ## director retains each gnome's latest aired line in their own card.
   if sim.convQueue.len > 0 and not sim.convQueueCommitted and
