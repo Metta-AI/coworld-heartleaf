@@ -3,8 +3,10 @@
 import argparse
 import hashlib
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 
 def digest(data: bytes) -> str:
@@ -18,13 +20,17 @@ def split(seed: str) -> str:
 
 def export(runs: Path, output: Path, source_revision: str) -> dict:
     examples: dict[str, list[dict]] = {"train": [], "validation": []}
+    episodes = []
     sources = []
     for run in sorted(path for path in runs.iterdir() if path.is_dir()):
         seed = run.name
         results_path = run / "results.json"
         results = json.loads(results_path.read_text())
         completed = json.loads((run / "completed.json").read_text())
-        if completed != {"seed": int(seed.removeprefix("heartleaf-")), "scores": results["scores"]}:
+        if completed != {
+            "seed": int(seed.removeprefix("heartleaf-")),
+            "scores": results["scores"],
+        }:
             raise ValueError(f"{seed}: completion proof differs from results")
         evidence = results["evaluation"]
         if evidence["schema"] != "heartleaf-eval-evidence/1":
@@ -35,6 +41,7 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
         ):
             raise ValueError(f"{seed}: incomplete evaluation events")
         seats = {entry["slot"] for entry in evidence["accepted_seats"]}
+        models = {entry["slot"]: entry["model"] for entry in evidence["accepted_seats"]}
         if seats != set(range(len(results["scores"]))):
             raise ValueError(f"{seed}: scores and accepted seats disagree")
 
@@ -45,16 +52,32 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
             ):
                 replies[event["seat"]].append(event)
 
-        files = sorted(run.glob("seat*.jsonl"))
+        files = sorted(
+            path
+            for path in run.glob("seat*.jsonl")
+            if path.stem.removeprefix("seat").isdigit()
+        )
         if len(files) != len(seats):
             raise ValueError(f"{seed}: missing player transcript")
         file_digests = {}
+        episode_id = digest(f"{source_revision}:{seed}".encode())[:32]
+        decisions = []
         for path in files:
             seat = int(path.stem.removeprefix("seat"))
             if seat not in seats:
                 raise ValueError(f"{seed}: unexpected seat {seat}")
             raw = path.read_bytes()
             file_digests[path.name] = digest(raw)
+            effects_path = run / f"seat{seat}.effects.jsonl"
+            effects_raw = effects_path.read_bytes()
+            file_digests[effects_path.name] = digest(effects_raw)
+            effects = {}
+            for line in effects_raw.splitlines():
+                effect = json.loads(line)
+                key = (effect["index"], effect["tick"])
+                if effect["game"] != 1 or effect["seat"] != seat or key in effects:
+                    raise ValueError(f"{seed}: invalid applied effect for seat {seat}")
+                effects[key] = effect
             rows = [json.loads(line) for line in raw.decode().splitlines()]
             if not rows or any(
                 row["game"] != 1 or row["seat"] != seat or row["sequence"] != index
@@ -69,7 +92,9 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
                 role, index, content = row["role"], row["index"], row["text"]
                 if role == "system":
                     if system is not None or index != -1:
-                        raise ValueError(f"{seed}: duplicate system prompt for seat {seat}")
+                        raise ValueError(
+                            f"{seed}: duplicate system prompt for seat {seat}"
+                        )
                     system = {"role": "system", "content": content}
                 elif role == "user" and index == -1:
                     report = {"role": "user", "content": content}
@@ -77,18 +102,107 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
                     if index != len(history) or system is None or report is None:
                         raise ValueError(f"{seed}: incomplete prompt for seat {seat}")
                     if decision_id >= len(replies[seat]):
-                        raise ValueError(f"{seed}: missing reply evidence for seat {seat}")
+                        raise ValueError(
+                            f"{seed}: missing reply evidence for seat {seat}"
+                        )
                     event = replies[seat][decision_id]
                     if event["tick"] != row["tick"]:
                         raise ValueError(f"{seed}: reply tick differs for seat {seat}")
-                    if "outcome=usable" in event["text"] and "ignored=wait" not in event["text"]:
+                    accepted = (
+                        "outcome=usable" in event["text"]
+                        and "ignored=wait" not in event["text"]
+                    )
+                    ignored = "ignored=wait" in event["text"]
+                    effect = effects.pop((index, row["tick"]), None)
+                    if (accepted or ignored) and effect is None:
+                        raise ValueError(
+                            f"{seed}: reply and applied action disagree for seat {seat}"
+                        )
+                    if (
+                        effect is not None
+                        and not accepted
+                        and effect["action"] != "wait"
+                    ):
+                        raise ValueError(
+                            f"{seed}: rejected reply applied a non-wait action for seat {seat}"
+                        )
+                    action = (
+                        {
+                            key: effect[key]
+                            for key in (
+                                "action",
+                                "target_name",
+                                "house_index",
+                                "message",
+                                "reason",
+                            )
+                        }
+                        if effect is not None
+                        else None
+                    )
+                    prompt = [system, *history, report]
+                    attempt_id = f"{seat}:{decision_id}"
+                    status = (
+                        "accepted"
+                        if accepted
+                        else "fallback"
+                        if effect is not None
+                        else "rejected"
+                    )
+                    decisions.append(
+                        {
+                            "schema_version": "1",
+                            "event_type": "decision",
+                            "event_id": str(
+                                uuid5(NAMESPACE_URL, f"{episode_id}:{attempt_id}")
+                            ),
+                            "episode_id": episode_id,
+                            "decision_id": attempt_id,
+                            "decision_index": -1,
+                            "game": "heartleaf",
+                            "source_revision": source_revision,
+                            "seat": str(seat),
+                            "visibility": "private",
+                            "observation": report["content"],
+                            "prompt": prompt,
+                            "attempts": [
+                                {
+                                    "attempt_id": attempt_id,
+                                    "policy": models[seat],
+                                    "origin": "model",
+                                    "response": content,
+                                    "parsed_action": action if accepted else None,
+                                    "accepted": accepted,
+                                    "rejection_reason": None
+                                    if accepted
+                                    else "ignored_action"
+                                    if ignored
+                                    else "parse_error",
+                                }
+                            ],
+                            "selected_attempt_id": attempt_id if accepted else None,
+                            "executed_action": action,
+                            "action_status": status,
+                            "fallback_origin": "game_wait"
+                            if status == "fallback"
+                            else None,
+                            "reward": None,
+                            "terminal": False,
+                            "_tick": row["tick"],
+                        }
+                    )
+                    if accepted:
                         examples[split(seed)].append(
                             {
-                                "episode_id": digest(f"{source_revision}:{seed}:{seat}".encode())[:32],
+                                "episode_id": digest(
+                                    f"{source_revision}:{seed}:{seat}".encode()
+                                )[:32],
                                 "seed": seed,
                                 "decision_id": decision_id,
-                                "prompt": [system, *history, report],
-                                "completion": [{"role": "assistant", "content": content}],
+                                "prompt": prompt,
+                                "completion": [
+                                    {"role": "assistant", "content": content}
+                                ],
                                 "game": "heartleaf",
                                 "action_schema_revision": "heartleaf-decisions-v1",
                             }
@@ -104,6 +218,36 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
                     raise ValueError(f"{seed}: unknown transcript role {role}")
             if decision_id != len(replies[seat]):
                 raise ValueError(f"{seed}: reply evidence differs for seat {seat}")
+            if effects:
+                raise ValueError(f"{seed}: unmatched applied effects for seat {seat}")
+        decisions.sort(
+            key=lambda item: (
+                item.pop("_tick"),
+                int(item["seat"]),
+                int(item["decision_id"].split(":")[1]),
+            )
+        )
+        for index, decision in enumerate(decisions):
+            decision["decision_index"] = index
+        episodes.append(
+            {
+                "schema_version": "1",
+                "episode": {
+                    "schema_version": "1",
+                    "event_type": "episode",
+                    "event_id": str(uuid5(NAMESPACE_URL, f"{episode_id}:completed")),
+                    "episode_id": episode_id,
+                    "game": "heartleaf",
+                    "source_revision": source_revision,
+                    "status": "completed",
+                    "outcome": results["scores"],
+                    "participant_outcomes": {
+                        str(seat): score for seat, score in enumerate(results["scores"])
+                    },
+                },
+                "decisions": decisions,
+            }
+        )
         sources.append(
             {
                 "seed": seed,
@@ -115,21 +259,30 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
 
     if not all(examples.values()):
         raise ValueError("Both splits need completed games with accepted decisions")
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, exist_ok=False, mode=0o700)
     for name, rows in examples.items():
-        (output / f"{name}.jsonl").write_text(
+        path = output / f"{name}.jsonl"
+        path.write_text(
             "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows)
         )
+        os.chmod(path, 0o600)
+    episodes_path = output / "episodes.jsonl"
+    episodes_path.write_text(
+        "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in episodes)
+    )
+    os.chmod(episodes_path, 0o600)
     manifest = {
         "schema_version": 1,
         "game": "heartleaf",
         "source_revision": source_revision,
         "train_examples": len(examples["train"]),
         "validation_examples": len(examples["validation"]),
+        "complete_episodes": len(episodes),
         "selection": "usable replies from complete games with matching player transcripts",
         "sources": sources,
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    os.chmod(output / "manifest.json", 0o600)
     return manifest
 
 

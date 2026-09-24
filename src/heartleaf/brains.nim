@@ -208,7 +208,8 @@ proc abandonRequest(villager: Villager) =
 
 proc spendFailedDecision(
   brains: Brains, villager: Villager, observation: Observation,
-  reply: BedrockReply, reason: string, now: float
+  reply: BedrockReply, reason: string, now: float,
+  linkedAssistant = false
 ) =
   ## One JSON event retains exact response bytes and stable join fields.
   villager.logLlm("failure", "event=" & $(%*{
@@ -224,7 +225,7 @@ proc spendFailedDecision(
   villager.retryAt = 0.0
   villager.retryBackoffSeconds = 0.0
   villager.failures = 0
-  villager.applyDecision(observation, brains.layout, waitDecision(), fromModel = false)
+  villager.applyDecision(observation, brains.layout, waitDecision(), fromModel = linkedAssistant)
   villager.turnReady = true
   villager.log("llm unusable action=wait reason=" & reason)
   if reason == "deadline_exceeded":
@@ -641,7 +642,8 @@ proc handleReply(
         villager.logLlm("reply", "tag=" & reply.tag & " outcome=parse took=" & took & "s")
         var diagnostic = reply
         diagnostic.error = decision.error
-        brains.spendFailedDecision(villager, observation, diagnostic, "invalid_response", now)
+        brains.spendFailedDecision(villager, observation, diagnostic, "invalid_response", now,
+          linkedAssistant = true)
         return
       let wait = villager.noteTransientFailure(brains.budget, now)
       villager.logLlm("reply", "tag=" & reply.tag &
@@ -675,7 +677,8 @@ proc handleReply(
         if brains.unusableAsWait:
           var diagnostic = reply
           diagnostic.error = error
-          brains.spendFailedDecision(villager, observation, diagnostic, "invalid_action", now)
+          brains.spendFailedDecision(villager, observation, diagnostic, "invalid_action", now,
+            linkedAssistant = true)
           return
         villager.applyDecision(
           observation, brains.layout, waitDecision(), fromModel = true

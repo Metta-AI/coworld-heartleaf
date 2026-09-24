@@ -6633,6 +6633,8 @@ when not defined(emscripten):
       for seat, villager in brains.villagers.pairs:
         writeFile(trainingDir / ("seat" & $seat & ".jsonl"),
           villager.logEntries.join("\n") & "\n")
+        writeFile(trainingDir / ("seat" & $seat & ".effects.jsonl"),
+          villager.decisionEffects.join("\n") & "\n")
     runtimeConfig.writeResults($results & "\n")
 
   proc runServerLoop*(

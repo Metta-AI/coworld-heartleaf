@@ -4,7 +4,7 @@
 ## villager state; the simulation applies the masks.
 
 import
-  std/[math, sets, strutils],
+  std/[json, math, sets, strutils],
   bitworld/spriteprotocol,
   heartleaf/[common, protocol, decisions, observation, navigation, villager]
 
@@ -741,12 +741,26 @@ proc applyDecision*(
 ) =
   ## Stores one decision. The current path survives when the new decision
   ## heads for the same place.
-  discard fromModel
   var nextDecision = decision
   nextDecision.houseIndex = nextDecision.namedHouse()
   let keepPath = villager.hasDecision and
     villager.decision.sameDecisionTarget(nextDecision)
   villager.decision = nextDecision
+  if fromModel:
+    var replyIndex = villager.history.high
+    while villager.history[replyIndex].role != "assistant":
+      dec replyIndex
+    villager.decisionEffects.add($( %*{
+      "game": villager.gameNumber,
+      "seat": villager.houseIndex,
+      "index": replyIndex,
+      "tick": villager.tick,
+      "action": nextDecision.action.actionName(),
+      "target_name": nextDecision.targetName,
+      "house_index": nextDecision.houseIndex,
+      "message": nextDecision.message,
+      "reason": nextDecision.reason
+    }))
   villager.hasDecision = true
   villager.decisionChatSent = false
   villager.decisionStartedTick = observation.tick

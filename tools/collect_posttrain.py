@@ -20,6 +20,7 @@ def collect(
     timeout_seconds: int,
     mock_reply: str,
 ) -> None:
+    os.umask(0o077)
     output.mkdir(parents=True, exist_ok=False)
     for offset, seed in enumerate(seeds):
         run = output / f"heartleaf-{seed}"

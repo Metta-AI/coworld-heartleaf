@@ -60,6 +60,8 @@ type
     logEntries*: seq[string]
       ## Conversation the model sees: system, user, and assistant
       ## turns, one JSON line each, streamed to the seat's player.
+    decisionEffects*: seq[string]
+      ## Private applied model decisions, never streamed to the player.
     gameLog*: GameLog
       ## Shared village log for LLM lifecycle and world stamps.
     gameNumber*: int
