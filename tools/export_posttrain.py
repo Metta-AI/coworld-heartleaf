@@ -237,6 +237,7 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
                     "event_type": "episode",
                     "event_id": str(uuid5(NAMESPACE_URL, f"{episode_id}:completed")),
                     "episode_id": episode_id,
+                    "seed_family": seed,
                     "game": "heartleaf",
                     "source_revision": source_revision,
                     "status": "completed",

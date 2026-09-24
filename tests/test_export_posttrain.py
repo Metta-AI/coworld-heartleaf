@@ -104,6 +104,23 @@ class ExportTest(unittest.TestCase):
                 for line in (output / "episodes.jsonl").read_text().splitlines()
             ]
             self.assertEqual(len(episodes), 2)
+            self.assertEqual(
+                [episode["episode"]["seed_family"] for episode in episodes],
+                ["heartleaf-1", "heartleaf-2"],
+            )
+            export(runs, root / "other-revision", "another-revision")
+            revised = [
+                json.loads(line)
+                for line in (root / "other-revision" / "episodes.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(
+                [episode["episode"]["seed_family"] for episode in revised],
+                [episode["episode"]["seed_family"] for episode in episodes],
+            )
+            self.assertNotEqual(
+                [episode["episode"]["episode_id"] for episode in revised],
+                [episode["episode"]["episode_id"] for episode in episodes],
+            )
             for episode in episodes:
                 accepted, second = episode["decisions"]
                 self.assertEqual(accepted["executed_action"]["action"], "gather_plants")
