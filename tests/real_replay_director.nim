@@ -5,7 +5,7 @@ import heartleaf, replays
 import ../tools/viewer_review_render
 privateAccess(SimServer)
 privateAccess(PlayerViewerState)
-let path = "docs/connections/claude/two-day.bitreplay"
+let path = "tests/fixtures/connections-two-day.bitreplay"
 let data = loadReplay(path)
 let cfg = data.replaySimConfig()
 let sim = initSimServer(cfg.seed,cfg.dayTicks)

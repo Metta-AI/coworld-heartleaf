@@ -8,7 +8,7 @@ import bitworld/spriteprotocol
 privateAccess(SimServer)
 
 let
-  path = "docs/connections/claude/two-day.bitreplay"
+  path = "tests/fixtures/connections-two-day.bitreplay"
   data = loadReplay(path)
   cfg = data.replaySimConfig()
   sim = initSimServer(cfg.seed, cfg.dayTicks)
@@ -153,7 +153,7 @@ echo "Replay boundary dialogue airs once on its speakers' map, survives room cut
 # curfew's preceding tick. Keep the shot until that last line has been read.
 block departureTick:
   let
-    finalPath = "docs/connections/review-2026-09-14/episode.bitreplay"
+    finalPath = "tests/fixtures/connections-farewell.bitreplay"
     finalData = loadReplay(finalPath)
     finalCfg = finalData.replaySimConfig()
     finalSim = initSimServer(finalCfg.seed, finalCfg.dayTicks)
