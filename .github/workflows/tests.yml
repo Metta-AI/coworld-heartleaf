@@ -21,6 +21,8 @@ jobs:
           python -m venv tmp/heartleaf-eval-venv
           tmp/heartleaf-eval-venv/bin/pip install -r eval/requirements.txt
           tmp/heartleaf-eval-venv/bin/python -m unittest discover -s eval/tests -p 'test_heartleaf_eval*.py'
+      - name: Training exporter contract tests
+        run: python -m unittest discover -s tests -p 'test_export_posttrain.py'
 
   tests:
     runs-on: ubuntu-latest

@@ -33,8 +33,11 @@ python3 tools/export_posttrain.py \
   --source-revision "$(git rev-parse HEAD)"
 ```
 
-The collector writes each seat's player-visible transcript beside the game
-results when `HEARTLEAF_TRAINING_DIR` is set. It writes `completed.json` only
+The collector writes each seat's player-visible transcript and exact model
+request messages beside the game results when `HEARTLEAF_TRAINING_DIR` is set.
+Request snapshots preserve the history actually sent after a context shrink;
+the exporter uses these snapshots rather than rebuilding prompts from earlier
+transcript rows. Collection and dataset directories are owner-only. The collector writes `completed.json` only
 after the server and soul uploaders exit successfully. The exporter checks
 that completion proof, event sequence, seat count, transcript sequence, and
 reply ticks agree. It retains decisions that the game accepted and splits

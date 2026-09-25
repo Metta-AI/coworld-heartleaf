@@ -20,10 +20,10 @@ def collect(
     timeout_seconds: int,
     mock_reply: str,
 ) -> None:
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
     for offset, seed in enumerate(seeds):
         run = output / f"heartleaf-{seed}"
-        run.mkdir()
+        run.mkdir(mode=0o700)
         tokens = [f"training-{seed}-{seat}" for seat in range(len(souls))]
         config = {
             "tokens": tokens,
