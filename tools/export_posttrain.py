@@ -84,30 +84,43 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
                 for index, row in enumerate(rows)
             ):
                 raise ValueError(f"{seed}: incomplete seat {seat} transcript")
-            system = None
-            history = []
-            report = None
+            request = None
+            request_tag = None
             decision_id = 0
             for row in rows:
                 role, index, content = row["role"], row["index"], row["text"]
-                if role == "system":
-                    if system is not None or index != -1:
-                        raise ValueError(
-                            f"{seed}: duplicate system prompt for seat {seat}"
+                if role == "request":
+                    snapshot = json.loads(content)
+                    request_tag = snapshot["tag"]
+                    request = snapshot["messages"]
+                    if (
+                        index != -1
+                        or not request
+                        or request[0]["role"] != "system"
+                        or request[-1]["role"] != "user"
+                        or any(
+                            message["role"] not in ("system", "user", "assistant")
+                            for message in request
                         )
-                    system = {"role": "system", "content": content}
-                elif role == "user" and index == -1:
-                    report = {"role": "user", "content": content}
+                    ):
+                        raise ValueError(f"{seed}: invalid request for seat {seat}")
                 elif role == "assistant":
-                    if index != len(history) or system is None or report is None:
-                        raise ValueError(f"{seed}: incomplete prompt for seat {seat}")
+                    if request is None:
+                        raise ValueError(
+                            f"{seed}: missing exact request for seat {seat}"
+                        )
                     if decision_id >= len(replies[seat]):
                         raise ValueError(
                             f"{seed}: missing reply evidence for seat {seat}"
                         )
                     event = replies[seat][decision_id]
-                    if event["tick"] != row["tick"]:
-                        raise ValueError(f"{seed}: reply tick differs for seat {seat}")
+                    if (
+                        event["tick"] != row["tick"]
+                        or f"tag={request_tag} " not in event["text"]
+                    ):
+                        raise ValueError(
+                            f"{seed}: reply differs from request for seat {seat}"
+                        )
                     accepted = (
                         "outcome=usable" in event["text"]
                         and "ignored=wait" not in event["text"]
@@ -140,7 +153,7 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
                         if effect is not None
                         else None
                     )
-                    prompt = [system, *history, report]
+                    prompt = request
                     attempt_id = f"{seat}:{decision_id}"
                     status = (
                         "accepted"
@@ -163,7 +176,7 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
                             "source_revision": source_revision,
                             "seat": str(seat),
                             "visibility": "private",
-                            "observation": report["content"],
+                            "observation": request[-1]["content"],
                             "prompt": prompt,
                             "attempts": [
                                 {
@@ -207,14 +220,10 @@ def export(runs: Path, output: Path, source_revision: str) -> dict:
                                 "action_schema_revision": "heartleaf-decisions-v1",
                             }
                         )
-                    history.append({"role": role, "content": content})
-                    report = None
+                    request = None
+                    request_tag = None
                     decision_id += 1
-                elif role == "user":
-                    if index != len(history):
-                        raise ValueError(f"{seed}: missing history for seat {seat}")
-                    history.append({"role": role, "content": content})
-                else:
+                elif role not in ("system", "user"):
                     raise ValueError(f"{seed}: unknown transcript role {role}")
             if decision_id != len(replies[seat]):
                 raise ValueError(f"{seed}: reply evidence differs for seat {seat}")

@@ -631,6 +631,10 @@ block:
     navigation = sim.navigationFor()
     layout = sim.worldLayoutFor()
   let first = villager.requestMessages(observation, navigation, layout)
+  villager.logRequest("0:1", first)
+  let recorded = parseJson(villager.logEntries[^1])
+  doAssert recorded["role"].getStr() == "request"
+  doAssert parseJson(recorded["text"].getStr())["messages"][^1]["content"].getStr() == first[^1].content
   doAssert first[^1].role == "user"
   doAssert "Where:" in first[^1].content, "the live report is last"
   doAssert villager.history.len == 0, "the live report is not kept"
@@ -645,7 +649,7 @@ block:
   var reportLogs = 0
   for entry in villager.logEntries:
     let node = parseJson(entry)
-    if node["index"].getInt() < 0 and "Where:" in node["text"].getStr():
+    if node["role"].getStr() == "user" and node["index"].getInt() < 0 and "Where:" in node["text"].getStr():
       inc reportLogs
   doAssert reportLogs == 2, "each live report is logged"
 

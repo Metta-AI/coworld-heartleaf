@@ -250,6 +250,8 @@ proc startRequest(
       brains.book.encounter(villager.encounterId)
     )
   )
+  if getEnv("HEARTLEAF_TRAINING_DIR").len > 0:
+    villager.logRequest(request.tag, request.messages)
   try:
     brains.client.start(request)
   except CatchableError as e:

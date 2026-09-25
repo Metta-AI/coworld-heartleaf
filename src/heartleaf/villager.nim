@@ -388,6 +388,13 @@ proc logLiveReport*(villager: Villager, text: string) =
   ## turn: the next call gets a fresh report instead.
   villager.logEntries.add(villager.logEntry("user", -1, text))
 
+proc logRequest*(villager: Villager, tag: string, messages: openArray[ConversationMessage]) =
+  ## Retain the exact model input, including the current history after any shrink.
+  var rows = newJArray()
+  for message in messages:
+    rows.add(%*{"role": message.role, "content": message.content})
+  villager.logEntries.add(villager.logEntry("request", -1, $(%*{"tag": tag, "messages": rows})))
+
 proc logSystemPrompt*(villager: Villager) =
   ## Logs the system prompt once; it heads every request but is not a
   ## turn of the history.
