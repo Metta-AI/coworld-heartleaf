@@ -42,7 +42,11 @@ after the server and soul uploaders exit successfully. The exporter checks
 that completion proof, event sequence, seat count, transcript sequence, and
 reply ticks agree. It retains decisions that the game accepted and splits
 whole games by seed into `train.jsonl` and `validation.jsonl`. The manifest
-records source revision, scores, and input hashes. The files contain soul
+records source revision, scores, and input hashes. `episodes.jsonl` contains
+one shared `CompleteEpisode` per game, including the exact text prompt and
+reply, rejected attempts, and the action the game applied. Applied actions
+come from a private journal; the player-visible transcript is unchanged.
+The files contain soul
 prompts, observations, and model replies; keep them out of the repository.
 
 The exported rows use the Metta post-training `Example` schema. From a Metta

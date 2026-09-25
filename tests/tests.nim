@@ -1441,6 +1441,23 @@ block:
   doAssert sawReply, "the reply is logged"
   doAssert villager.turnReady
 
+echo "Testing applied decision journal joins assistant before diagnostic history"
+block:
+  let soul = parseSoul("#!test-model\nYour name is {name}.\n")
+  let villager = newVillager(0, soul, 1)
+  villager.appendHistory("assistant", """{"action":"dance"}""")
+  let replyIndex = villager.history.high
+  villager.recordEvent("Your action was ignored")
+  villager.applyDecision(
+    Observation(scene: Outdoors, tick: 10), WorldLayout(),
+    waitDecision(), fromModel = true
+  )
+  doAssert villager.decisionEffects.len == 1
+  let effect = parseJson(villager.decisionEffects[0])
+  doAssert effect["index"].getInt() == replyIndex
+  doAssert effect["action"].getStr() == "wait"
+  doAssert villager.history[replyIndex].role == "assistant"
+
 echo "Testing veggies picked log"
 block:
   let soul = parseSoul("#!test-model\nYour name is {name}.\n")
