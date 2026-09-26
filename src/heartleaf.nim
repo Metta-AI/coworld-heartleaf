@@ -5,7 +5,7 @@ import
   bitworld/resources, bitworld/sprites,
   heartleaf/common, heartleaf/protocol, heartleaf/souls,
   heartleaf/observation, heartleaf/navigation, heartleaf/encounters,
-  heartleaf/viewer_layout, heartleaf/pixel_emotes,
+  heartleaf/viewer_layout, heartleaf/pixel_emotes, heartleaf/connections,
   replays
 
 when not defined(emscripten):
@@ -53,6 +53,7 @@ const
   DuskStartMinutes = 17 * 60
   DayTintCount = 5
   TargetFps = 24.0
+  NightlyReviewSeconds = 8.0
   HealthzPath = "/healthz"
   WebSocketPath = "/player"
   GlobalWebSocketPath = "/global"
@@ -267,16 +268,12 @@ const
   InsetChatZ = 31_601
   OutlinePad = 1
   TrailObjectBase = 24_000
-  HeartSpriteBase = 9200        ## emote sprites: 3 tiers x 4 fade stages,
+  HeartSpriteBase = 9200        ## emote sprites: 4 emotions x 4 fade stages,
                                 ## clear of the chat-banner glyph ids
   HeartObjectBase = 27_000
   HeartLinkZ = 30_010           ## emotes float above heads and name tags
-  HeartLinkMaxDistance = 190    ## px; emotes only show when the pair is near
-  HeartEmotePeriod = 72         ## ticks per emote cycle (3s at 24 ticks/s)
   HeartEmoteLife = 44           ## ticks one emote lives while rising
-  HeartEmoteStagger = 16        ## ticks between emotes of the same cycle
   HeartEmoteRise = 26           ## px an emote rises over its life
-  HeartEmoteCount = [1, 2, 3]   ## emotes per cycle, by connection tier
   ConversationRingSpriteBase = 8900
   ConversationRingObjectBase = 26_000
   ConversationRingZ = 55
@@ -399,9 +396,13 @@ type
     mapIndex: int
     speaker: ChatFeedPerson
     hearers: seq[ChatFeedPerson]
+    connectionPartner: string
+      ## A recorded conversation peer, preferred over a nearby bystander.
     message: string
     aired: bool
       ## Shown by the feed in this camera shot; never expose queued future lines.
+    everAired: bool
+      ## Reading progress survives room cuts; a seek rebuilds the feed.
     encounterId: int
       ## The conversation this line was spoken in, from the replay's
       ## records; zero when unknown (live play, dinner talk, shouts).
@@ -413,8 +414,12 @@ type
     nameX: int
 
   DirectorCard = object
+    portraitLift: int
     playerIndex: int
     lines: seq[string]
+    connectionStrength: float
+    connectionLabel: string
+    hasConnection: bool
     headerLines: array[2, seq[string]]
     headerWidths: array[2, int]
     width, height, portraitSize, frameY, headerX, headerY, headerHeight, textX, textY: int
@@ -499,15 +504,17 @@ type
     trails: seq[seq[TrailPoint]]  ## viewer-only history, never hashed
     conversationCircles*: seq[tuple[x, y, radius: int]]
       ## Viewer-only sparkle rings. Never hashed.
+    connectionTimeline*: ConnectionTimeline
+    replayNights: seq[NightlyReview]
+    replayNightIndex: int
+    replayNightActive: bool
+    replayNightTime: float
     conversationTimeline: ConversationTimeline
       ## Replay chat-mode objects from game.log. Empty in live play.
     conversationAnchors: Table[int, ConversationAnchor]
       ## Frozen ring positions keyed by encounter id. Viewer-only.
-    heartLinks*: seq[tuple[a, b, links: int]]
-      ## Connection strengths from the heart ledger (live) or the
-      ## conversation records (replay). Viewer-only, never hashed.
-    heartEmoteBases: array[3, RgbaSprite]
-      ## The emote sprites: neutral, smile, star-eyes, by tier.
+    heartEmoteBases: array[4, RgbaSprite]
+      ## Happy, very happy, sad and very sad pixel faces.
     heartEmoteFaded: Table[int, RgbaSprite]
       ## Alpha-faded emote variants, cached by tier * 4 + fade.
     directorCamX, directorCamY, directorCamW, directorCamH: float
@@ -529,6 +536,8 @@ type
       ## Overview-to-full-window framing follows the same camera glide.
     replayPresentationDirty: bool
       ## A paused seek redraws its destination once, without animating.
+    replayBoundaryChatsCaptured: bool
+      ## The final tick's chats were queued before its actors leave the scene.
     replayPresentationTime: float
       ## Playback time for dialogue; pausing freezes its remaining read time.
     directorWideTicks: int
@@ -562,6 +571,7 @@ type
     chatFeedIndex: int
     chatFeedShownAt: float
       ## Live wall time, or replay presentation time, when the line appeared.
+    chatFeedTime: float          ## Presentation clock; pauses with replay.
     convQueue*: seq[ConversationSpan]
       ## The replay's conversations in birth order, for the
       ## conversation-queue show. Viewer-only, never hashed; empty in
@@ -633,6 +643,17 @@ type
     cardLayoutKey: string
     cardRowHeight: int
     cardSlots: array[HouseCount, int] # One-based slots, retained for this shot.
+    nightJumpButtons: seq[tuple[tick:int, rect:ViewerRect]]
+    nightStageButtons: seq[tuple[stage:int, rect:ViewerRect]]
+    nightRankButtons: seq[tuple[rank:int, rect:ViewerRect]]
+    nightRankSelection: int
+    nightLastStage: string
+    connectionDebugOpen*: bool
+    connectionDebugButton: ViewerRect
+    connectionSelection*: int # seat + 1; zero means full-graph introduction
+    connectionReflectionPage: int
+    connectionNextPage: ViewerRect
+    connectionButtons: seq[tuple[seat:int, rect:ViewerRect]]
 
   RunConfig = ref object
     address: string
@@ -1051,7 +1072,7 @@ proc initSimServer*(seed = DefaultSeed, dayTicks = DayTicks): SimServer =
     raise newException(HeartleafError, "Gnome sheet has no gnomes.")
   result.textFont = readPixelFont(tiny5Path)
   result.chatBanner = loadChatBanner(dataRoot / "chatbanner.aseprite")
-  for tier in 0 ..< 3:
+  for tier in 0 ..< 4:
     result.heartEmoteBases[tier] = pixelEmote(tier)
   result.portraits = loadPortraits(dataRoot)
   result.conversationAnchors = initTable[int, ConversationAnchor]()
@@ -2680,6 +2701,7 @@ proc attachConversationTimeline*(
   sim.conversationTimeline = ConversationTimeline()
   sim.conversationAnchors.clear()
   let recorded = data.conversationLogText()
+  sim.connectionTimeline = parseConnections(recorded)
   if recorded.len > 0:
     # Older replays share the record channel with circle rows and may
     # hold no conversation events at all - only records that actually
@@ -2711,20 +2733,14 @@ proc heartNoise(a, b, c: int): float =
   h = h xor (h shr 16)
   float(int(h and 1023) - 512) / 512.0
 
-proc heartLinkTier(links: int): int =
-  ## Maps one pair's conversation history to an emote tier: a neutral
-  ## face for a fresh acquaintance, a smile for a friend, star-eyes
-  ## for a strong bond.
-  clamp((links - 1) div 4, 0, 2)
-
 proc heartEmoteSprite(sim: SimServer, tier, fade: int): RgbaSprite =
   ## Dissolve whole pixel blocks. Bitworld overwrites within a layer:
   ## partial alpha would erase the map underneath and fade to black.
-  let key = clamp(tier, 0, 2) * 4 + clamp(fade, 0, 3)
+  let key = clamp(tier, 0, 3) * 4 + clamp(fade, 0, 3)
   if key in sim.heartEmoteFaded:
     return sim.heartEmoteFaded[key]
   let
-    base = sim.heartEmoteBases[clamp(tier, 0, 2)]
+    base = sim.heartEmoteBases[clamp(tier, 0, 3)]
     visible = [4, 4, 4, 2][clamp(fade, 0, 3)]
   var sprite = newRgbaSprite(base.width, base.height)
   for y in 0 ..< base.height:
@@ -2747,71 +2763,29 @@ proc addHeartEmoteObjects(
   viewportWidth,
   viewportHeight: int
 ) =
-  ## Appends Sims-style emote emojis: each gnome standing near a
-  ## connected partner sends its own emoji drifting up from its head
-  ## and fading. The connection tier picks the face - a plain smile for
-  ## a fresh acquaintance up to heart-eyes for the strongest bonds -
-  ## and how many rise per cycle. In replays the strengths come from a
-  ## pure fold of the conversation records inside the replay file, so
-  ## the animation is identical everywhere.
-  let pairs =
-    if sim.conversationTimeline.events.len > 0:
-      sim.conversationTimeline.heartLinksAt(sim.tickCount)
-    else:
-      sim.heartLinks
-  if pairs.len == 0:
-    return
-  var byHouse: array[HouseCount, int]
-  for h in 0 ..< HouseCount:
-    byHouse[h] = -1
-  for i, player in sim.players:
-    let house = player.homeFlag - HomeMapIndexBase
-    if house >= 0 and house < HouseCount:
-      byHouse[house] = i
-  var bestTier: array[HouseCount, int]
-  for h in 0 ..< HouseCount:
-    bestTier[h] = -1
-  for pair in pairs:
-    if pair.links <= 0:
-      continue
-    if pair.a < 0 or pair.a >= HouseCount or
-        pair.b < 0 or pair.b >= HouseCount:
-      continue
-    if byHouse[pair.a] < 0 or byHouse[pair.b] < 0:
-      continue
-    let
-      a = sim.players[byHouse[pair.a]]
-      b = sim.players[byHouse[pair.b]]
-    if a.mapIndex != mapIndex or b.mapIndex != mapIndex:
-      continue
-    let
-      dxi = b.x - a.x
-      dyi = b.y - a.y
-    if dxi * dxi + dyi * dyi > HeartLinkMaxDistance * HeartLinkMaxDistance:
-      continue
-    let tier = heartLinkTier(pair.links)
-    bestTier[pair.a] = max(bestTier[pair.a], tier)
-    bestTier[pair.b] = max(bestTier[pair.b], tier)
-  for house in 0 ..< HouseCount:
-    if bestTier[house] < 0 or byHouse[house] < 0:
-      continue
-    let
-      player = sim.players[byHouse[house]]
-      tier = bestTier[house]
-    for k in 0 ..< HeartEmoteCount[tier]:
-      let
-        age = (sim.tickCount + house * 13 + k * HeartEmoteStagger) mod
-          HeartEmotePeriod
-      if age >= HeartEmoteLife:
-        continue
+  ## Only recorded, deliberately sent reactions appear, never proximity loops.
+  var reactions: Table[int,ConnectionEvent]
+  for event in sim.connectionTimeline.events:
+    if event.tick > sim.tickCount: break
+    if event.kind == "connection-emoji" and sim.tickCount-event.tick < HeartEmoteLife:
+      reactions[event.seat] = event
+  for house,event in reactions:
+    var playerIndex = -1
+    for i,p in sim.players:
+      if p.homeFlag == HomeMapIndexBase+house: playerIndex = i
+    if playerIndex < 0: continue
+    let player = sim.players[playerIndex]
+    if player.mapIndex != mapIndex: continue
+    let tier = ord(event.emotion)
+    for k in 0 ..< 1:
+      let age = sim.tickCount-event.tick
       let
         progress = age.float / HeartEmoteLife.float
         fade = clamp(int(progress * 4.0), 0, 3)
-        cycle = (sim.tickCount + house * 13 + k * HeartEmoteStagger) div
-          HeartEmotePeriod
+        cycle = event.tick
         sway = heartNoise(house, k, cycle) * 5.0
         sprite = sim.heartEmoteSprite(tier, fade)
-        spriteId = HeartSpriteBase + clamp(tier, 0, 2) * 4 + fade
+        spriteId = HeartSpriteBase + clamp(tier, 0, 3) * 4 + fade
         ex = player.x + GnomeSpriteSize div 2 - sprite.width div 2 +
           int(sway)
         tagHeight = sim.textFont.height + NamePadY * 2
@@ -3317,6 +3291,20 @@ proc releaseDirectorCommit(sim: SimServer) =
     sim.startDirectorTween()
     echo "Director commit out at tick ", sim.tickCount
 
+proc committedDialogueMap(sim: SimServer): int =
+  ## Follow unread dialogue even when a conversation moves into a dinner room.
+  ## The room tour resumes after the committed speaker's reading time.
+  if sim.convQueueCommitted:
+    let index = sim.chatFeedIndex
+    if index >= 0 and index < sim.chatFeed.len and
+        sim.chatFeed[index].encounterId == sim.chatFeedScope and
+        sim.replayPresentationTime - sim.chatFeedShownAt < ChatFeedShowSeconds:
+      return sim.chatFeed[index].mapIndex
+    for item in sim.chatFeed:
+      if not item.everAired and item.encounterId == sim.chatFeedScope:
+        return item.mapIndex
+  -1
+
 proc updateDirectorCamera*(sim: SimServer, snap = false) =
   ## Advances the director cut's camera one frame. The cut is fully
   ## automated: the wide shot of the village while nothing happens, a
@@ -3351,6 +3339,12 @@ proc updateDirectorCamera*(sim: SimServer, snap = false) =
     if host >= 0 and sim.players[host].mapIndex == mapIndex and
         sim.homeVisitors(mapIndex, host).len > 0:
       dinnerHouses.add(houseIndex)
+  let dialogueMap = sim.committedDialogueMap()
+  if dialogueMap == MainMapIndex:
+    dinnerHouses.setLen(0)
+  elif dialogueMap >= HomeMapIndexBase and
+      dialogueMap < HomeMapIndexBase + HouseCount:
+    dinnerHouses = @[dialogueMap - HomeMapIndexBase]
   if dinnerHouses.len > 0:
     if sim.directorDinnerTtl <= 0 or
         sim.directorDinnerHouse notin dinnerHouses:
@@ -3376,6 +3370,8 @@ proc updateDirectorCamera*(sim: SimServer, snap = false) =
       sim.directorTweenLeft = 0
       sim.chatFeedIndex = -1
       for item in sim.chatFeed.mitems: item.aired = false
+      # Clear the visible cards, retaining each line's reading progress so
+      # visiting another room cannot replay the outdoor dialogue history.
     sim.directorFrameBlend = 1.0
     if snap:
       sim.directorCamX = 0
@@ -3391,6 +3387,8 @@ proc updateDirectorCamera*(sim: SimServer, snap = false) =
   sim.directorDinnerTtl = 0
   if sim.directorSceneMap != MainMapIndex:
     sim.directorSceneMap = MainMapIndex
+    sim.chatFeedIndex = -1
+    for item in sim.chatFeed.mitems: item.aired = false
     sim.directorCamX = 0
     sim.directorCamY = 0
     sim.directorCamW = mapW
@@ -3604,10 +3602,10 @@ proc directorCard(sim: SimServer, item: ChatFeedItem, playerIndex, width: int): 
   let
     player = sim.players[playerIndex]
     seat = player.homeFlag - HomeMapIndexBase
-    heartPairs = if sim.conversationTimeline.events.len > 0:
-      sim.conversationTimeline.heartLinksAt(sim.tickCount) else: sim.heartLinks
   var listener = -1
   for hearer in item.hearers:
+    if item.connectionPartner.len > 0 and hearer.name != item.connectionPartner:
+      continue
     for i, candidate in sim.players:
       if candidate.playerName == hearer.name:
         listener = i
@@ -3616,14 +3614,11 @@ proc directorCard(sim: SimServer, item: ChatFeedItem, playerIndex, width: int): 
   var relation = "Speaking"
   if listener >= 0:
     let otherSeat = sim.players[listener].homeFlag - HomeMapIndexBase
-    var strength = 0
-    for pair in heartPairs:
-      if (pair.a == seat and pair.b == otherSeat) or
-          (pair.b == seat and pair.a == otherSeat):
-        strength = pair.links
-        break
-    const moods = ["Neutral towards ", "Friendly towards ", "Best friends with "]
-    relation = moods[heartLinkTier(strength)] & sim.players[listener].playerName
+    let bonds = sim.connectionTimeline.bondsAt(sim.tickCount)
+    result.hasConnection = bonds.len > 0
+    result.connectionStrength = bonds.strength(seat,otherSeat)
+    result.connectionLabel = "Connection with " & sim.players[listener].playerName
+    relation = if result.hasConnection: "" else: "Not recorded"
   result.width = width
   result.portraitSize = DirectorCardPortraitSize
   result.frameY = 14
@@ -3637,6 +3632,7 @@ proc directorCard(sim: SimServer, item: ChatFeedItem, playerIndex, width: int): 
   for i, label in [player.playerName, relation]:
     result.headerLines[i] = sim.viewerMessageLines(label, result.headerWidths[i] - 12, ViewerBodyHeight)
     result.headerHeight = max(result.headerHeight, result.headerLines[i].len * 9 + 9)
+  if result.hasConnection: result.headerHeight = max(result.headerHeight, 28)
   # The portrait protrudes above the parchment; the light wooden identity
   # strip straddles its bottom edge, as in the approved reference.
   result.headerY = max(result.portraitSize, result.textY + result.lines.len * 9 + 3)
@@ -3660,7 +3656,13 @@ proc activeDirectorCards(sim: SimServer, width: int): seq[DirectorCard] =
     for i, player in sim.players:
       if i notin speakers and player.playerName == item.speaker.name and
           player.mapIndex == sim.directorSceneMap:
-        result.add(sim.directorCard(item, i, width))
+        var card = sim.directorCard(item, i, width)
+        if index == sim.chatFeedIndex:
+          let age = sim.chatFeedTime - sim.chatFeedShownAt
+          # One small pixel-aligned hop for the newly aired speaker only.
+          if age >= 0 and age < 0.4:
+            card.portraitLift = int(round(4.0 * sin(PI * age / 0.4)))
+        result.add(card)
         speakers.add(i)
         break
 
@@ -3713,7 +3715,7 @@ proc hasCachedSprite(cache: seq[SpriteCacheEntry], id, width, height: int): bool
 
 proc addViewerText(packet: var seq[uint8], sim: SimServer,
     cache: var seq[SpriteCacheEntry], text: string, x, y: int,
-    slot: var int, height = ViewerBodyHeight, objectBase = 52_000, dark = false) =
+    slot: var int, height = ViewerBodyHeight, objectBase = 52_000, dark = false, z = 6) =
   ## Reuse the original Tiny5 glyphs and spacing, with no font resampling.
   var dx = x
   for ch in text:
@@ -3726,7 +3728,7 @@ proc addViewerText(packet: var seq[uint8], sim: SimServer,
           glyph.pixels[i+1] = 0x38
           glyph.pixels[i+2] = 0x1f
       packet.addRgbaSpriteCached(cache, id, glyph, "director glyph " & $ch)
-    packet.addObject(objectBase+slot,dx,y,6,DirectorFrameLayerId,
+    packet.addObject(objectBase+slot,dx,y,z,DirectorFrameLayerId,
       id)
     inc slot
     dx += sim.textFont.glyphAdvance(ch)
@@ -3757,7 +3759,7 @@ proc addDirectorCard(
   packet.addRgbaSpriteCached(cache, faceId, source,
     "director portrait " & player.playerName)
   packet.addObject(28_100 + card.playerIndex, rect.x + 7,
-    rect.y + card.headerY - card.portraitSize, 2,
+    rect.y + card.headerY - card.portraitSize - card.portraitLift, 2,
     DirectorFrameLayerId, faceId)
   let
     headerWidth = card.headerWidths[0] + card.headerWidths[1]
@@ -3779,6 +3781,17 @@ proc addDirectorCard(
     packet.addRgbaSpriteCached(cache, headerId, header, "director name and relationship")
   packet.addObject(28_200 + card.playerIndex, rect.x + card.headerX, rect.y + card.headerY, 3,
     DirectorFrameLayerId, headerId)
+  if card.hasConnection:
+    let id = 12_000 + int(round(card.connectionStrength * 100))
+    packet.addRgbaSpriteCached(cache,id,pixelHearts(card.connectionStrength),"connection hearts " & $card.connectionStrength)
+    let start = rect.x + card.headerX + card.headerWidths[0]
+    let labelWidth = sim.viewerTextWidth(card.connectionLabel,ViewerBodyHeight)
+    var labelSlot = 0
+    packet.addViewerText(sim,cache,card.connectionLabel,start+(card.headerWidths[1]-labelWidth) div 2,rect.y+card.headerY+6,
+      labelSlot,objectBase=64_000+card.playerIndex*100,dark=true)
+    packet.addObject(64_900+card.playerIndex,
+      start+(card.headerWidths[1]-25) div 2,
+      rect.y+card.headerY+16,6,DirectorFrameLayerId,id)
   var glyphSlot = 0
   template textRun(text: string, x, y: int) =
     packet.addViewerText(sim, cache, text, x, y, glyphSlot, ViewerBodyHeight, 54_000 + card.playerIndex * 1_000, dark = true)
@@ -3825,30 +3838,287 @@ proc addViewerChrome(packet: var seq[uint8], sim: SimServer,
     ch = layout.canvasHeight
     wide = layout.railWidth > 0
     panelY = if wide: 4 else: 36
+    shownBonds = if sim.replayNightActive and sim.replayNightTime < float(sim.replayNights[sim.replayNightIndex].seats.len)*NightlyReviewSeconds:
+      sim.replayNights[sim.replayNightIndex].before
+      else: sim.connectionTimeline.bondsAt(sim.tickCount)
+    hasConnections = shownBonds.len > 0
+    heading = if hasConnections: 14 else: 0
     rowH = FaceSize + 1
     # The wide rail sits beside the transport, so it can use the full height.
-    rowCount = min(sim.players.len, max(0,(ch-panelY-20-(if wide: 4 else: 52)) div rowH))
+    rowCount = min(sim.players.len, max(0,(ch-panelY-20-heading-(if wide: 4 else: 52)) div rowH))
   if not wide:
     let left = ViewerRect(x:4,y:18,width:94,height:18)
     frame(9853,50_003,left)
     text("Leaderboard",left.x+9,23)
     state.leaderboardButton = left
   if (wide or state.openPanel == 1) and rowCount > 0:
-    let panel = ViewerRect(x:2,y:panelY,width:ViewerRailWidth-4,height:20+rowCount*rowH)
+    let panel = ViewerRect(x:2,y:panelY,width:ViewerRailWidth-4,height:20+heading+rowCount*rowH)
     frame(9850,50_000,panel)
+    if hasConnections:
+      text("Pts",panel.x+10,panel.y+10)
+      text("Connections",panel.x+55,panel.y+10)
     var order: seq[int]
     for i in 0..<sim.players.len: order.add(i)
     order.sort(proc(a,b:int):int = cmp(sim.players[b].score,sim.players[a].score))
     for rank, i in order:
       if rank >= rowCount: break
       let p = sim.players[i]
-      let y = panel.y+10+rank*rowH
+      let y = panel.y+10+heading+rank*rowH
+      let seat = p.homeFlag-HomeMapIndexBase
       text(p.score.globalPanelScoreText(),panel.x+10,y+9)
-      portrait(p.homeFlag-HomeMapIndexBase,panel.x+30,y)
+      portrait(seat,panel.x+26,y)
       let displayName = if p.username == p.playerName: p.playerName else: p.attributedDisplayName()
-      let label = sim.viewerMessageLines(displayName,panel.width-69,ViewerNameHeight)
+      let label = sim.viewerMessageLines(displayName,panel.width-65,ViewerNameHeight)
       for line in 0..<min(2,label.len):
-        text(label[line],panel.x+59,y+9-(if label.len>1: 4 else: 0)+line*9,ViewerNameHeight)
+        text(label[line],panel.x+55,y+(if hasConnections: 0 else: 9-(if label.len>1: 4 else: 0))+line*9,ViewerNameHeight)
+      if hasConnections:
+        let bonds = shownBonds
+        let strength = bonds.connectionScore(seat)/max(1,sim.players.len-1).float
+        let id = 13_000+seat
+        packet.addRgbaSpriteCached(state.spriteCache,id,pixelHearts(strength,10,1),
+          "leaderboard connections " & $seat & " " & $strength)
+        packet.addObject(65_000+seat,panel.x+55,y+20,6,DirectorFrameLayerId,id)
+
+proc addConnectionDebug(packet: var seq[uint8], sim: SimServer,
+    state: PlayerViewerState, layout: ViewerLayout) =
+  ## Explicit, opt-in observer view. It always includes every recorded pair.
+  state.connectionButtons.setLen(0)
+  state.connectionNextPage = ViewerRect()
+  let cw = layout.canvasWidth
+  let ch = layout.canvasHeight
+  let toggle = ViewerRect(x:max(4,cw-116),y:18,width:112,height:18)
+  state.connectionDebugButton = toggle
+  var slot = 0
+  template text(label:string,x,y:int) =
+    packet.addViewerText(sim,state.spriteCache,label,x,y,slot,
+      objectBase=48_000,dark=true,z=24)
+  template frame(id,obj:int,r:ViewerRect) =
+    if not state.spriteCache.hasCachedSprite(id,r.width,r.height):
+      packet.addRgbaSpriteCached(state.spriteCache,id,
+        sim.chatBanner.nineSliceSprite(r.width,r.height,PanelSliceInset),
+        "connections debug frame " & $id)
+    packet.addObject(obj,r.x,r.y,20,DirectorFrameLayerId,id)
+  frame(14_002,65_102,toggle)
+  text((if state.connectionDebugOpen: "Close debug graph" else: "Debug: connections"),toggle.x+9,toggle.y+6)
+  if not state.connectionDebugOpen: return
+  let panel = ViewerRect(x:max(4,(cw-min(600,cw-8)) div 2),y:40,
+    width:min(600,cw-8),height:max(120,min(360,ch-80)))
+  frame(14_000,65_100,panel)
+  text("Village connections",panel.x+14,panel.y+12)
+  let bonds = sim.connectionTimeline.bondsAt(sim.tickCount)
+  if bonds.len == 0:
+    text("Connections were not recorded in this replay.",panel.x+14,panel.y+30)
+    return
+  let split = panel.width >= 490
+  let gw = if split: panel.width-238 else: panel.width-24
+  let gh = if split: panel.height-48 else: min(210,(panel.height-60)*2 div 3)
+  let gx = panel.x+12
+  let gy = panel.y+29
+  var seats:seq[int]
+  for bond in bonds:
+    if bond.a notin seats: seats.add(bond.a)
+    if bond.b notin seats: seats.add(bond.b)
+  seats.sort()
+  let smallGraph = gh < 160
+  let faceSize = if smallGraph: 18 else: 27
+  var nodes:seq[tuple[seat,x,y:int]]
+  for i,seat in seats:
+    let angle = 2.0*PI*i.float/max(1,seats.len).float-PI/2
+    if smallGraph:
+      nodes.add((seat,(i mod 3)*gw div 3+gw div 6,(i div 3)*gh div 3+13))
+    else:
+      nodes.add((seat,gw div 2+int(cos(angle)*(gw.float/2-38)),
+        gh div 2+int(sin(angle)*(gh.float/2-27))))
+  var graph = newRgbaSprite(gw,gh)
+  for bond in bonds:
+    var a,b:tuple[seat,x,y:int]
+    for node in nodes:
+      if node.seat == bond.a: a=node
+      if node.seat == bond.b: b=node
+    let selected = state.connectionSelection == bond.a+1 or state.connectionSelection == bond.b+1
+    let color = if selected:
+        (if bond.strength >= 0.5: rgba(70,105,47,255) else: rgba(156,74,51,255))
+      elif bond.strength >= 0.5: rgba(157,166,106,255)
+      else: rgba(194,155,117,255)
+    let steps = max(abs(b.x-a.x),abs(b.y-a.y))
+    for step in 0..steps:
+      graph.fillRect(a.x+(b.x-a.x)*step div max(1,steps),
+        a.y+(b.y-a.y)*step div max(1,steps),1+(if selected: int(bond.strength*2) else: 0),1,color)
+  packet.addRgbaSpriteCached(state.spriteCache,14_001,graph,
+    "full connection graph " & $bonds & " " & $state.connectionSelection)
+  packet.addObject(65_101,gx,gy,21,DirectorFrameLayerId,14_001)
+  for node in nodes:
+    for player in sim.players:
+      if player.homeFlag != HomeMapIndexBase+node.seat: continue
+      let id = 14_100+player.gnomeIndex
+      if not state.spriteCache.hasCachedSprite(id,faceSize,faceSize):
+        let source = sim.portraits[player.gnomeIndex mod sim.portraits.len]
+        var icon = newRgbaSprite(faceSize,faceSize)
+        let step = 54 div faceSize
+        for y in 0..<faceSize:
+          for x in 0..<faceSize: icon.putPixel(x,y,source.rgbaSpriteAt(x*step,y*step))
+        packet.addRgbaSpriteCached(state.spriteCache,id,icon,"graph portrait " & player.playerName)
+      packet.addObject(65_130+node.seat,gx+node.x-faceSize div 2,gy+node.y-faceSize+8,23,DirectorFrameLayerId,id)
+    let label = node.seat.playerNameForHouse()
+    text(label,gx+node.x-sim.viewerTextWidth(label,ViewerBodyHeight) div 2,gy+node.y+10)
+    if state.connectionSelection > 0 and node.seat != state.connectionSelection-1:
+      let percentage = $int(round(bonds.strength(state.connectionSelection-1,node.seat)*100)) & "%"
+      text(percentage,gx+node.x-sim.viewerTextWidth(percentage,ViewerBodyHeight) div 2,gy+node.y+19)
+    state.connectionButtons.add((node.seat,ViewerRect(x:gx+node.x-21,y:gy+node.y-faceSize+6,width:42,height:faceSize+17)))
+  text($seats.len & " gnomes  /  " & $bonds.len & " connections",gx,gy+gh+3)
+  let dx = if split: gx+gw+12 else: gx+2
+  var y = if split: gy else: gy+gh+16
+  let width = if split: 208 else: gw-4
+  var lines:seq[string]
+  if state.connectionSelection == 0:
+    lines.add("All pairs are shown.")
+    lines.add("")
+    lines.add(sim.viewerMessageLines("Select a gnome to see its strengths and bedtime reflections. Select it again to clear.",width,ViewerBodyHeight))
+    lines.add("")
+    lines.add(sim.viewerMessageLines("Green: 50% or more. Brown: below 50%. Values follow the current replay time.",width,ViewerBodyHeight))
+  else:
+    let seat = state.connectionSelection-1
+    lines.add(seat.playerNameForHouse() & "'s connections")
+    let action = sim.connectionTimeline.latestAction(sim.tickCount,seat)
+    lines.add(sim.viewerMessageLines("Doing: " & (if action.action.len > 0: action.action.replace('_',' ') else: "not recorded"),width,ViewerBodyHeight))
+    let interview = sim.connectionTimeline.latestInterview(sim.tickCount,seat)
+    if interview.day == 0:
+      lines.add("First interview at bedtime.")
+    elif not interview.valid:
+      lines.add("Interview unavailable; no ranking invented.")
+    else:
+      lines.add("Day " & $interview.day & " - bedtime reflections")
+      for rank,item in interview.ranking:
+        lines.add("")
+        lines.add($(rank+1) & ". " & item.seat.playerNameForHouse())
+        lines.add(sim.viewerMessageLines(item.reason,width,ViewerBodyHeight))
+  let capacity = max(1,(panel.y+panel.height-25-y) div 9)
+  let pages = max(1,(lines.len+capacity-1) div capacity)
+  let page = state.connectionReflectionPage mod pages
+  for i in page*capacity..<min(lines.len,(page+1)*capacity):
+    text(lines[i],dx,y); y += 9
+  if pages > 1:
+    text("Page " & $(page+1) & "/" & $pages & "  >",dx,panel.y+panel.height-17)
+    state.connectionNextPage = ViewerRect(x:dx,y:panel.y+panel.height-21,width:width,height:14)
+
+proc addNightlyReview(packet: var seq[uint8], sim: SimServer,
+    state: PlayerViewerState, layout: ViewerLayout) =
+  state.nightJumpButtons.setLen(0)
+  state.nightStageButtons.setLen(0)
+  state.nightRankButtons.setLen(0)
+  var slot = 0
+  template text(label:string,x,y:int) =
+    packet.addViewerText(sim,state.spriteCache,label,x,y,slot,
+      objectBase=30_000,dark=true,z=36)
+  template frame(id,obj:int,r:ViewerRect) =
+    if not state.spriteCache.hasCachedSprite(id,r.width,r.height):
+      packet.addRgbaSpriteCached(state.spriteCache,id,
+        sim.chatBanner.nineSliceSprite(r.width,r.height,PanelSliceInset),"bedtime panel " & $id)
+    packet.addObject(obj,r.x,r.y,30,DirectorFrameLayerId,id)
+  template portrait(seat,x,y,size,obj:int) =
+    for player in sim.players:
+      if player.homeFlag != HomeMapIndexBase+seat: continue
+      let id = 15_100 + size*HouseCount + seat
+      if not state.spriteCache.hasCachedSprite(id,size,size):
+        let source = sim.portraits[player.gnomeIndex mod sim.portraits.len]
+        var icon = newRgbaSprite(size,size)
+        for py in 0..<size:
+          for px in 0..<size:
+            icon.putPixel(px,py,source.rgbaSpriteAt(px*(54 div size),py*(54 div size)))
+        packet.addRgbaSpriteCached(state.spriteCache,id,icon,"bedtime portrait " & player.playerName)
+      packet.addObject(obj,x,y,35,DirectorFrameLayerId,id)
+  template hearts(value:float,count,x,y,id,obj:int) =
+    packet.addRgbaSpriteCached(state.spriteCache,id,pixelHearts(value,count,1),"bedtime hearts " & $value)
+    packet.addObject(obj,x,y,35,DirectorFrameLayerId,id)
+  let cw = layout.canvasWidth
+  let ch = layout.canvasHeight
+  let firstNight=max(0,min(sim.replayNightIndex-1,sim.replayNights.len-3))
+  let pastNight=min(sim.replayNights.len,firstNight+3)
+  for i in firstNight..<pastNight:
+    let night=sim.replayNights[i]
+    let button = ViewerRect(x:max(4,cw-116-(pastNight-i)*72),y:18,width:68,height:18)
+    frame(15_000+i-firstNight,32_000+i-firstNight,button)
+    text("Night " & $night.day & "  >",button.x+8,button.y+6)
+    state.nightJumpButtons.add((night.tick,button))
+  if not sim.replayNightActive: return
+  let night = sim.replayNights[sim.replayNightIndex]
+  let stage = min(night.seats.len,int(sim.replayNightTime/NightlyReviewSeconds))
+  let stageKey = $night.day & ":" & $stage
+  if stageKey != state.nightLastStage:
+    state.nightRankSelection = 0
+    state.nightLastStage = stageKey
+  let panelWidth=min(500,cw-layout.railWidth-12)
+  let panelHeight=max(140,min(290,ch-96))
+  let panel = ViewerRect(x:layout.railWidth+(cw-layout.railWidth-panelWidth) div 2,
+    y:max(42,(ch-50-panelHeight) div 2),width:panelWidth,height:panelHeight)
+  frame(15_010,32_010,panel)
+  let compact = panel.height < 220
+  let faceSize = if compact: 18 else: 27
+  let bodyY = panel.y+(if compact: 46 else: 73)
+  let bottom = panel.y+panel.height-(if compact: 10 else: 20)
+  let tabWidth = (panel.width-24-60) div max(1,night.seats.len)
+  text("Day " & $night.day & "  /  9pm  /  " & (if stage==night.seats.len: "Connections updated" else: "Bedtime"),panel.x+12,panel.y+11)
+  for i,seat in night.seats:
+    let x = panel.x+12+i*tabWidth
+    portrait(seat,x+(tabWidth-faceSize) div 2,panel.y+24,faceSize,32_100+i)
+    if not compact:
+      let name = seat.playerNameForHouse()
+      text(name,x+(tabWidth-sim.viewerTextWidth(name,ViewerBodyHeight)) div 2,panel.y+53)
+    if stage==i:
+      text((if compact: "*" else: "^"),x+(if compact: tabWidth-7 else: tabWidth div 2-2),panel.y+(if compact: 29 else: 62))
+    state.nightStageButtons.add((i,ViewerRect(x:x,y:panel.y+23,width:tabWidth,height:(if compact: 28 else: 44))))
+  let update = ViewerRect(x:panel.x+panel.width-69,y:panel.y+26,width:57,height:24)
+  frame(15_011,32_011,update)
+  text("Update",update.x+10,update.y+9)
+  state.nightStageButtons.add((night.seats.len,update))
+  if stage < night.seats.len:
+    let interview = night.interviews[stage]
+    let name = night.seats[stage].playerNameForHouse()
+    text(name & "'s ranking",panel.x+14,bodyY)
+    if not interview.valid:
+      var y=bodyY+20
+      for line in sim.viewerMessageLines("No ranking received. " & name & "'s contribution is zero tonight. Other gnomes' rankings can still change their connections.",panel.width-34,ViewerBodyHeight):
+        if y+7 <= bottom: text(line,panel.x+14,y)
+        y+=9
+    else:
+      let listWidth = min(142,panel.width div 2-10)
+      let rowH = max(8,min(22,(bottom-bodyY-18) div max(1,interview.ranking.len)))
+      let selection = clamp(state.nightRankSelection,0,max(0,interview.ranking.len-1))
+      for rank,item in interview.ranking:
+        let x=panel.x+14
+        let y=bodyY+15+rank*rowH
+        text((if rank==selection: "> " else: "  ") & $(rank+1) & ".",x,y+2)
+        if rowH>=20: portrait(item.seat,x+23,y-4,18,32_200+rank)
+        text(item.seat.playerNameForHouse(),x+(if rowH>=20: 46 else: 25),y+2)
+        state.nightRankButtons.add((rank,ViewerRect(x:x,y:y-2,width:listWidth,height:rowH)))
+      if interview.ranking.len>0:
+        let item=interview.ranking[selection]
+        let x=panel.x+listWidth+24
+        let width=panel.width-listWidth-42
+        text("Why " & item.seat.playerNameForHouse() & "?",x,bodyY)
+        var y=bodyY+18
+        for line in sim.viewerMessageLines(item.reason,width,ViewerBodyHeight):
+          if y+7<=bottom: text(line,x,y)
+          y+=9
+        if y+24<=bottom:
+          text("Connection before tonight",x,y+11)
+          hearts(night.before.strength(interview.seat,item.seat),3,x,y+23,15_800,32_400)
+  else:
+    let x=panel.x+14
+    let nameWidth=70
+    let oldX=x+nameWidth
+    let newX=oldX+100
+    text("Before",oldX,bodyY)
+    text("After",newX,bodyY)
+    let rowH=max(8,min(22,(bottom-bodyY-15) div max(1,night.seats.len)))
+    for i,seat in night.seats:
+      let y=bodyY+15+i*rowH
+      text(seat.playerNameForHouse(),x,y+2)
+      hearts(night.before.connectionScore(seat)/max(1,night.seats.len-1).float,10,oldX,y,15_810+seat,32_410+seat)
+      text(">",oldX+85,y+2)
+      hearts(night.after.connectionScore(seat)/max(1,night.seats.len-1).float,10,newX,y,15_830+seat,32_430+seat)
+  if not compact:
+    text("Select a gnome or rank to pause and read. Play continues.",panel.x+12,panel.y+panel.height-18)
 
 proc addDirectorWorldView(
   packet: var seq[uint8],
@@ -3863,8 +4133,8 @@ proc addDirectorWorldView(
     tintIndex = sim.dayTintIndex()
     canvasWidth = frameLayout(0,0,1,1,frameWidth,frameHeight,true,replayControls,
       sidebars=true).canvasWidth
-    conversation = sim.directorFocusActive or sim.directorFrameBlend > 0 or
-      sim.directorSceneMap != MainMapIndex
+    conversation = not sim.replayNightActive and (sim.directorFocusActive or sim.directorFrameBlend > 0 or
+      sim.directorSceneMap != MainMapIndex)
     cropWidth = if forestBackdrop and sim.directorSceneMap == MainMapIndex:
       sim.directorCamW + max(0.0, sim.directorCamH * 1.5 - sim.directorCamW) *
         (1.0 - sim.directorFrameBlend)
@@ -3877,6 +4147,7 @@ proc addDirectorWorldView(
       focusBlend = sim.directorFrameBlend,
       overviewAspect = (if forestBackdrop: 1.5 else: 0.0), sidebars = true)
   var cards = sim.activeDirectorCards(min(DirectorCardWidth, max(160, canvasWidth - 28)))
+  if sim.replayNightActive: cards.setLen(0)
   # Reserve screen-space slots for the whole shot. Neither camera drift nor
   # moving gnomes may reposition dialogue. Recorded future lines determine
   # space only; activeDirectorCards still controls which text has aired.
@@ -4002,6 +4273,13 @@ proc addDirectorWorldView(
     packet.addViewerChrome(sim, state, layout)
   else:
     state.leaderboardButton = ViewerRect()
+  if sim.replayNightActive:
+    state.connectionDebugButton = ViewerRect()
+    state.connectionButtons.setLen(0)
+    state.connectionNextPage = ViewerRect()
+  else:
+    packet.addConnectionDebug(sim,state,layout)
+  if replayControls: packet.addNightlyReview(sim,state,layout)
   packet.addClockObjects(sim)
 
 proc replayCommandAt(layer, x, y: int): char =
@@ -5231,19 +5509,22 @@ proc observe*(sim: SimServer, playerIndex: int): Observation =
           ViewportWidth, ViewportHeight
         )
 
-proc encounterIdForSeat(sim: SimServer, seat: int): int =
-  ## The open conversation this house seat sits in at the current
-  ## tick, from the replay's conversation records; zero in live play
-  ## or when the seat is not in one.
+proc encounterIdForSeat(sim: SimServer, seat, speechTick: int): int =
+  ## Membership when a fresh line was spoken, including a farewell stamped
+  ## on that member's exit tick. Never carry an old group into later speech.
   if seat < 0 or sim.conversationTimeline.events.len == 0:
     return 0
-  for group in sim.conversationTimeline.encounterGroupsAt(sim.tickCount):
+  for group in sim.conversationTimeline.encounterGroupsAt(speechTick):
     for member in group.members:
       if member == seat:
         return group.id
+  for event in sim.conversationTimeline.events:
+    if event.tick == speechTick and event.seat == seat and
+        not event.enter and not event.reset and not event.spokenTurn:
+      return event.encounterId
   0
 
-proc captureChatFeed(sim: SimServer) =
+proc captureChatFeed(sim: SimServer, speechTick: int) =
   ## Queues freshly spoken chats with their audience for the delay chat.
   ## Messages nobody heard are skipped.
   for i, player in sim.players:
@@ -5264,9 +5545,13 @@ proc captureChatFeed(sim: SimServer) =
         gnomeIndex: player.gnomeIndex
       ),
       message: player.message,
-      encounterId: sim.encounterIdForSeat(seat)
+      encounterId: sim.encounterIdForSeat(seat, speechTick)
     )
     for slot in audience:
+      let listenerSeat = sim.players[slot].homeFlag - HomeMapIndexBase
+      if item.connectionPartner.len == 0 and item.encounterId > 0 and
+          sim.encounterIdForSeat(listenerSeat, speechTick) == item.encounterId:
+        item.connectionPartner = sim.players[slot].playerName
       item.hearers.add(ChatFeedPerson(
         name: sim.players[slot].playerName,
         gnomeIndex: sim.players[slot].gnomeIndex
@@ -5316,12 +5601,25 @@ proc chatFeedNextIndex(sim: SimServer, fromIndex: int): int =
   ## admits, or -1 when none has been captured yet.
   var i = max(fromIndex, 0)
   while i < sim.chatFeed.len:
-    if sim.chatFeedScopeMatches(i):
+    if not sim.chatFeed[i].everAired and sim.chatFeedScopeMatches(i):
       return i
     inc i
   -1
 
+proc replayDialoguePending(sim: SimServer): bool =
+  ## A queued or still-readable line in the current shot. Empty time
+  ## between model replies must not inherit the dialogue slow motion.
+  if sim.committedDialogueMap() >= 0:
+    return true
+  let index = sim.chatFeedIndex
+  if index < 0 or index >= sim.chatFeed.len or
+      not sim.chatFeedScopeMatches(index):
+    return sim.chatFeedNextIndex(max(index, 0)) >= 0
+  sim.replayPresentationTime - sim.chatFeedShownAt < ChatFeedShowSeconds or
+    sim.chatFeedNextIndex(index + 1) >= 0
+
 proc advanceChatFeed*(sim: SimServer, now = epochTime()) =
+  sim.chatFeedTime = now
   ## Advances the delay-chat cursor by wall clock, not sim ticks or
   ## render frames. Each queued line stays up ChatFeedShowSeconds so it
   ## can be read while the sim zips or the viewer runs at 60fps. While
@@ -5346,6 +5644,7 @@ proc advanceChatFeed*(sim: SimServer, now = epochTime()) =
     if first >= 0:
       sim.chatFeedIndex = first
       sim.chatFeed[first].aired = true
+      sim.chatFeed[first].everAired = true
       sim.chatFeedShownAt = now
     return
   if sim.chatFeedIndex >= sim.chatFeed.len or
@@ -5357,20 +5656,24 @@ proc advanceChatFeed*(sim: SimServer, now = epochTime()) =
     if next >= 0:
       sim.chatFeedIndex = next
       sim.chatFeed[next].aired = true
+      sim.chatFeed[next].everAired = true
       sim.chatFeedShownAt = now
     else:
       sim.chatFeedIndex = sim.chatFeed.len
     return
   sim.chatFeed[sim.chatFeedIndex].aired = true
+  sim.chatFeed[sim.chatFeedIndex].everAired = true
   if now - sim.chatFeedShownAt < ChatFeedShowSeconds:
     return
   let next = sim.chatFeedNextIndex(sim.chatFeedIndex + 1)
   if next >= 0:
     sim.chatFeedIndex = next
     sim.chatFeed[next].aired = true
+    sim.chatFeed[next].everAired = true
     sim.chatFeedShownAt = now
 
 proc advanceChatFeedNow*(sim: SimServer, now = epochTime()) =
+  sim.chatFeedTime = now
   ## Steps the delay chat to the next line when its voice finishes. The
   ## director retains each gnome's latest aired line in their own card.
   if sim.convQueue.len > 0 and not sim.convQueueCommitted and
@@ -5387,23 +5690,28 @@ proc advanceChatFeedNow*(sim: SimServer, now = epochTime()) =
     sim.advanceChatFeed(now)
     return
   sim.chatFeed[sim.chatFeedIndex].aired = true
+  sim.chatFeed[sim.chatFeedIndex].everAired = true
   let next = sim.chatFeedNextIndex(sim.chatFeedIndex + 1)
   if next >= 0:
     sim.chatFeedIndex = next
     sim.chatFeed[next].aired = true
+    sim.chatFeed[next].everAired = true
     sim.chatFeedShownAt = now
 
 proc step*(sim: SimServer, inputs: openArray[InputState]) =
   ## Advances the Heartleaf simulation by one tick.
   inc sim.tickCount
   if sim.scoreTicks > 0:
+    sim.replayBoundaryChatsCaptured = false
     dec sim.scoreTicks
     sim.updateMessages()
     if sim.scoreTicks <= 0:
       sim.startDay()
     return
 
-  sim.captureChatFeed()
+  if not sim.replayBoundaryChatsCaptured:
+    sim.captureChatFeed(sim.tickCount - 1)
+  sim.replayBoundaryChatsCaptured = false
   for i in 0 ..< sim.players.len:
     let input =
       if i < inputs.len:
@@ -5596,6 +5904,7 @@ proc restoreKeyframe(sim: SimServer, bytes: string) =
   sim.dayNumber = state.dayNumber
   sim.scoreTicks = state.scoreTicks
   sim.dinnerDone = state.dinnerDone
+  sim.replayBoundaryChatsCaptured = false
 
 proc buildReplayKeyframes*(
   replay: var ReplayPlayer,
@@ -5646,7 +5955,24 @@ proc buildConversationQueue*(sim: SimServer, finalTick: int) =
   ## conversation in birth order, same-tick births together in a
   ## stable order. An empty queue (a day with no conversations) keeps
   ## plain playback.
+  sim.replayNights = sim.connectionTimeline.nightlyReviews()
+  sim.replayNightIndex = 0
+  sim.replayNightActive = false
+  sim.replayNightTime = 0
   sim.convQueue = sim.conversationTimeline.conversationSpans(finalTick)
+  # Bedtime closes the day's talk even in recordings missing curfew exits.
+  for span in sim.convQueue.mitems:
+    # An explicit goodbye is recorded on the exit tick. Include that tick so
+    # the boundary preloader can air it before the queue releases the shot.
+    for event in sim.conversationTimeline.events:
+      if event.encounterId == span.id and event.tick == span.deathTick and
+          not event.enter and not event.reset and not event.spokenTurn:
+        span.deathTick = min(finalTick, span.deathTick + 1)
+        break
+    for night in sim.replayNights:
+      if span.birthTick < night.tick and span.deathTick > night.tick:
+        span.deathTick = night.tick
+        break
   sim.convQueueIndex = 0
   sim.convQueueLast = -1
   sim.convQueueCommitted = false
@@ -5716,6 +6042,9 @@ proc restartConversationQueue(sim: SimServer) =
   sim.convQueueLast = -1
   sim.convQueueCommitted = false
   sim.convQueueFurthest = 0
+  sim.replayNightIndex = 0
+  sim.replayNightActive = false
+  sim.replayNightTime = 0
   sim.releaseDirectorCommit()
 
 proc stepConversationQueue(
@@ -5732,7 +6061,7 @@ proc stepConversationQueue(
   sim.convQueueFurthest = max(sim.convQueueFurthest, sim.tickCount)
   if sim.convQueueCommitted:
     let item = sim.convQueue[sim.convQueueIndex]
-    if sim.tickCount >= item.deathTick:
+    if sim.tickCount >= item.deathTick and not sim.replayDialoguePending():
       # This conversation has played end-to-end.
       sim.convQueueCommitted = false
       sim.releaseDirectorCommit()
@@ -5752,17 +6081,30 @@ proc stepConversationQueue(
     if sim.tickCount >= sim.convQueue[sim.convQueueIndex].birthTick:
       sim.commitConversation(replay, sim.convQueueIndex)
 
+proc alignNightReview(sim: SimServer) =
+  sim.replayNightActive = false
+  sim.replayNightTime = 0
+  sim.replayNightIndex = 0
+  while sim.replayNightIndex < sim.replayNights.len:
+    let night = sim.replayNights[sim.replayNightIndex]
+    if sim.tickCount < night.tick + ScoreScreenTicks:
+      sim.replayNightActive = sim.tickCount >= night.tick
+      break
+    inc sim.replayNightIndex
+
 proc applyReplaySeek*(replay: var ReplayPlayer, sim: SimServer, tick: int) =
   ## Seeks replay playback and pauses on the target tick, then derives
   ## the queue position from the new playhead.
   replay.playing = false
   replay.seekReplay(sim, clamp(tick, 0, replay.replayMaxTick()))
   sim.alignConversationQueue(replay)
+  sim.alignNightReview()
 
 proc applyReplayConversation*(replay: var ReplayPlayer, sim: SimServer, index: int) =
   ## Explicit list selection also distinguishes concurrent conversations.
   if index >= 0 and index < sim.convQueue.len:
     sim.commitConversation(replay, index)
+    sim.alignNightReview()
     replay.playing = true
 
 proc applyReplayCommand*(
@@ -5833,6 +6175,8 @@ proc applyReplayCommand*(
       sim.commitConversation(replay, max(0, sim.convQueueLast - 1))
   else:
     discard
+  if command in [',', '<', 'b', 'e', '.', '>', 'n', 'N']:
+    sim.alignNightReview()
   if replay.speedIndex != previousSpeed:
     sim.directorShowAccum = 0
     replay.frameAccum = 0
@@ -5840,6 +6184,7 @@ proc applyReplayCommand*(
       replay.replayMaxTick() > 0 and sim.tickCount >= replay.replayMaxTick():
     sim.restartConversationQueue()
     replay.seekReplay(sim, 0)
+    sim.alignNightReview()
 
 
 when not defined(emscripten):
@@ -5946,6 +6291,34 @@ proc applyReplayViewerMessage(state: PlayerViewerState, data: string, playback =
         state.mouseDown = item.down
         if item.down:
           if state.mouseLayer == DirectorFrameLayerId:
+            for button in state.nightJumpButtons:
+              let r=button.rect
+              if state.mouseX>=r.x and state.mouseX<r.x+r.width and state.mouseY>=r.y and state.mouseY<r.y+r.height:
+                state.replayInputs.add(ReplayViewerInput(command:'B',tick:button.tick))
+            for button in state.nightStageButtons:
+              let r=button.rect
+              if state.mouseX>=r.x and state.mouseX<r.x+r.width and state.mouseY>=r.y and state.mouseY<r.y+r.height:
+                state.replayInputs.add(ReplayViewerInput(command:'J',tick:button.stage))
+            for button in state.nightRankButtons:
+              let r=button.rect
+              if state.mouseX>=r.x and state.mouseX<r.x+r.width and state.mouseY>=r.y and state.mouseY<r.y+r.height:
+                state.nightRankSelection=button.rank
+                state.replayInputs.add(ReplayViewerInput(command:'P'))
+            let debug = state.connectionDebugButton
+            if state.mouseX >= debug.x and state.mouseX < debug.x+debug.width and
+                state.mouseY >= debug.y and state.mouseY < debug.y+debug.height:
+              state.connectionDebugOpen = not state.connectionDebugOpen
+              state.connectionReflectionPage = 0
+            for button in state.connectionButtons:
+              let r = button.rect
+              if state.mouseX >= r.x and state.mouseX < r.x+r.width and
+                  state.mouseY >= r.y and state.mouseY < r.y+r.height:
+                state.connectionSelection = if state.connectionSelection == button.seat+1: 0 else: button.seat+1
+                state.connectionReflectionPage = 0
+            let paging = state.connectionNextPage
+            if state.mouseX >= paging.x and state.mouseX < paging.x+paging.width and
+                state.mouseY >= paging.y and state.mouseY < paging.y+paging.height:
+              inc state.connectionReflectionPage
             let r = state.leaderboardButton
             if state.mouseX >= r.x and state.mouseX < r.x+r.width and
                 state.mouseY >= r.y and state.mouseY < r.y+r.height:
@@ -5994,7 +6367,10 @@ proc drainReplayViewerInput(state: PlayerViewerState, maxTick: int,
 proc applyReplayInputs(replay: var ReplayPlayer, sim: SimServer,
     inputs: seq[ReplayViewerInput]) =
   for input in inputs:
-    if input.command == '\0': replay.applyReplaySeek(sim,input.tick)
+    if input.command in ['\0', 'B']: replay.applyReplaySeek(sim,input.tick)
+    elif input.command == 'J' and sim.replayNightActive:
+      sim.replayNightTime = float(clamp(input.tick,0,sim.replayNights[sim.replayNightIndex].seats.len))*NightlyReviewSeconds
+      replay.playing = false
     else: replay.applyReplayCommand(sim,input.command)
 
 proc newReplayViewerState*(): PlayerViewerState =
@@ -6046,24 +6422,52 @@ proc advanceReplayPresentation*(
   ## Shared server/static playback, camera, and dialogue pacing. A pause
   ## freezes the whole presentation, not only the simulation tick.
   let pausedRefresh = not replay.playing
+  if sim.replayNightActive:
+    if replay.playing:
+      let speed = replay.replaySpeedIndex()
+      sim.replayNightTime += float(PlaybackSpeedTicks[speed]) / float(ReplayFps*PlaybackSpeedFrames[speed])
+      if sim.replayNightTime >= float(sim.replayNights[sim.replayNightIndex].seats.len+1)*NightlyReviewSeconds:
+        sim.replayNightActive = false
+        inc sim.replayNightIndex
+    return
   if pausedRefresh and not sim.replayPresentationDirty and sim.directorCamW > 0:
     return
   if replay.playing:
-    sim.replayPresentationTime += 1.0 / float(ReplayFps)
+    let speed = replay.replaySpeedIndex()
+    sim.replayPresentationTime += float(PlaybackSpeedTicks[speed]) /
+      float(ReplayFps * PlaybackSpeedFrames[speed])
     # Queue-mode bookkeeping: commit at births, release at
     # deaths, rewind through same-tick birth groups, resume
     # from the furthest tick shown.
     sim.stepConversationQueue(replay)
+    if not sim.convQueueCommitted and sim.replayNightIndex < sim.replayNights.len and
+        sim.tickCount >= sim.replayNights[sim.replayNightIndex].tick:
+      sim.replayNightActive = true
+      sim.replayNightTime = 0
+      sim.releaseDirectorCommit()
+      sim.updateDirectorCamera(snap=true)
+      return
+    if sim.convQueueCommitted and
+        sim.tickCount == sim.convQueue[sim.convQueueIndex].deathTick - 1 and
+        not sim.replayBoundaryChatsCaptured:
+      # Chats stamped at this tick normally enter the feed on the next step,
+      # which may send everyone home. Air them while their actors are visible;
+      # the eventual simulation step must not capture those same chats twice.
+      replay.applyReplayEvents(sim)
+      sim.captureChatFeed(sim.tickCount)
+      sim.replayBoundaryChatsCaptured = true
     # Speed is a multiplier of the director's current base pace at every
     # setting. Slow motion must never advance faster than the 1X show.
     let
+      dialoguePending = sim.replayDialoguePending()
       showPacing = directorWatching and
-        (sim.directorFocusActive or sim.directorDinnerTtl > 0)
-      betweenConversations = sim.convQueue.len > 0 and
-        not sim.convQueueCommitted and sim.directorDinnerTtl <= 0
-      speed = replay.replaySpeedIndex()
+        (sim.directorFocusActive or sim.directorDinnerTtl > 0) and
+        (sim.convQueue.len == 0 or dialoguePending)
+      quietReplay = sim.convQueue.len > 0 and
+        ((not sim.convQueueCommitted and sim.directorSceneMap == MainMapIndex) or
+          not dialoguePending)
       numerator = PlaybackSpeedTicks[speed] *
-        (if betweenConversations: QueueFastForwardTicks else: 1)
+        (if quietReplay: QueueFastForwardTicks else: 1)
       denominator = PlaybackSpeedFrames[speed] *
         (if showPacing: DirectorShowFrames else: 1)
       rateKey = numerator * 100 + denominator
@@ -6075,11 +6479,16 @@ proc advanceReplayPresentation*(
     sim.directorShowAccum = sim.directorShowAccum mod denominator
     if sim.convQueue.len > 0:
       if sim.convQueueCommitted:
+        # Drain dialogue while its speakers are still in the scene. Crossing
+        # curfew first sends them home and hides cards during their read time.
         ticksThisFrame = min(ticksThisFrame, max(0,
-          sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount))
+          sim.convQueue[sim.convQueueIndex].deathTick - sim.tickCount -
+          (if dialoguePending or not sim.replayBoundaryChatsCaptured: 1 else: 0)))
       elif sim.convQueueIndex < sim.convQueue.len:
         ticksThisFrame = min(ticksThisFrame, max(0,
           sim.convQueue[sim.convQueueIndex].birthTick - sim.tickCount))
+    if not sim.convQueueCommitted and sim.replayNightIndex < sim.replayNights.len:
+      ticksThisFrame = min(ticksThisFrame,max(0,sim.replayNights[sim.replayNightIndex].tick-sim.tickCount))
     # Camera travel preserves the first line at every playback speed.
     if directorWatching and (sim.directorTweenLeft > 0 or
         (sim.replayPresentationDirty and sim.convQueueCommitted)):
@@ -6089,6 +6498,11 @@ proc advanceReplayPresentation*(
     for _ in 0 ..< ticksThisFrame:
       if replay.playing:
         replay.stepReplay(sim)
+        if quietReplay and sim.replayDialoguePending():
+          # Stop on a newly captured line, even at high speed. Let the
+          # regular card clock show it before advancing through silence.
+          sim.directorShowAccum = 0
+          break
     if replay.looping and not replay.playing and
         replay.replayMaxTick() > 0:
       sim.restartConversationQueue()
@@ -6728,6 +7142,7 @@ when not defined(emscripten):
 
     proc applyUnpausedFrame(frame: BrainFrame) =
       ## Applies one unpaused brain frame and steps the sim.
+      sim.connectionTimeline = brains.connectionTimeline
       var stepInputs = newSeq[InputState](sim.players.len)
       for item in frame.outputs:
         let playerIndex = seatPlayers[item.houseIndex]
@@ -6829,7 +7244,7 @@ when not defined(emscripten):
         if seatPlayers[seat] >= 0:
           observations[seat] = sim.observe(seatPlayers[seat])
       var frame = brains.advance(observations, epochTime())
-      sim.heartLinks = brains.heartPairs()
+      sim.connectionTimeline = brains.connectionTimeline
       sim.conversationCircles = brains.syncConversationCircles(
         sim.outdoorConversationFeet(seatPlayers),
         sim.outdoorConversationFeet(seatPlayers, stillOnly = true)

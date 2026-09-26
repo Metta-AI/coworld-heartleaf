@@ -1,6 +1,6 @@
 ## Presentation regressions, independent of browser timing or external replays.
 import std/[importutils, json, math, os, strutils, tables]
-import heartleaf, heartleaf/[viewer_layout, pixel_emotes, encounters], replays
+import heartleaf, heartleaf/[viewer_layout, pixel_emotes, encounters, connections], replays
 import heartleaf/common
 import bitworld/[spriteprotocol, sprites]
 import pixie
@@ -84,7 +84,6 @@ for i, player in sim.players:
   player.x = 310 + i * 15
   player.y = 310 - i * 35
 sim.players[0].score = 27
-sim.heartLinks = @[(0, 1, 9)]
 sim.directorFocusActive = true
 sim.directorFrameBlend = 1
 sim.directorFocusX = 335
@@ -101,6 +100,9 @@ privateAccess(typeof(sim.chatFeed[0]))
 privateAccess(typeof(sim.chatFeed[0].hearers[0]))
 sim.chatFeed[0].hearers = @[typeof(sim.chatFeed[0].hearers[0])(
   name: sim.players[1].playerName, gnomeIndex: sim.players[1].gnomeIndex)]
+let initialConnections = initConnections(@[0,1])
+sim.connectionTimeline.events = @[ConnectionEvent(kind:"connection-start",tick:0,
+  seats:initialConnections.seats,bonds:initialConnections.bonds)]
 sim.advanceChatFeed(1)
 var next: PlayerViewerState
 let first = sim.buildGlobalPacket(state, next, replayControls=true)
@@ -156,7 +158,13 @@ for msg in parseSpritePacket(second):
       cardText.add(char(id - 9400))
 doAssert glyphs > 20 and backgrounds == 1 and portraits == 1
 doAssert "points" notin cardText.toLowerAscii()
-doAssert "Best friends with " in cardText
+doAssert "Best friends with " notin cardText
+var hearts = 0
+for msg in parseSpritePacket(second):
+  if msg.kind == spkObject and msg.objectDef.id == 64_900:
+    inc hearts
+    doAssert msg.objectDef.spriteId == 12_050, "half strength comes from the recorded pair"
+doAssert hearts == 1
 doAssert "Connections:" notin cardText
 doAssert "A different sentence" in cardText
 # The protruding portrait, segmented header and every letter remain on screen
@@ -234,6 +242,8 @@ for tick in countup(0, 4320, 240):
 
 # Every phase of an emote clears all gnome bodies, including a nearby
 # gnome standing above its owner. This catches the old top-anchored icon.
+sim.connectionTimeline.events.add(ConnectionEvent(kind:"connection-emoji",tick:0,
+  seat:0,target:1,emotion:VeryHappy))
 var emotes = 0
 for tick in 0 ..< 72:
   sim.tickCount = tick
@@ -255,7 +265,7 @@ for sprite in sim.heartEmoteFaded.values:
   for i in countup(3,sprite.pixels.high,4):
     doAssert sprite.pixels[i] in [0'u8,255'u8], "emotes cannot erase the map with partial alpha"
 
-for tier in 0..2:
+for tier in 0..3:
   let sprite = pixelEmote(tier)
   doAssert sprite.width == 16 and sprite.height == 16
   doAssert sprite.width == GnomeSpriteSize div 2

@@ -21,6 +21,8 @@ type
   ConversationEvent* = object
     tick*: int
     enter*: bool
+    reset*: bool
+      ## A new recorded day closes the previous day's conversations.
     encounterId*: int
     seat*: int
     members*: seq[int]
@@ -238,10 +240,22 @@ proc parseConversationLine(line: string): ConversationEvent =
     discard
 
 proc parseConversationTimeline*(text: string): ConversationTimeline =
-  ## Conversation enter and exit events from one game.log body.
+  ## Conversation events from a game.log body. Older recordings did
+  ## not emit exits at midnight; any stamped new-day record closes
+  ## those groups without changing the original recording.
+  var day = 0
   for line in text.splitLines():
     if line.len == 0:
       continue
+    try:
+      let node = parseJson(line)
+      let recordedDay = node{"day"}.getInt()
+      if recordedDay > day:
+        if day > 0:
+          result.events.add(ConversationEvent(tick: node{"tick"}.getInt(), reset: true))
+        day = recordedDay
+    except CatchableError:
+      discard
     let event = parseConversationLine(line)
     if event.encounterId > 0:
       result.events.add(event)
@@ -269,6 +283,9 @@ proc encounterGroupsAt*(
   var groups: Table[int, seq[int]]
   for event in timeline.events:
     if event.tick > tick:
+      continue
+    if event.reset:
+      groups.clear()
       continue
     if event.spokenTurn:
       # A convo-tick row is a spoken turn, not an exit: the speaker
@@ -317,8 +334,13 @@ proc conversationSpans*(
     live: Table[int, seq[int]]
       ## Current members of each conversation that is still open.
   for event in timeline.events:
+    if event.reset:
+      for id in live.keys:
+        result[spanAt[id]].deathTick = min(event.tick, finalTick)
+      live.clear()
+      continue
     if event.spokenTurn:
-      if event.encounterId in spanAt:
+      if event.encounterId in spanAt and event.encounterId in live:
         inc result[spanAt[event.encounterId]].spokenTurns
       continue
     if event.enter:
@@ -443,6 +465,9 @@ proc heartLinksAt*(
   for event in timeline.events:
     if event.tick > tick:
       break
+    if event.reset:
+      groups.clear()
+      continue
     if event.spokenTurn:
       ledger.creditTurn(event.encounterId, event.seat,
         groups.getOrDefault(event.encounterId))

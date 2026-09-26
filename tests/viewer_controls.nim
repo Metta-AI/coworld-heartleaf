@@ -8,6 +8,7 @@ let path = "docs/viewer-stability/local-viewer-scenario.replay"
 let data = loadReplay(path)
 let cfg = data.replaySimConfig()
 let sim = initSimServer(cfg.seed,cfg.dayTicks)
+privateAccess(typeof(sim.chatFeed[0]))
 sim.attachConversationTimeline(data,path)
 var replay = initReplayPlayer(data)
 replay.buildReplayKeyframes(cfg.seed,cfg.dayTicks)
@@ -69,10 +70,17 @@ let seekTick = sim.tickCount
 click(75,92);button(2);frame()
 doAssert replay.playing and sim.tickCount >= seekTick
 snapshot("05-seek-then-play.png")
-# Rate labels are true multipliers, independent of the director's base pace.
+# Rate labels are true multipliers during readable dialogue. Empty
+# gaps now fast-forward; the real-recording regression checks that phase.
 for setting, expected in [5,10,20,40]:
   replay.applyReplaySeek(sim,850)
   sim.advanceReplayPresentation(replay)
+  sim.chatFeed.setLen(0)
+  sim.chatFeedIndex = -1
+  for line in ["First readable line", "Second readable line", "Third readable line"]:
+    sim.queueDelayChat("Ivan",line)
+    sim.chatFeed[^1].encounterId = sim.directorCommitEncounter
+  sim.advanceChatFeed(sim.replayPresentationTime)
   speed(setting);button(2);frame()
   let start = sim.tickCount
   for _ in 0..<100:sim.advanceReplayPresentation(replay)
