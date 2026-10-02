@@ -14,7 +14,7 @@ const
   DefaultBedrockRegion = "us-east-1"
   DefaultBedrockTimeoutSeconds = 20
   DefaultBedrockMaxTokens = 192
-  BedrockTemperature = 0.2
+  DefaultLlmTemperature = 0.2
   CoworldPlayerSlotHeader* = "X-Coworld-Player-Slot"
   MockReplyEnv* = "HEARTLEAF_MOCK_REPLY"
   BedrockNotConfiguredMessage* =
@@ -98,6 +98,15 @@ proc bedrockTimeoutSeconds(): int =
     max(1, int(parseFloat(value)))
   except ValueError:
     DefaultBedrockTimeoutSeconds
+
+proc llmTemperature*(): float =
+  ## Pin the learner decoder without changing default hosted play.
+  let value = getEnv("COWORLD_LLM_TEMPERATURE").strip()
+  if value.len == 0:
+    return DefaultLlmTemperature
+  result = parseFloat(value)
+  doAssert result >= 0 and result <= 1,
+    "COWORLD_LLM_TEMPERATURE must be between zero and one"
 
 proc bedrockMaxTokens(): int =
   ## The maximum response tokens.
@@ -288,7 +297,7 @@ proc bedrockBody*(
     "messages": chatMessages
   }
   if tuning.sampling:
-    body["temperature"] = %BedrockTemperature
+    body["temperature"] = %llmTemperature()
   if tuning.disableThinking:
     body["thinking"] = %*{"type": "disabled"}
   if tuning.lowEffort:
@@ -324,7 +333,7 @@ proc converseBody*(
   let tuning = modelTuning(modelId)
   var inference = %*{"maxTokens": max(bedrockMaxTokens(), tuning.minMaxTokens)}
   if tuning.sampling:
-    inference["temperature"] = %BedrockTemperature
+    inference["temperature"] = %llmTemperature()
   let body = %*{"messages": turns, "inferenceConfig": inference}
   if tuning.disableThinking:
     body["additionalModelRequestFields"] = %*{
@@ -343,7 +352,7 @@ proc chatBody(messages: openArray[ConversationMessage], modelId: string): string
   let body = %*{"model": modelId, "messages": turns,
     "max_tokens": max(bedrockMaxTokens(), tuning.minMaxTokens)}
   if tuning.sampling:
-    body["temperature"] = %BedrockTemperature
+    body["temperature"] = %llmTemperature()
   if tuning.disableThinking:
     body["reasoning"] = %*{"enabled": false}
   $body

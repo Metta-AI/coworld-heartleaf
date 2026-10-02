@@ -486,6 +486,15 @@ block:
     ConversationMessage(role: "system", content: "soul"),
     ConversationMessage(role: "user", content: "Day 1 8:00am")
   ]
+  let previousTemperature = getEnv("COWORLD_LLM_TEMPERATURE")
+  for temperature in ["0", "1"]:
+    putEnv("COWORLD_LLM_TEMPERATURE", temperature)
+    let native = parseJson(bedrockBody(turns, "Ivan", false, "anthropic/claude-haiku-4.5"))
+    doAssert native["temperature"].getFloat == parseFloat(temperature)
+  if previousTemperature.len == 0:
+    delEnv("COWORLD_LLM_TEMPERATURE")
+  else:
+    putEnv("COWORLD_LLM_TEMPERATURE", previousTemperature)
   let haiku = parseJson(bedrockBody(turns, "Ivan", false,
     "us.anthropic.claude-haiku-4-5-20251001-v1:0"))
   doAssert haiku.hasKey("temperature") and not haiku.hasKey("thinking"),
