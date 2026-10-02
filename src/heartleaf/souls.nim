@@ -84,6 +84,8 @@ proc knownModelFamily*(modelId: string): bool =
     if id.startsWith(prefix):
       id = id[prefix.len .. ^1]
       break
+  if '/' in id:
+    return id.split('/')[0] in KnownProviders
   let dot = id.find('.')
   if dot <= 0:
     return false

@@ -8,6 +8,7 @@ No credentials or provider access: all requests target the local fake sidecar.
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import threading
@@ -15,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 
 
-def run(probe: str, bind_host: str, endpoint_host: str) -> None:
+def run(probe: str, bind_host: str, endpoint_host: str, model_override: str = "") -> None:
     first_received = [threading.Event() for _ in range(2)]
     all_received = [threading.Event() for _ in range(2)]
     fast_finished = [threading.Event() for _ in range(2)]
@@ -30,15 +31,21 @@ def run(probe: str, bind_host: str, endpoint_host: str) -> None:
         protocol_version = "HTTP/1.1"
 
         def do_POST(self):
-            match = re.fullmatch(
-                r"/model/test/transport-wave-([01])/converse", unquote(self.path)
-            )
-            if match is None:
-                self.send_error(404)
-                return
-            wave = int(match.group(1))
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            assert "anthropic_version" not in request and "requestMetadata" not in request
+            assert self.headers.get("Authorization") is None
+            if model_override:
+                assert self.path == "/v1/messages"
+                assert request["model"] == model_override
+                assert self.headers["anthropic-version"] == "2023-06-01"
+                wave = int(request["messages"][0]["content"][0]["text"].split(":")[1])
+            else:
+                assert self.path == "/v1/chat/completions"
+                match = re.fullmatch(r"test/transport-wave-([01])", request["model"])
+                assert match is not None, request
+                assert "inferenceConfig" not in request
+                wave = int(match.group(1))
             seat = int(self.headers["X-Coworld-Player-Slot"])
-            self.rfile.read(int(self.headers["Content-Length"]))
             with lock:
                 seats_received[wave].add(seat)
                 if seat == 0:
@@ -52,15 +59,13 @@ def run(probe: str, bind_host: str, endpoint_host: str) -> None:
             if not ready:
                 self.send_error(504, "test barrier did not release")
                 return
-            body = json.dumps(
-                {
-                    "output": {
-                        "message": {
-                            "content": [{"text": '{"action":"keep_gathering_plants"}'}]
-                        }
-                    }
-                }
-            ).encode()
+            text = '{"action":"keep_gathering_plants"}'
+            response = (
+                {"content": [{"type": "text", "text": text}]}
+                if model_override
+                else {"choices": [{"message": {"content": text}}]}
+            )
+            body = json.dumps(response).encode()
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -81,12 +86,19 @@ def run(probe: str, bind_host: str, endpoint_host: str) -> None:
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     endpoint = f"http://{endpoint_host}:{server.server_port}"
+    env = os.environ.copy()
+    env.pop("COWORLD_LLM_MODEL", None)
+    env["AWS_ENDPOINT_URL_BEDROCK_RUNTIME"] = "http://retired.invalid"
+    env["AWS_BEARER_TOKEN_BEDROCK"] = "local-key-must-not-be-sent"
+    if model_override:
+        env["COWORLD_LLM_MODEL"] = model_override
     process = subprocess.Popen(
         [probe, endpoint],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        env=env,
         bufsize=1,
     )
 
@@ -156,3 +168,4 @@ if __name__ == "__main__":
     parser.add_argument("--endpoint-host", default="127.0.0.1")
     args = parser.parse_args()
     run(args.probe, args.bind_host, args.endpoint_host)
+    run(args.probe, args.bind_host, args.endpoint_host, "anthropic/claude-haiku-4.5")

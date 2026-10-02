@@ -18,7 +18,8 @@ const
   CoworldPlayerSlotHeader* = "X-Coworld-Player-Slot"
   MockReplyEnv* = "HEARTLEAF_MOCK_REPLY"
   BedrockNotConfiguredMessage* =
-    "Bedrock is not configured: set AWS_BEARER_TOKEN_BEDROCK or " &
+    "LLM access is not configured: set COWORLD_LLM_ENDPOINT for hosted runs, " &
+    "AWS_BEARER_TOKEN_BEDROCK or " &
     "BEDROCK_KEY, provide AWS credentials via env keys, the container " &
     "endpoint, or IRSA web identity, or set " & MockReplyEnv &
     " for an offline run."
@@ -141,7 +142,10 @@ proc bedrockUrl(modelId: string): string =
   ## The InvokeModel URL, through the sidecar when one is configured.
   let sidecar = sidecarEndpoint()
   if sidecar.len > 0:
-    return sidecar.joinUrl(bedrockPath(modelId))
+    return sidecar.joinUrl(
+      if modelId.startsWith("anthropic/"): "/v1/messages"
+      else: "/v1/chat/completions"
+    )
   "https://" & bedrockHost() & bedrockPath(modelId)
 
 proc bedrockHeaders*(body, modelId: string, playerSlot: int): HttpHeaders =
@@ -150,6 +154,8 @@ proc bedrockHeaders*(body, modelId: string, playerSlot: int): HttpHeaders =
     result["Accept"] = "application/json"
     result["Content-Type"] = "application/json"
     result[CoworldPlayerSlotHeader] = $playerSlot
+    if modelId.startsWith("anthropic/"):
+      result["anthropic-version"] = "2023-06-01"
   elif bedrockToken().len > 0:
     result["Authorization"] = "Bearer " & bedrockToken()
     result["Accept"] = "application/json"
@@ -160,7 +166,7 @@ proc bedrockHeaders*(body, modelId: string, playerSlot: int): HttpHeaders =
     ):
       result[key] = value
   let latency = bedrockPerformanceLatency()
-  if latency.len > 0:
+  if not hasSidecarEndpoint() and latency.len > 0:
     result["X-Amzn-Bedrock-PerformanceConfig-Latency"] = latency
 
 type
@@ -287,7 +293,10 @@ proc bedrockBody*(
     body["thinking"] = %*{"type": "disabled"}
   if tuning.lowEffort:
     body["output_config"] = %*{"effort": "low"}
-  if not hasSidecarEndpoint():
+  if hasSidecarEndpoint():
+    body.delete("anthropic_version")
+    body["model"] = %modelId
+  else:
     body["requestMetadata"] = bedrockRequestMetadata(playerName)
   $body
 
@@ -325,9 +334,25 @@ proc converseBody*(
     body["system"] = %*[{"text": systemPrompt}]
   $body
 
+proc chatBody(messages: openArray[ConversationMessage], modelId: string): string =
+  ## Native OpenRouter chat request for a non-Claude soul.
+  var turns = newJArray()
+  for message in messages:
+    turns.add(%*{"role": message.role, "content": message.content})
+  let tuning = modelTuning(modelId)
+  let body = %*{"model": modelId, "messages": turns,
+    "max_tokens": max(bedrockMaxTokens(), tuning.minMaxTokens)}
+  if tuning.sampling:
+    body["temperature"] = %BedrockTemperature
+  if tuning.disableThinking:
+    body["reasoning"] = %*{"enabled": false}
+  $body
+
 proc parseBedrockText(body: string): string =
   ## The output text of one response body, Anthropic or Converse shaped.
   let data = parseJson(body)
+  if data.hasKey("choices"):
+    return data["choices"][0]["message"]["content"].getStr()
   if data.hasKey("output"):
     for part in data["output"]["message"]["content"]:
       if part.hasKey("text"):
@@ -344,6 +369,9 @@ proc bedrockUsageText*(body: string): string =
     let usage = parseJson(body){"usage"}
     if usage == nil or usage.kind != JObject:
       return ""
+    if usage.hasKey("prompt_tokens"):
+      return "in=" & $usage["prompt_tokens"].getInt() &
+        " out=" & $usage["completion_tokens"].getInt()
     if usage.hasKey("inputTokens"):
       return "in=" & $usage{"inputTokens"}.getInt() &
         " cacheRead=" & $usage{"cacheReadInputTokens"}.getInt() &
@@ -415,6 +443,9 @@ proc captureResponse*(reply: var BedrockReply, body: string, headers: HttpHeader
     reply.providerRequestId = headers["request-id"]
   try:
     let data = parseJson(body)
+    if data.hasKey("choices"):
+      reply.stopReason = data["choices"][0]["finish_reason"].getStr()
+      return
     reply.stopReason = data{"stopReason"}.getStr()
     if reply.stopReason.len == 0:
       reply.stopReason = data{"stop_reason"}.getStr()
@@ -462,23 +493,28 @@ proc start*(client: BedrockClient, request: BedrockRequest) =
   of Scripted:
     client.started.add(request)
   of Live:
+    let modelId =
+      if hasSidecarEndpoint(): getEnv("COWORLD_LLM_MODEL", request.modelId)
+      else: request.modelId
     let body =
-      if request.modelId.isAnthropicModel():
+      if hasSidecarEndpoint() and not modelId.startsWith("anthropic/"):
+        chatBody(request.messages, modelId)
+      elif modelId.isAnthropicModel() or modelId.startsWith("anthropic/"):
         bedrockBody(
           request.messages,
           request.playerName,
           client.promptCacheEnabled,
-          request.modelId
+          modelId
         )
       else:
-        converseBody(request.messages, request.modelId)
+        converseBody(request.messages, modelId)
     client.curl.startRequest(
       "POST",
-      bedrockUrl(request.modelId),
-      bedrockHeaders(body, request.modelId, request.playerSlot),
+      bedrockUrl(modelId),
+      bedrockHeaders(body, modelId, request.playerSlot),
       body,
       (if client.strictDeadline: bedrockTimeoutSeconds()
-       else: max(bedrockTimeoutSeconds(), modelTuning(request.modelId).minTimeoutSeconds)),
+       else: max(bedrockTimeoutSeconds(), modelTuning(modelId).minTimeoutSeconds)),
       request.tag
     )
 
