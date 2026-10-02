@@ -201,7 +201,7 @@ parent of the checkout.
 
 ## Build A Soul
 
-A soul is a markdown file. The first line is `#!` followed by the Bedrock
+A soul is a markdown file. The first line is `#!` followed by the OpenRouter
 model id; the rest is the system prompt: personality, manners, strategy,
 example phrases. `{name}` is replaced with the gnome's name. The game
 appends the rules every gnome must know (the state report, the actions,
@@ -251,3 +251,12 @@ dialogue, points and connections. The card uses reusable parts, and emojis sit
 above gnomes and names. Replays retain their transport, while live spectators
 retain the historical live-only behavior.
 See [viewer changes, validation and review limits](docs/viewer-stability.md).
+
+## Hosted LLM access
+
+The game uses `COWORLD_LLM_ENDPOINT` for hosted decisions. Soul files name
+canonical OpenRouter models, such as `anthropic/claude-haiku-4.5`.
+`COWORLD_LLM_MODEL`, when injected by the platform, overrides the soul model.
+Claude calls use `/v1/messages`; other providers use `/v1/chat/completions`.
+Each request carries the villager's seat in `X-Coworld-Player-Slot`.
+Local AWS runs still use Bedrock credentials and AWS model IDs.

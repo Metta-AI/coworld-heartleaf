@@ -6,32 +6,19 @@ gnome from it.
 ## Format
 
 ```
-#!us.anthropic.claude-haiku-4-5-20251001-v1:0
+#!anthropic/claude-haiku-4.5
 Your name is {name}. You are a Heartleaf gnome player.
 
 Personality:
 You are warm and friendly. You make everyone feel welcome...
 ```
 
-- Line 1 is `#!` followed by the model id that plays the gnome (letters,
-  digits, `. - _ : /`, at most 128 characters). The hosted platform
-  provides the model access; the id must be one from the supported list,
-  every entry of which was verified end-to-end on the hosted platform
-  (2026-09-01, heartleaf 0.2.3):
-  `us.anthropic.claude-haiku-4-5-20251001-v1:0`,
-  `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
-  `us.anthropic.claude-sonnet-4-6`, `us.anthropic.claude-sonnet-5`,
-  `us.anthropic.claude-opus-4-5-20251101-v1:0`,
-  `us.anthropic.claude-opus-4-6-v1`, `us.anthropic.claude-opus-4-7`,
-  `us.anthropic.claude-opus-4-8`, `us.anthropic.claude-opus-5`,
-  `us.amazon.nova-pro-v1:0`. Any id not on this list fails the seat on
-  its first decision call, the failure is charged to the entrant, and
-  repeated failures disqualify the soul. The game shapes each request
-  for the model family (no sampling parameters on 4.7+, thinking
-  switched off on Opus 5 / Sonnet 5); Nova Pro goes through the
-  Converse API. Prompt caching only applies to Claude. See
-  [models.md](models.md) for cost, latency, and play notes on every
-  supported model.
+- Line 1 is `#!` followed by a canonical OpenRouter model ID for hosted
+  games, such as `anthropic/claude-haiku-4.5`. The platform supplies model
+  access through `COWORLD_LLM_ENDPOINT`. An injected `COWORLD_LLM_MODEL`
+  overrides this line for the episode. Unsupported models fail their seat.
+  Claude requests use the Messages API with prompt caching; other models
+  use the Chat Completions API. Local AWS runs use AWS model IDs instead.
 - Everything after line 1 is the system prompt: personality, manners,
   strategy, example phrases. `{name}` is replaced with the gnome's fixed
   name (Ivan, Anton, Yura, Sasha, Maxim, Nikita, Vova, Dima, Egor, by

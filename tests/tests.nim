@@ -506,11 +506,11 @@ block:
 
 echo "Testing Coworld player attribution headers"
 block:
-  putEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "http://127.0.0.1:18000")
+  putEnv("COWORLD_LLM_ENDPOINT", "http://127.0.0.1:18000")
   let headers = bedrockHeaders("{}", "us.anthropic.claude-sonnet-4-6", 4)
   doAssert headers[CoworldPlayerSlotHeader] == "4",
     "hosted model calls identify the logical player slot"
-  delEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME")
+  delEnv("COWORLD_LLM_ENDPOINT")
 
 echo "Testing Converse bodies for other providers"
 block:
@@ -1845,3 +1845,10 @@ block:
     "the answered turn mints again; scrubbing anywhere reproduces it"
 
 echo "All tests passed"
+
+block native_chat_usage_and_stop_reason:
+  let response = """{"choices":[{"message":{"content":"ok"},"finish_reason":"length"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}"""
+  doAssert bedrockUsageText(response) == "in=12 out=3"
+  var reply = BedrockReply()
+  reply.captureResponse(response, default(HttpHeaders))
+  doAssert reply.tokenLimited()

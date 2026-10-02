@@ -2,7 +2,7 @@
 import std/[json, options, os, times]
 import heartleaf/[bedrock_client, decisions]
 
-putEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", paramStr(1))
+putEnv("COWORLD_LLM_ENDPOINT", paramStr(1))
 putEnv("BEDROCK_TIMEOUT_SECONDS", "20")
 delEnv("HEARTLEAF_MOCK_REPLY")
 
@@ -14,7 +14,7 @@ proc startSeat(wave, seat: int) =
     modelId: "test/transport-wave-" & $wave,
     playerSlot: seat,
     playerName: "test",
-    messages: @[ConversationMessage(role: "user", content: "test")]
+    messages: @[ConversationMessage(role: "user", content: "wave:" & $wave)]
   ))
 
 for wave in 0 .. 1:

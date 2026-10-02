@@ -9,7 +9,7 @@ import
   curly
 
 const
-  SidecarEndpointEnv = "AWS_ENDPOINT_URL_BEDROCK_RUNTIME"
+  SidecarEndpointEnv = "COWORLD_LLM_ENDPOINT"
   BedrockService = "bedrock"
   AwsRequestType = "aws4_request"
   StsVersion = "2011-06-15"
