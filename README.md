@@ -260,3 +260,10 @@ canonical OpenRouter models, such as `anthropic/claude-haiku-4.5`.
 Claude calls use `/v1/messages`; other providers use `/v1/chat/completions`.
 Each request carries the villager's seat in `X-Coworld-Player-Slot`.
 Local AWS runs still use Bedrock credentials and AWS model IDs.
+
+For trained-checkpoint runs, freeze the decoder in the experiment configuration:
+`COWORLD_LLM_TEMPERATURE=0` selects greedy decoding; `1` selects the learner's
+full-softmax sampling contract. The default remains `0.2`. Invalid configured
+values fail before inference. The value is sent on native requests for models
+that accept temperature; model-specific omission rules remain authoritative.
+Pair base and trained players with identical token budgets, prompts, and decoder.
