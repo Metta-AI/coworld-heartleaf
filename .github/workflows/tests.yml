@@ -16,6 +16,8 @@ jobs:
         with:
           # The pinned coworld and softmax-cli wheels declare Python >=3.11,<3.13.
           python-version: '3.12'
+      - name: Post-training trajectory export tests
+        run: python -m unittest discover -s tests -p 'test_export_posttrain.py'
       - name: Evaluation runner contract tests
         run: |
           python -m venv tmp/heartleaf-eval-venv

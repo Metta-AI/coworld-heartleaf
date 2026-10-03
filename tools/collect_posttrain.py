@@ -20,6 +20,7 @@ def collect(
     timeout_seconds: int,
     mock_reply: str,
 ) -> None:
+    os.umask(0o077)
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     for offset, seed in enumerate(seeds):
         run = output / f"heartleaf-{seed}"
@@ -43,7 +44,11 @@ def collect(
         environment["HEARTLEAF_TRAINING_DIR"] = str(run)
         with (run / "server.log").open("w") as server_log:
             server = subprocess.Popen(
-                [str(server_binary), f"--port:{port + offset}", "--config:" + json.dumps(config)],
+                [
+                    str(server_binary),
+                    f"--port:{port + offset}",
+                    "--config:" + json.dumps(config),
+                ],
                 cwd=root,
                 env=environment,
                 stdout=server_log,
@@ -84,7 +89,9 @@ def collect(
                 for handle in logs:
                     handle.close()
         result = json.loads((run / "results.json").read_text())
-        (run / "completed.json").write_text(json.dumps({"seed": seed, "scores": result["scores"]}) + "\n")
+        (run / "completed.json").write_text(
+            json.dumps({"seed": seed, "scores": result["scores"]}) + "\n"
+        )
         print(seed, result["scores"], result["evaluation"]["event_count"])
 
 
