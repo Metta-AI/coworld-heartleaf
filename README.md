@@ -138,7 +138,7 @@ nim r players/soul_player/soul_player.nim \
 
 To call a real model locally, set `BEDROCK_KEY` (or AWS credentials) in the
 game's environment instead of `HEARTLEAF_MOCK_REPLY`. Hosted games get
-Bedrock from the platform automatically.
+model access from the platform through `COWORLD_LLM_ENDPOINT`.
 
 Deadline-sensitive evaluations can set `HEARTLEAF_TIMEOUT_AS_WAIT=true` in the
 game environment. A client timeout then spends the decision on a wait action and
@@ -154,6 +154,12 @@ the hard client deadline for every model family. A structured `llm failure` even
 retains response text/body, stop reason, usage, timestamps, seat/tag, and the
 platform call ID from `X-Softmax-Llm-Call-Id` when received. Request credentials
 and system prompts are not copied into that diagnostic event.
+
+Hosted games run with `HEARTLEAF_UNUSABLE_AS_WAIT=true`, set in the game
+runnable's `env` in `coworld_manifest_template.json`. Without it, a gnome whose
+model keeps returning an unusable reply (most often one cut off at the
+192-token output cap) is retried forever while the whole village waits, and the
+episode hits the 40-minute hosted timeout with no results.
 
 When `HEARTLEAF_EVAL_ARTIFACT=true`, each results JSON also contains a versioned
 `evaluation` object: accepted seats and every LLM lifecycle event, with an event
@@ -255,7 +261,9 @@ See [viewer changes, validation and review limits](docs/viewer-stability.md).
 ## Hosted LLM access
 
 The game uses `COWORLD_LLM_ENDPOINT` for hosted decisions. Soul files name
-canonical OpenRouter models, such as `anthropic/claude-haiku-4.5`.
+canonical OpenRouter models, such as `anthropic/claude-haiku-4.5`. The ten
+Bedrock IDs from [docs/models.md](docs/models.md) are translated to their
+OpenRouter slugs, so souls submitted before the switch keep playing.
 `COWORLD_LLM_MODEL`, when injected by the platform, overrides the soul model.
 Claude calls use `/v1/messages`; other providers use `/v1/chat/completions`.
 Each request carries the villager's seat in `X-Coworld-Player-Slot`.

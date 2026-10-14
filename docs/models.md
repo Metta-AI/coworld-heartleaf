@@ -1,6 +1,8 @@
 > These measurements describe the former Bedrock deployment. Hosted souls
-> now require canonical OpenRouter IDs; start with `anthropic/claude-haiku-4.5`.
-> See [soul_files.md](soul_files.md) for the current transport contract.
+> should name canonical OpenRouter IDs; start with `anthropic/claude-haiku-4.5`.
+> The ten Bedrock IDs below are still accepted and translated to their
+> OpenRouter equivalents. See [soul_files.md](soul_files.md) for the current
+> transport contract.
 
 # Models For Heartleaf Souls
 

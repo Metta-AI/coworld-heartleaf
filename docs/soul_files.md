@@ -17,6 +17,10 @@ You are warm and friendly. You make everyone feel welcome...
   games, such as `anthropic/claude-haiku-4.5`. The platform supplies model
   access through `COWORLD_LLM_ENDPOINT`. An injected `COWORLD_LLM_MODEL`
   overrides this line for the episode. Unsupported models fail their seat.
+  The ten Bedrock IDs listed in [models.md](models.md) still work in hosted
+  games: the game translates each to its OpenRouter slug (for example
+  `us.anthropic.claude-haiku-4-5-20251001-v1:0` becomes
+  `anthropic/claude-haiku-4.5`). New souls should name the slug directly.
   Claude requests use the Messages API with prompt caching; other models
   use the Chat Completions API. Local AWS runs use AWS model IDs instead.
 - Everything after line 1 is the system prompt: personality, manners,
@@ -24,6 +28,9 @@ You are warm and friendly. You make everyone feel welcome...
   name (Ivan, Anton, Yura, Sasha, Maxim, Nikita, Vova, Dima, Egor, by
   house). A soul without `{name}` gets a `Your name is X.` line prepended.
 - UTF-8, at most 32768 bytes, no NUL bytes. Line endings are normalised.
+- Each reply gets 192 output tokens. In hosted games a reply that is cut
+  off at that limit, malformed, or otherwise unusable costs the gnome that
+  turn (it waits) instead of being retried. Keep the `reason` field short.
 
 For how to *play* well — when to gather, when to host, when to visit —
 see [strategy.md](strategy.md).

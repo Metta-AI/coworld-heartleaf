@@ -19,6 +19,9 @@
       "run": [
         "/bin/heartleaf"
       ],
+      "env": {
+        "HEARTLEAF_UNUSABLE_AS_WAIT": "true"
+      },
       "source_url": "https://github.com/Metta-AI/coworld-heartleaf/tree/master"
     },
     "config_schema": {

@@ -521,6 +521,19 @@ block:
     "hosted model calls identify the logical player slot"
   delEnv("COWORLD_LLM_ENDPOINT")
 
+echo "Testing legacy Bedrock soul models on the hosted endpoint"
+block:
+  doAssert "us.anthropic.claude-haiku-4-5-20251001-v1:0".hostedModelId() ==
+    "anthropic/claude-haiku-4.5"
+  doAssert "us.anthropic.claude-opus-4-8".hostedModelId() == "anthropic/claude-opus-4.8"
+  doAssert "us.amazon.nova-pro-v1:0".hostedModelId() == "amazon/nova-pro-v1"
+  doAssert "anthropic/claude-haiku-4.5".hostedModelId() == "anthropic/claude-haiku-4.5",
+    "canonical slugs pass through"
+  doAssert "us.xai.grok-4.6".hostedModelId() == "us.xai.grok-4.6",
+    "unknown ids are left for the endpoint to judge"
+  doAssert not modelTuning("us.anthropic.claude-opus-4-8".hostedModelId()).sampling,
+    "translated Opus 4.8 still omits temperature"
+
 echo "Testing Converse bodies for other providers"
 block:
   doAssert "us.anthropic.claude-opus-5".isAnthropicModel()
