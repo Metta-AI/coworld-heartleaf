@@ -5,7 +5,7 @@
 ## directly.
 
 import
-  std/[json, options, os, strutils],
+  std/[json, options, os, strutils, tables],
   ../../vendor/curly/curly,
   heartleaf/[bedrock_auth, decisions]
 
@@ -134,6 +134,26 @@ proc isAnthropicModel*(modelId: string): bool =
   ## other provider goes through Bedrock's provider-neutral Converse API.
   let id = modelId.toLowerAscii()
   id.startsWith("anthropic.") or ".anthropic." in id
+
+const LegacyHostedModels = {
+  # The Bedrock ids 0.2.7 documented for hosted souls. The hosted endpoint
+  # now rejects anything but canonical OpenRouter slugs, so souls submitted
+  # before that change are translated rather than failing their seat.
+  "us.anthropic.claude-haiku-4-5-20251001-v1:0": "anthropic/claude-haiku-4.5",
+  "us.anthropic.claude-sonnet-4-5-20250929-v1:0": "anthropic/claude-sonnet-4.5",
+  "us.anthropic.claude-sonnet-4-6": "anthropic/claude-sonnet-4.6",
+  "us.anthropic.claude-sonnet-5": "anthropic/claude-sonnet-5",
+  "us.anthropic.claude-opus-4-5-20251101-v1:0": "anthropic/claude-opus-4.5",
+  "us.anthropic.claude-opus-4-6-v1": "anthropic/claude-opus-4.6",
+  "us.anthropic.claude-opus-4-7": "anthropic/claude-opus-4.7",
+  "us.anthropic.claude-opus-4-8": "anthropic/claude-opus-4.8",
+  "us.anthropic.claude-opus-5": "anthropic/claude-opus-5",
+  "us.amazon.nova-pro-v1:0": "amazon/nova-pro-v1"
+}.toTable
+
+proc hostedModelId*(modelId: string): string =
+  ## The OpenRouter slug for a legacy Bedrock id; other ids pass through.
+  LegacyHostedModels.getOrDefault(modelId, modelId)
 
 proc bedrockHost(): string =
   ## The Bedrock Runtime host for the Region.
@@ -503,7 +523,8 @@ proc start*(client: BedrockClient, request: BedrockRequest) =
     client.started.add(request)
   of Live:
     let modelId =
-      if hasSidecarEndpoint(): getEnv("COWORLD_LLM_MODEL", request.modelId)
+      if hasSidecarEndpoint():
+        getEnv("COWORLD_LLM_MODEL", request.modelId.hostedModelId())
       else: request.modelId
     let body =
       if hasSidecarEndpoint() and not modelId.startsWith("anthropic/"):

@@ -255,7 +255,9 @@ See [viewer changes, validation and review limits](docs/viewer-stability.md).
 ## Hosted LLM access
 
 The game uses `COWORLD_LLM_ENDPOINT` for hosted decisions. Soul files name
-canonical OpenRouter models, such as `anthropic/claude-haiku-4.5`.
+canonical OpenRouter models, such as `anthropic/claude-haiku-4.5`. The ten
+Bedrock IDs from [docs/models.md](docs/models.md) are translated to their
+OpenRouter slugs, so souls submitted before the switch keep playing.
 `COWORLD_LLM_MODEL`, when injected by the platform, overrides the soul model.
 Claude calls use `/v1/messages`; other providers use `/v1/chat/completions`.
 Each request carries the villager's seat in `X-Coworld-Player-Slot`.

@@ -17,6 +17,10 @@ You are warm and friendly. You make everyone feel welcome...
   games, such as `anthropic/claude-haiku-4.5`. The platform supplies model
   access through `COWORLD_LLM_ENDPOINT`. An injected `COWORLD_LLM_MODEL`
   overrides this line for the episode. Unsupported models fail their seat.
+  The ten Bedrock IDs listed in [models.md](models.md) still work in hosted
+  games: the game translates each to its OpenRouter slug (for example
+  `us.anthropic.claude-haiku-4-5-20251001-v1:0` becomes
+  `anthropic/claude-haiku-4.5`). New souls should name the slug directly.
   Claude requests use the Messages API with prompt caching; other models
   use the Chat Completions API. Local AWS runs use AWS model IDs instead.
 - Everything after line 1 is the system prompt: personality, manners,
