@@ -28,6 +28,9 @@ You are warm and friendly. You make everyone feel welcome...
   name (Ivan, Anton, Yura, Sasha, Maxim, Nikita, Vova, Dima, Egor, by
   house). A soul without `{name}` gets a `Your name is X.` line prepended.
 - UTF-8, at most 32768 bytes, no NUL bytes. Line endings are normalised.
+- Each reply gets 192 output tokens. In hosted games a reply that is cut
+  off at that limit, malformed, or otherwise unusable costs the gnome that
+  turn (it waits) instead of being retried. Keep the `reason` field short.
 
 For how to *play* well — when to gather, when to host, when to visit —
 see [strategy.md](strategy.md).
