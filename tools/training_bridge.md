@@ -69,3 +69,21 @@ Record the source commit, binary digest, this prompt revision, day count, seed, 
 episode. The bridge uses a deterministic virtual clock and immediate scripted replies. It does not simulate provider
 latency, token limits, outages, or deadline failures. Therefore its outcomes must not be presented as matched hosted
 model benchmarks.
+
+## Prompt variation
+
+Reset accepts `promptVariant` and nonnegative `promptSeed`. Five training wordings
+are available: canonical, plain, numbered, questions, and reordered. Mixed selects
+one of those five using the independent prompt seed. Selection stays fixed for the
+episode, including history shrink and retries. Heldout-briefing and
+heldout-reference are evaluation-only; `split: "train"` rejects them.
+
+Only the game-owned response instruction varies. Souls, mechanics, scoring
+condition, house names, histories, and live reports remain unchanged. Canonical
+preserves the original prompt exactly. `semantic_view.prompt_template` identifies
+the bank, selected wording, seed, and hashes of the actual system and last user
+messages. `inference_mode` is `text_action`.
+
+Run `python3 tools/test_prompt_games.py out/training_bridge ORIGINAL_BRIDGE` to
+compare complete seven-day games across wordings and against the original source.
+These deterministic checks do not measure model quality or training stability.

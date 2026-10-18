@@ -3,7 +3,7 @@ import std/[json, os, posix, strutils, tables]
 import heartleaf
 import bitworld/spriteprotocol
 import heartleaf/[common, protocol, decisions, observation, brains, bedrock_client,
-    souls, villager]
+    souls, villager, prompts]
 
 const DinnerObjective = """Training objective (heartleaf-dinner-training-v1):
 The terminal score is the game's dinner score, not connection points.
@@ -65,7 +65,9 @@ proc nextObservation(): JsonNode =
     "kind": "decision", "decision_id": serial,
     "game": "heartleaf", "seat": request.playerSlot,
     "engine_seat": request.playerSlot, "turn": brain.turnIndex,
-    "semantic_view": {"report": request.messages[^1].content},
+    "semantic_view": {"report": request.messages[^1].content,
+      "prompt_template": brain.selection.promptMetadata(request.messages[0].content, request.messages[^1].content)},
+    "inference_mode": "text_action",
     "inbox": [], "messages": messages, "speech_messages": [],
     "typed_question": newJNull(),
     "action_schema": {
@@ -89,6 +91,9 @@ proc execute(command: JsonNode): JsonNode =
     sim.seatCount = players
     client = newScriptedBedrockClient()
     brain = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, seed)
+    brain.selection = promptSelection(command)
+    if command.hasKey("split") and command["split"].getStr() == "train":
+      doAssert brain.selection.selectedVariant notin {pvHeldoutBriefing, pvHeldoutReference}, "held-out wording is evaluation only"
     brain.unusableAsWait = true
     brain.timeoutAsWait = true
     for seat in 0 ..< players:

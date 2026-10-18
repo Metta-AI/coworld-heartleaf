@@ -5,7 +5,7 @@
 
 import
   std/[algorithm, json, os, sets, strutils, tables],
-  heartleaf/[common, protocol, decisions, observation, souls]
+  heartleaf/[common, protocol, decisions, observation, souls, prompts]
 
 const
   ## Food bands for interrupt detection only: crossing a band re-asks the
@@ -49,6 +49,7 @@ type
     writing: bool
 
   Villager* = ref object
+    selection*: PromptSelection
     houseIndex*: int
     name*: string
       ## The fixed gnome name (Ivan, Anton, ...), also the chat speaker.
@@ -391,7 +392,13 @@ proc logRequest*(villager: Villager, tag: string, messages: openArray[Conversati
   var rows = newJArray()
   for message in messages:
     rows.add(%*{"role": message.role, "content": message.content})
-  villager.logEntries.add(villager.logEntry("request", -1, $(%*{"tag": tag, "messages": rows})))
+  villager.logEntries.add(villager.logEntry("request", -1, $(%*{"tag": tag, "messages": rows,
+    "prompt_template": villager.selection.promptMetadata(messages[0].content, messages[^1].content)})))
+
+proc logPrivateEvidence*(villager: Villager, role: string, evidence: JsonNode) =
+  ## Private capture never enters conversation history or the public replay.
+  if getEnv("HEARTLEAF_TRAINING_DIR").len > 0:
+    villager.logEntries.add(villager.logEntry(role, -1, $evidence))
 
 proc logSystemPrompt*(villager: Villager) =
   ## Logs the system prompt once; it heads every request but is not a

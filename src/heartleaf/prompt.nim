@@ -3,7 +3,7 @@
 ## so every gnome understands the state report and answers in the JSON
 ## the executor can carry out.
 
-import std/strutils, heartleaf/[protocol, souls]
+import std/strutils, heartleaf/[protocol, souls, prompts]
 
 const
   ## The rules of the game as the model must understand them: response
@@ -102,7 +102,7 @@ proc housesText*(): string =
     result.add(" " & owner &
       (if i < PlayerNames.high: "," else: "."))
 
-proc systemPrompt*(soul: Soul, name: string): string =
+proc systemPrompt*(soul: Soul, name: string, selection: PromptSelection): string =
   ## The full system prompt for one gnome: the soul with the name filled
   ## in, then the mechanics every villager shares, then the house table.
   let cleanName =
@@ -116,5 +116,6 @@ proc systemPrompt*(soul: Soul, name: string): string =
       body.replace("{name}", cleanName)
     else:
       "Your name is " & cleanName & ". You are a Heartleaf gnome player.\n\n" & body
-  result.add("\n\n" & MechanicsBlock)
+  const CanonicalInstruction = "Response format:\nReturn only one JSON object and no prose."
+  result.add("\n\n" & selection.responseInstruction() & MechanicsBlock[CanonicalInstruction.len .. ^1])
   result.add("\n\n" & housesText())
