@@ -84,6 +84,11 @@ preserves the original prompt exactly. `semantic_view.prompt_template` identifie
 the bank, selected wording, seed, and hashes of the actual system and last user
 messages. `inference_mode` is `text_action`.
 
+`messages_sha256` also binds the full ordered conversation. For each message,
+append its role and content as UTF-8 fields, each prefixed by its decimal byte
+length and a colon, then hash the concatenated bytes with SHA-256. This retains
+message boundaries and catches changed history after context shrink.
+
 Run `python3 tools/test_prompt_games.py out/training_bridge ORIGINAL_BRIDGE` to
 compare complete seven-day games across wordings and against the original source.
 These deterministic checks do not measure model quality or training stability.

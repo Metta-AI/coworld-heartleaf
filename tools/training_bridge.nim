@@ -66,7 +66,7 @@ proc nextObservation(): JsonNode =
     "game": "heartleaf", "seat": request.playerSlot,
     "engine_seat": request.playerSlot, "turn": brain.turnIndex,
     "semantic_view": {"report": request.messages[^1].content,
-      "prompt_template": brain.selection.promptMetadata(request.messages[0].content, request.messages[^1].content)},
+      "prompt_template": brain.selection.promptMetadata(messages)},
     "inference_mode": "text_action",
     "inbox": [], "messages": messages, "speech_messages": [],
     "typed_question": newJNull(),

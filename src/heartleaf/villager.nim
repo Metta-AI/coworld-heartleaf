@@ -393,7 +393,7 @@ proc logRequest*(villager: Villager, tag: string, messages: openArray[Conversati
   for message in messages:
     rows.add(%*{"role": message.role, "content": message.content})
   villager.logEntries.add(villager.logEntry("request", -1, $(%*{"tag": tag, "messages": rows,
-    "prompt_template": villager.selection.promptMetadata(messages[0].content, messages[^1].content)})))
+    "prompt_template": villager.selection.promptMetadata(rows)})))
 
 proc logPrivateEvidence*(villager: Villager, role: string, evidence: JsonNode) =
   ## Private capture never enters conversation history or the public replay.

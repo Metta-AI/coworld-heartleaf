@@ -27,11 +27,17 @@ python3 tools/collect_posttrain.py \
   --seed 2 --seed 7 --max-days 7 \
   --output /tmp/heartleaf-training-runs
 
-python3 tools/export_posttrain.py \
+python3 -m pip install -r tools/requirements.txt
+python3 tools/export_candidates.py \
   --runs /tmp/heartleaf-training-runs \
-  --output /tmp/heartleaf-training-dataset \
-  --source-revision "$(git rev-parse HEAD)"
+  --output /tmp/heartleaf-private-candidates
 ```
+
+Commit source before collection. The collector records its revision, dirty status,
+binary and soul hashes, and configuration. It uses the normal game day length.
+Pass `--prompt-variant mixed --prompt-seed 3` to select one of five training
+wordings independently of the world seed. The two held-out variants are for
+evaluation only. Souls, rules, history, and scoring remain unchanged.
 
 The collector writes each seat's player-visible transcript and exact model
 request messages beside the game results when `HEARTLEAF_TRAINING_DIR` is set.
@@ -39,25 +45,32 @@ Request snapshots preserve the history actually sent after a context shrink;
 the exporter uses these snapshots rather than rebuilding prompts from earlier
 transcript rows. Collection and dataset directories are owner-only. The collector writes `completed.json` only
 after the server and soul uploaders exit successfully. The exporter checks
-that completion proof, event sequence, seat count, transcript sequence, and
-reply ticks agree. It retains decisions that the game accepted and splits
-whole games by seed into `train.jsonl` and `validation.jsonl`. The manifest
-records source revision, scores, and input hashes. The files contain soul
-prompts, observations, and model replies; keep them out of the repository.
+that completion proof, event sequence, seat count, transcript sequence, actual
+request hashes, and applied-action indexes agree. Private capture includes
+prepared request bodies, responses, normalized executed actions, retries, and
+abandonments. Mocked and scripted replies have unknown origin, never model or
+teacher provenance. These records never enter conversation history or public
+replay.
 
-The exported rows use the Metta post-training `Example` schema. From a Metta
-checkout with `metta-posttrain` installed, run:
+The exporter requires clean source and complete seven-day games. It rejects
+held-out wording and emits canonical Coworld decision/episode candidates in
+`trajectories.jsonl`. Its manifest requires independent review; it assigns no
+training labels or train/validation split. Wording replicas share the world-seed
+family. Unresolved request tags remain explicit, and hashes identify the original
+capture files reviewers need. Keep those files alongside the candidates.
 
-```sh
-uv run --package metta-posttrain --extra train python -m metta_posttrain.train \
-  --dataset /tmp/heartleaf-training-dataset \
-  --output /tmp/heartleaf-posttrain-run \
-  --model MODEL_OR_PATH --max-steps 1000 --max-length 8192
-```
+Use Metta's hosted trajectory review workflow to admit exact source hashes before
+training. A complete game, valid JSON, or an accepted action does not establish
+that a reply is a good learning target. Unknown-origin mocks cannot become model
+targets. Full histories can exceed context limits; inspect admitted examples and
+training overlength counts before model runs.
 
-Choose `--max-length` for the selected model and inspect the training
-manifest's `train_overlength` and `validation_overlength` counts. A full
-Heartleaf game carries its conversation history forward, so examples become
-longer as the game progresses. This trains a decision model from complete
-games; deploying that model through Heartleaf's hosted Bedrock provider is a
-separate model registration step.
+`tools/export_posttrain.py` remains the reader for historical transcripts written
+before capture-v1. Its historical automatic split is not the current collection
+or admission workflow. Do not use it for new capture-v1 data.
+
+The offline bridge has a separately versioned dinner-scoring condition; hosted
+souls retain the original connection-scoring instructions. Do not pool those
+conditions in matched model comparisons. See [the bridge contract](../tools/training_bridge.md).
+Deterministic checks and mocked capture runs do not establish model improvement
+or prevention of training collapse. Matched learning comparisons remain unrun.

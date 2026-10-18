@@ -26,7 +26,7 @@ jobs:
 
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
@@ -56,6 +56,9 @@ jobs:
       - name: Offline training bridge protocol tests
         run: python3 -m unittest discover -s tests -p 'test_training_bridge.py' -v
 
+      - name: Complete seven-day prompt comparisons
+        run: python3 tools/test_prompt_games.py out/training_bridge
+
       - name: Unit tests
         run: nim r tests/tests.nim
 
@@ -73,6 +76,23 @@ jobs:
 
       - name: Integration tests
         run: HEARTLEAF_SERVER=out/heartleaf nim r tests/integration.nim
+
+      - name: Full native capture and candidate export
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/heartleaf-prompt-venv"
+          "$RUNNER_TEMP/heartleaf-prompt-venv/bin/pip" install -r tools/requirements.txt
+          souls=()
+          for seat in {0..8}; do
+            souls+=(--soul players/friendly_villager/soul.md)
+          done
+          "$RUNNER_TEMP/heartleaf-prompt-venv/bin/python" tools/collect_posttrain.py \
+            --server out/heartleaf --player out/soul_player "${souls[@]}" \
+            --seed 7 --max-days 7 --timeout-seconds 2500 \
+            --mock-reply '{"action":"gather_plants"}' \
+            --output "$RUNNER_TEMP/heartleaf-capture"
+          "$RUNNER_TEMP/heartleaf-prompt-venv/bin/python" tools/test_capture_export.py \
+            "$RUNNER_TEMP/heartleaf-capture" "$RUNNER_TEMP/heartleaf-candidate-proof"
 
   static-replay:
     runs-on: ubuntu-latest

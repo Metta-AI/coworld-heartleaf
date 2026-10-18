@@ -39,10 +39,18 @@ proc selectedVariant*(selection: PromptSelection): PromptVariant =
   if selection.variant == pvMixed: PromptVariant(selection.seed mod 5)
   else: selection.variant
 
-proc promptMetadata*(selection: PromptSelection, system, user: string): JsonNode =
+proc promptMetadata*(selection: PromptSelection, messages: JsonNode): JsonNode =
+  let system = messages[0]["content"].getStr()
+  let user = messages[^1]["content"].getStr()
+  var encoded = ""
+  for message in messages:
+    for field in ["role", "content"]:
+      let value = message[field].getStr()
+      encoded.add($value.len & ":" & value)
   %*{"bank": PromptBankVersion, "variant": $selection.selectedVariant,
     "selection": $selection.variant, "seed": selection.seed,
-    "system_sha256": sha256(system).toHex, "user_sha256": sha256(user).toHex}
+    "system_sha256": sha256(system).toHex, "user_sha256": sha256(user).toHex,
+    "messages_sha256": sha256(encoded).toHex}
 
 proc selectionMetadata*(selection: PromptSelection): JsonNode =
   %*{"bank": PromptBankVersion, "variant": $selection.selectedVariant,
