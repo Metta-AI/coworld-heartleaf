@@ -37,6 +37,8 @@ jobs:
       - name: Install locked dependencies
         shell: bash
         run: |
+          # setup-nim-action downloads its installer into the checkout.
+          mv "$GITHUB_WORKSPACE/nim.tar.gz" "$RUNNER_TEMP/heartleaf-nim.tar.gz"
           # The workspace must be the parent of the checkout: Nimby 0.2
           # refuses to create one inside a git checkout, and Nim walks
           # up from the compiled file to find nim.cfg.
