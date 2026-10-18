@@ -42,6 +42,9 @@ def collect(
         if mock_reply:
             config["mockReply"] = mock_reply
         (run / "config.json").write_text(json.dumps(config) + "\n")
+        source_status = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=root, text=True
+        ).strip()
         (run / "capture.json").write_text(
             json.dumps(
                 {
@@ -51,13 +54,8 @@ def collect(
                         cwd=root,
                         text=True,
                     ).strip(),
-                    "source_dirty": bool(
-                        subprocess.check_output(
-                            ["git", "status", "--porcelain"],
-                            cwd=root,
-                            text=True,
-                        ).strip()
-                    ),
+                    "source_dirty": bool(source_status),
+                    "source_status": source_status,
                     "server_sha256": hashlib.sha256(
                         server_binary.read_bytes()
                     ).hexdigest(),

@@ -76,7 +76,10 @@ def export(runs: Path, output: Path) -> dict:
             capture_bytes = (run / "capture.json").read_bytes()
             capture = json.loads(capture_bytes)
             assert capture["schema"] == "heartleaf-private-capture/1"
-            assert not capture["source_dirty"], "candidate source must be committed"
+            assert not capture["source_dirty"], (
+                "candidate source must be committed: "
+                + (capture["source_status"] if "source_status" in capture else "paths not recorded")
+            )
             revision = capture["source_revision"]
             assert len(revision) == 40 and all(
                 c in "0123456789abcdef" for c in revision
