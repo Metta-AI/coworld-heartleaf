@@ -78,7 +78,11 @@ def export(runs: Path, output: Path) -> dict:
             assert capture["schema"] == "heartleaf-private-capture/1"
             assert not capture["source_dirty"], (
                 "candidate source must be committed: "
-                + (capture["source_status"] if "source_status" in capture else "paths not recorded")
+                + (
+                    capture["source_status"]
+                    if "source_status" in capture
+                    else "paths not recorded"
+                )
             )
             revision = capture["source_revision"]
             assert len(revision) == 40 and all(
@@ -136,7 +140,10 @@ def export(runs: Path, output: Path) -> dict:
                             messages[0]["role"] == "system"
                             and messages[-1]["role"] == "user"
                         )
-                        assert metadata["bank"] in {"heartleaf-rules-v1", "heartleaf-rules-v2"}
+                        assert metadata["bank"] in {
+                            "heartleaf-rules-v1",
+                            "heartleaf-rules-v2",
+                        }
                         assert (
                             metadata["selection"] == config["promptVariant"]
                             and metadata["seed"] == config["promptSeed"]
