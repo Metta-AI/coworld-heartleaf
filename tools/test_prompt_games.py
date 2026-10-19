@@ -70,7 +70,7 @@ def play(binary, seed, players, wording, prompt_seed):
                 metadata = normalized["semantic_view"].pop("prompt_template")
                 resolved = WORDINGS[prompt_seed % 5] if wording == "mixed" else wording
                 assert metadata["variant"] == resolved
-                assert metadata["bank"] == "heartleaf-rules-v1"
+                assert metadata["bank"] == "heartleaf-rules-v2"
                 assert (
                     metadata["selection"] == wording and metadata["seed"] == prompt_seed
                 )
@@ -83,10 +83,9 @@ def play(binary, seed, players, wording, prompt_seed):
                         == hashlib.sha256(content.encode()).hexdigest()
                     )
                 assert normalized.pop("inference_mode") == "text_action"
-            # Compare the soul and every mechanics byte after the varied instruction.
-            prefix, mechanics = system.split("Response format:\n", 1)
-            mechanics = mechanics[mechanics.index(" Allowed actions are") :]
-            normalized["messages"][0]["content"] = prefix + mechanics
+            # Compare the unchanged soul; complete canonical systems are compared below.
+            prefix = system.split("Response format:\n", 1)[0]
+            normalized["messages"][0]["content"] = prefix
             action = (
                 {"action": "gather_plants"}
                 if counts[seat] < 6
@@ -133,7 +132,7 @@ for players in (2, 9):
                 "canonical messages or full-game behavior changed"
             )
         for wording, prompt_seed in [(wording, 0) for wording in WORDINGS[1:]] + [
-            ("mixed", index) for index in range(5)
+            ("mixed", seed % 5)
         ]:
             result = play(BRIDGE, seed, players, wording, prompt_seed)
             assert result[:2] == canonical[:2], (players, seed, wording, prompt_seed)

@@ -17,7 +17,7 @@ type
     seed*: int
 
 const
-  PromptBankVersion* = "heartleaf-rules-v1"
+  PromptBankVersion* = "heartleaf-rules-v2"
 
 proc promptSelection*(node: JsonNode): PromptSelection =
   if node.kind != JObject:

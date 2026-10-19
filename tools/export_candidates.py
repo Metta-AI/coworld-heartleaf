@@ -136,7 +136,7 @@ def export(runs: Path, output: Path) -> dict:
                             messages[0]["role"] == "system"
                             and messages[-1]["role"] == "user"
                         )
-                        assert metadata["bank"] == "heartleaf-rules-v1"
+                        assert metadata["bank"] in {"heartleaf-rules-v1", "heartleaf-rules-v2"}
                         assert (
                             metadata["selection"] == config["promptVariant"]
                             and metadata["seed"] == config["promptSeed"]

@@ -33,7 +33,7 @@ def collect(
             "maxGames": 1,
             "seed": seed,
             "promptVariant": prompt_variant,
-            "promptSeed": prompt_seed,
+            "promptSeed": prompt_seed + offset if prompt_variant == "mixed" else prompt_seed,
         }
         if max_days:
             config["maxDays"] = max_days

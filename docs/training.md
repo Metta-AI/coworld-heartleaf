@@ -36,8 +36,11 @@ python3 tools/export_candidates.py \
 Commit source before collection. The collector records its revision, dirty status,
 binary and soul hashes, and configuration. It uses the normal game day length.
 Pass `--prompt-variant mixed --prompt-seed 3` to select one of five training
-wordings independently of the world seed. The two held-out variants are for
-evaluation only. Souls, rules, history, and scoring remain unchanged.
+wordings independently of the world seed, cycling across requested runs. The two held-out variants are for
+evaluation only. The v2 bank paraphrases conversation mode, movement actions, and dinner timing;
+section order varies. Souls, response fields, memory guidance, strategic advice,
+connection scoring, and canonical rules remain unchanged. Held-out wording uses
+separate paraphrases. The exporter still reads stored v1 captures.
 
 The collector writes each seat's player-visible transcript and exact model
 request messages beside the game results when `HEARTLEAF_TRAINING_DIR` is set.
@@ -74,3 +77,7 @@ souls retain the original connection-scoring instructions. Do not pool those
 conditions in matched model comparisons. See [the bridge contract](../tools/training_bridge.md).
 Deterministic checks and mocked capture runs do not establish model improvement
 or prevention of training collapse. Matched learning comparisons remain unrun.
+
+The CI wording workflow covers 32 complete seven-day games, including two and
+nine players. Native capture/export checks remain available manually through
+`tools/test_capture_export.py RUNS OUTPUT`; the duplicate CI collection was removed.
