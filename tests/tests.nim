@@ -6,7 +6,7 @@ import
   curly,
   heartleaf,
   heartleaf/[common, protocol, decisions, souls, observation, navigation,
-    villager, executor, report, prompt, pacing, bedrock_client, brains,
+    villager, executor, report, prompt, prompts, pacing, bedrock_client, brains,
     encounters],
   replays,
   ../tools/llm_chart
@@ -603,7 +603,7 @@ block:
 echo "Testing the system prompt"
 block:
   let soul = parseSoul("#!test-model\nYour name is {name}. You are shy.\n")
-  let text = systemPrompt(soul, "Vova")
+  let text = systemPrompt(soul, "Vova", PromptSelection())
   doAssert text.startsWith("Your name is Vova. You are shy."), "{name} is filled in"
   doAssert "{name}" notin text
   let sections = ["Response format:", "Conversation memory:", "Talking:",
@@ -624,7 +624,7 @@ block:
   doAssert "portal takes you" in text, "night is a portal, not a curfew"
   doAssert "Where line" in text, "location is in the mechanics"
   doAssert "Last JSON was ignored" in text, "ignored actions are told why"
-  let bare = systemPrompt(parseSoul("#!m\nJust a soul.\n"), "Ivan")
+  let bare = systemPrompt(parseSoul("#!m\nJust a soul.\n"), "Ivan", PromptSelection())
   doAssert bare.startsWith("Your name is Ivan. You are a Heartleaf gnome player."),
     "a soul without {name} gets a name line"
 
@@ -634,7 +634,7 @@ block:
   doAssert sim.addPlayer("alice", 0) == 0
   let soul = parseSoul("#!test-model\nYour name is {name}.\n")
   let villager = newVillager(0, soul, sim.worldLayoutFor().gardens.len)
-  villager.systemPrompt = systemPrompt(soul, villager.name)
+  villager.systemPrompt = systemPrompt(soul, villager.name, PromptSelection())
   let
     observation = sim.observe(0)
     navigation = sim.navigationFor()

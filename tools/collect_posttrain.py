@@ -1,6 +1,7 @@
 """Run complete local Heartleaf games and retain player transcripts."""
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -19,6 +20,8 @@ def collect(
     max_days: int,
     timeout_seconds: int,
     mock_reply: str,
+    prompt_variant: str,
+    prompt_seed: int,
 ) -> None:
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     for offset, seed in enumerate(seeds):
@@ -28,8 +31,11 @@ def collect(
         config = {
             "tokens": tokens,
             "maxGames": 1,
-            "daySeconds": 30,
             "seed": seed,
+            "promptVariant": prompt_variant,
+            "promptSeed": prompt_seed + offset
+            if prompt_variant == "mixed"
+            else prompt_seed,
         }
         if max_days:
             config["maxDays"] = max_days
@@ -37,13 +43,46 @@ def collect(
             config["maxTicks"] = max_ticks
         if mock_reply:
             config["mockReply"] = mock_reply
+        (run / "config.json").write_text(json.dumps(config) + "\n")
+        source_status = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=root, text=True
+        ).strip()
+        (run / "capture.json").write_text(
+            json.dumps(
+                {
+                    "schema": "heartleaf-private-capture/1",
+                    "source_revision": subprocess.check_output(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=root,
+                        text=True,
+                    ).strip(),
+                    "source_dirty": bool(source_status),
+                    "source_status": source_status,
+                    "server_sha256": hashlib.sha256(
+                        server_binary.read_bytes()
+                    ).hexdigest(),
+                    "player_sha256": hashlib.sha256(
+                        player_binary.read_bytes()
+                    ).hexdigest(),
+                    "souls_sha256": [
+                        hashlib.sha256(soul.read_bytes()).hexdigest() for soul in souls
+                    ],
+                    "config": config,
+                }
+            )
+            + "\n"
+        )
         environment = os.environ.copy()
         environment["COGAME_RESULTS_URI"] = (run / "results.json").as_uri()
         environment["HEARTLEAF_EVAL_ARTIFACT"] = "true"
         environment["HEARTLEAF_TRAINING_DIR"] = str(run)
         with (run / "server.log").open("w") as server_log:
             server = subprocess.Popen(
-                [str(server_binary), f"--port:{port + offset}", "--config:" + json.dumps(config)],
+                [
+                    str(server_binary),
+                    f"--port:{port + offset}",
+                    "--config:" + json.dumps(config),
+                ],
                 cwd=root,
                 env=environment,
                 stdout=server_log,
@@ -84,7 +123,9 @@ def collect(
                 for handle in logs:
                     handle.close()
         result = json.loads((run / "results.json").read_text())
-        (run / "completed.json").write_text(json.dumps({"seed": seed, "scores": result["scores"]}) + "\n")
+        (run / "completed.json").write_text(
+            json.dumps({"seed": seed, "scores": result["scores"]}) + "\n"
+        )
         print(seed, result["scores"], result["evaluation"]["event_count"])
 
 
@@ -101,6 +142,21 @@ if __name__ == "__main__":
     length.add_argument("--max-days", type=int, default=0)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--mock-reply", default="")
+    parser.add_argument(
+        "--prompt-variant",
+        default="canonical",
+        choices=(
+            "canonical",
+            "plain",
+            "numbered",
+            "questions",
+            "reordered",
+            "heldout-briefing",
+            "heldout-reference",
+            "mixed",
+        ),
+    )
+    parser.add_argument("--prompt-seed", type=int, default=0)
     options = parser.parse_args()
     if max(options.max_ticks, options.max_days) <= 0:
         parser.error("game length must be positive")
@@ -116,4 +172,6 @@ if __name__ == "__main__":
         options.max_days,
         options.timeout_seconds,
         options.mock_reply,
+        options.prompt_variant,
+        options.prompt_seed,
     )

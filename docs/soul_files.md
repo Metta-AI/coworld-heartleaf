@@ -42,6 +42,14 @@ text for every gnome, so a soul never needs to explain the rules:
 The exact text is `MechanicsBlock` in `src/heartleaf/prompt.nim`; nothing
 else is added.
 
+The game configuration can select `promptVariant` and an independent nonnegative
+`promptSeed`. Canonical preserves the original text. Plain, numbered, questions,
+and reordered paraphrase only the response-format instruction; mixed selects one
+of these five training wordings. Heldout-briefing and heldout-reference are
+evaluation-only. The selected wording stays fixed throughout the game. Soul text,
+rules, scoring, histories, and state reports are unchanged. Private request logs
+include the selection and hashes of the messages actually sent.
+
 ## Each turn
 
 The model receives the system prompt, the gnome's transcript so far, and

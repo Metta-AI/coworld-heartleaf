@@ -6,7 +6,7 @@
 import
   std/[algorithm, json, options, os, sets, strutils, tables],
   heartleaf/[common, protocol, decisions, observation, navigation, villager,
-    executor, report, prompt, pacing, bedrock_client, souls, encounters]
+    executor, report, prompt, pacing, bedrock_client, souls, encounters, prompts]
 
 const
   JoinGraceTicks = 12
@@ -37,6 +37,8 @@ type
     blockedNames*: seq[string]
     outputs*: seq[BrainOutputFor]
   Brains* = ref object
+    selection*: PromptSelection
+    captureIndex: int
     villagers*: Table[int, Villager]
     client*: BedrockClient
     budget*: RequestBudget
@@ -130,7 +132,8 @@ proc attachSoul*(brains: Brains, houseIndex: int, soul: Soul) =
   var villager = newVillager(houseIndex, soul, brains.layout.gardens.len)
   villager.gameNumber = brains.gameNumber
   villager.gameLog = brains.gameLog
-  villager.systemPrompt = systemPrompt(soul, villager.name)
+  villager.selection = brains.selection
+  villager.systemPrompt = systemPrompt(soul, villager.name, brains.selection)
   villager.logSystemPrompt()
   brains.villagers[houseIndex] = villager
   villager.logTurn("llm", brains.turnIndex)
@@ -159,6 +162,7 @@ proc resetForNewGame*(brains: Brains) =
   ## Fresh minds for a fresh village, same souls; log records start a
   ## new game number at sequence 0.
   inc brains.gameNumber
+  brains.captureIndex = 0
   var souls: seq[(int, Soul)]
   for houseIndex, villager in brains.villagers.pairs:
     souls.add((houseIndex, villager.soul))
@@ -203,8 +207,26 @@ proc abandonRequest(villager: Villager) =
   ## Forgets a request in flight; its reply is dropped when it lands.
   if villager.requestInFlight:
     villager.logLlm("abandon", "tag=" & villager.requestTag())
+    villager.logPrivateEvidence("abandoned", %*{"tag": villager.requestTag()})
   villager.requestInFlight = false
   villager.lastHeldInterrupt = ""
+
+proc recordApplied(brains: Brains, villager: Villager, tag: string,
+    applied: Decision, accepted: bool, reason = "") =
+  villager.logPrivateEvidence("applied", %*{
+    "tag": tag, "decision_index": brains.captureIndex,
+    "accepted": accepted, "rejection_reason": reason,
+    "action": {"action": applied.action.actionName(),
+      "targetName": applied.targetName, "houseIndex": applied.houseIndex,
+      "message": applied.message, "reason": applied.reason}})
+  inc brains.captureIndex
+
+proc recordReply(villager: Villager, reply: BedrockReply) =
+  villager.logPrivateEvidence("response", %*{
+    "tag": reply.tag, "text": reply.text, "body": reply.responseBody,
+    "http_status": reply.statusCode, "platform_call_id": reply.platformCallId,
+    "provider_request_id": reply.providerRequestId, "stop_reason": reply.stopReason,
+    "usage": reply.usage, "error": reply.error, "outcome": $reply.outcome})
 
 proc spendFailedDecision(
   brains: Brains, villager: Villager, observation: Observation,
@@ -225,6 +247,7 @@ proc spendFailedDecision(
   villager.retryBackoffSeconds = 0.0
   villager.failures = 0
   villager.applyDecision(observation, brains.layout, waitDecision(), fromModel = false)
+  brains.recordApplied(villager, reply.tag, waitDecision(), false, reason)
   villager.turnReady = true
   villager.log("llm unusable action=wait reason=" & reason)
   if reason == "deadline_exceeded":
@@ -253,8 +276,11 @@ proc startRequest(
     villager.logRequest(request.tag, request.messages)
   try:
     brains.client.start(request)
+    villager.logPrivateEvidence("transport", brains.client.requestEvidence)
   except CatchableError as e:
+    villager.logPrivateEvidence("transport", brains.client.requestEvidence)
     villager.lastError = e.msg
+    villager.recordReply(BedrockReply(tag: request.tag, error: e.msg))
     if brains.unusableAsWait:
       villager.lastRequestAt = now
       brains.spendFailedDecision(villager, observation,
@@ -664,6 +690,7 @@ proc handleReply(
           observation, brains.layout, decision, fromModel = true
         )
         brains.applySocial(villager, observation, decision)
+        brains.recordApplied(villager, reply.tag, decision, true)
       else:
         let error =
           if decision.valid:
@@ -682,6 +709,7 @@ proc handleReply(
         villager.applyDecision(
           observation, brains.layout, waitDecision(), fromModel = true
         )
+        brains.recordApplied(villager, reply.tag, waitDecision(), false, error)
         villager.log("llm ignored " & error & ", waiting")
       villager.turnReady = true
   of Transient:
@@ -763,6 +791,7 @@ proc pollReplies(
       continue
     if villager.houseIndex notin observations:
       continue
+    villager.recordReply(reply)
     brains.handleReply(villager, observations[villager.houseIndex], reply, now)
 
 proc scheduleRequests(

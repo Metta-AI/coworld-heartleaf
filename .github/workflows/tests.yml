@@ -37,6 +37,8 @@ jobs:
       - name: Install locked dependencies
         shell: bash
         run: |
+          # setup-nim-action downloads its installer into the checkout.
+          mv "$GITHUB_WORKSPACE/nim.tar.gz" "$RUNNER_TEMP/heartleaf-nim.tar.gz"
           # The workspace must be the parent of the checkout: Nimby 0.2
           # refuses to create one inside a git checkout, and Nim walks
           # up from the compiled file to find nim.cfg.
@@ -55,6 +57,9 @@ jobs:
 
       - name: Offline training bridge protocol tests
         run: python3 -m unittest discover -s tests -p 'test_training_bridge.py' -v
+
+      - name: Complete seven-day prompt comparisons
+        run: python3 tools/test_prompt_games.py out/training_bridge
 
       - name: Unit tests
         run: nim r tests/tests.nim

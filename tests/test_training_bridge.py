@@ -39,7 +39,9 @@ class TrainingBridgeTest(unittest.TestCase):
             )
             self.assertEqual(first["game"], "heartleaf")
             self.assertEqual(first["engine_seat"], first["seat"])
-            self.assertEqual(first["semantic_view"], {"report": first["messages"][-1]["content"]})
+            self.assertEqual(
+                first["semantic_view"]["report"], first["messages"][-1]["content"]
+            )
             self.assertEqual(first["inbox"], [])
             self.assertEqual(first["speech_messages"], [])
             self.assertIsNone(first["typed_question"])

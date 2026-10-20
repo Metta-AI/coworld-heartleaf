@@ -3,7 +3,7 @@ import
   flatty, jsony, pixie,
   bitworld/aseprite, bitworld/pixelfonts, bitworld/spriteprotocol,
   bitworld/resources, bitworld/sprites,
-  heartleaf/common, heartleaf/protocol, heartleaf/souls,
+  heartleaf/common, heartleaf/protocol, heartleaf/souls, heartleaf/prompts,
   heartleaf/observation, heartleaf/navigation, heartleaf/encounters,
   heartleaf/viewer_layout, heartleaf/pixel_emotes,
   replays
@@ -635,6 +635,7 @@ type
     cardSlots: array[HouseCount, int] # One-based slots, retained for this shot.
 
   RunConfig = ref object
+    selection: PromptSelection
     address: string
     port: int
     seed: int
@@ -6650,7 +6651,8 @@ when not defined(emscripten):
     mockReply = "",
     logDir = "",
     saveReplayPath = "",
-    runtimeConfig = RuntimeConfig()
+    runtimeConfig = RuntimeConfig(),
+    selection = PromptSelection()
   ) =
     ## Runs the Heartleaf websocket game server. A seat comes alive when its
     ## soul arrives; with tokens configured the village waits for every seat
@@ -6701,6 +6703,7 @@ when not defined(emscripten):
       newBedrockClient(HouseCount, mockReply),
       seed
     )
+    brains.selection = selection
     brains.onSeatFailure = proc(seat: int, message: string) =
       declarePlayerFailure(seat, message)
     if logDir.len > 0:
@@ -7057,6 +7060,8 @@ proc update(config: var RunConfig, jsonText: string) =
     )
   if node.kind != JObject:
     raise newException(HeartleafError, "Config must be a JSON object.")
+  if node.hasKey("promptVariant") or node.hasKey("promptSeed"):
+    config.selection = promptSelection(node)
   node.readConfigString("address", config.address)
   node.readConfigInt("port", config.port)
   node.readConfigInt("seed", config.seed)
@@ -7447,5 +7452,6 @@ when isMainModule and not defined(emscripten):
     mockReply = config.mockReply,
     logDir = config.logDir,
     saveReplayPath = localReplayPath,
-    runtimeConfig = runtimeConfig
+    runtimeConfig = runtimeConfig,
+    selection = config.selection
   )

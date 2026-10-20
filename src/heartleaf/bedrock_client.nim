@@ -60,6 +60,8 @@ type
     Scripted
 
   BedrockClient* = ref object
+    requestEvidence*: JsonNode
+      ## Last prepared request, without credentials; consumed synchronously by the host.
     kind: TransportKind
     curl: Curly
     promptCacheEnabled*: bool
@@ -489,6 +491,8 @@ proc scriptReply*(client: BedrockClient, reply: BedrockReply) =
 
 proc start*(client: BedrockClient, request: BedrockRequest) =
   ## Starts one request without blocking.
+  client.requestEvidence = %*{"tag": request.tag, "model": request.modelId,
+    "origin": "unknown", "body": newJNull()}
   inc client.inFlight
   if client.mockReply.len > 0:
     client.queued.add(BedrockReply(
@@ -517,6 +521,8 @@ proc start*(client: BedrockClient, request: BedrockRequest) =
         )
       else:
         converseBody(request.messages, modelId)
+    client.requestEvidence = %*{"tag": request.tag, "model": modelId,
+      "origin": "model", "body": body}
     client.curl.startRequest(
       "POST",
       bedrockUrl(modelId),
