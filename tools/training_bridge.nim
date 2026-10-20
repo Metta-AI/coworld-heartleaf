@@ -92,8 +92,8 @@ proc execute(command: JsonNode): JsonNode =
     client = newScriptedBedrockClient()
     brain = newBrains(sim.navigationFor(), sim.worldLayoutFor(), client, seed)
     brain.selection = promptSelection(command)
-    if command.hasKey("split") and command["split"].getStr() == "train":
-      doAssert brain.selection.selectedVariant notin {pvHeldoutBriefing, pvHeldoutReference}, "held-out wording is evaluation only"
+    if brain.selection.selectedVariant in {pvHeldoutBriefing, pvHeldoutReference}:
+      doAssert command.hasKey("split") and command["split"].getStr() in ["validation", "test"], "held-out wording requires an explicit evaluation split"
     brain.unusableAsWait = true
     brain.timeoutAsWait = true
     for seat in 0 ..< players:

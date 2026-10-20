@@ -101,21 +101,57 @@ proc mechanics(selection: PromptSelection): string =
   let talkingStart = MechanicsBlock.find("Talking:\n")
   let partyStart = MechanicsBlock.find("After dinner stay at the party")
   let restStart = MechanicsBlock.find("Repeating yourself:\n")
-  let heldout = selection.selectedVariant in {pvHeldoutBriefing, pvHeldoutReference}
-  let talking = if heldout:
+  let talking = case selection.selectedVariant
+    of pvHeldoutBriefing:
       """Conversation mode is shown as Talking: yes or Talking: no in the live report. Each incoming chat line is a separate user turn. In a conversation, only talk_to, say, and bye have an effect. Outside one, say and bye do nothing; use wait, wander, gather_plants, follow, go_home, go_to_house, or go_to_garden, or talk_to a neighbor to begin chatting. An illegal choice becomes a wait while the village continues, with a parenthetical explanation. A report saying Last JSON was ignored means that action had no effect this turn.
 Leaving requires bye accompanied by a spoken message. A say message reaches the whole group. With targetName and message, talk_to brings that gnome into the conversation if adjacent. Groups may expand to include every village gnome."""
-    else:
+
+    of pvPlain:
       """Talking is a mode, indicated by Talking: yes or Talking: no. Spoken lines arrive individually as user turns. While Talking: yes, talk_to, say, and bye are the only effective actions. While Talking: no, say and bye have no effect: use wait, wander, gather_plants, follow, go_home, go_to_house, or go_to_garden, or start conversation with talk_to beside another gnome. Illegal actions are ignored and become a wait; a parenthetical note explains why while the village advances. Last JSON was ignored confirms that the reported action did nothing this turn.
 To leave a conversation, send bye with a spoken message. say speaks to everyone in the group. talk_to plus targetName and message invites that adjacent gnome into the group, which can grow to contain the whole village."""
-  let actions = if heldout:
+    of pvNumbered:
+      """Use the report’s Talking: yes/no to identify your mode. Each spoken chat line arrives as one user turn. With Talking: yes, only talk_to, say, or bye works. With Talking: no, say and bye have no effect; choose wait, wander, gather_plants, follow, go_home, go_to_house, or go_to_garden, or use talk_to beside a gnome to start talking. An illegal action is ignored and replaced by waiting; the village advances and a parenthetical note explains the failure. Last JSON was ignored means that decision did nothing this turn.
+To end conversation, bye must include a spoken message. say is heard by the entire group. talk_to with targetName and message adds the named gnome when adjacent. The group may include every gnome in the village."""
+    of pvQuestions:
+      """Are you conversing? Check Talking: yes or Talking: no. Spoken chat lines come individually as user turns. What works during conversation? Only talk_to, say, and bye. What works outside it? wait, wander, gather_plants, follow, go_home, go_to_house, go_to_garden, or talk_to next to another gnome to begin; say and bye do nothing. What happens to an illegal action? You wait, the village moves on, and a parenthetical explanation appears. Last JSON was ignored confirms the action had no effect this turn.
+How do you leave? Use bye with a spoken message. Who hears say? Everyone in the conversation. How do you add someone? Send talk_to with targetName and message while that gnome is beside you. A conversation can include the entire village."""
+    of pvReordered:
+      """A say reaches all members of your conversation; talk_to with targetName and message brings in the named adjacent gnome. Leaving is possible only through bye with a spoken message. Groups can grow to the whole village.
+The report marks the mode as Talking: yes or Talking: no, and each spoken chat line is delivered as its own user turn. In yes mode, only talk_to, say, and bye have effects. In no mode, say and bye have none: select wait, wander, gather_plants, follow, go_home, go_to_house, go_to_garden, or begin chatting with talk_to beside someone. Illegal actions turn into waiting with a parenthetical explanation while the village continues. Last JSON was ignored says the decision had no effect this turn."""
+    of pvHeldoutReference:
+      """Mode indicator: Talking: yes / Talking: no in the live report. Chat input: one user turn per spoken line. Effective actions in yes mode: talk_to, say, bye. In no mode: say and bye have no effect; wait, wander, gather_plants, follow, go_home, go_to_house, go_to_garden are available, and talk_to starts conversation with an adjacent gnome. Illegal action: ignored, replaced with wait, parenthetical explanation supplied, village continues. Last JSON was ignored: no effect from that decision this turn.
+Exit requirement: bye plus a spoken message. say audience: all group members. Invitation: talk_to plus targetName and message adds that gnome if adjacent. Maximum group: every gnome in the village."""
+    else: raise newException(Defect, "expected resolved alternate wording")
+  let actions = case selection.selectedVariant
+    of pvHeldoutBriefing:
       """Choose gather_plants to visit gardens and collect their food, stopping after checking them all. follow tracks a named gnome and follows them indoors too. go_home takes you inside your own house to remain there; go_to_house does the same at the named gnome's house. go_to_garden waits outdoors at that gnome's door, moving inside just before 6:00pm for dinner. wait keeps you still. wander tours houses around the village so you encounter people."""
-    else:
+
+    of pvPlain:
       """gather_plants visits gardens and picks food until all gardens have been checked, then stops. follow walks with the named gnome and enters any house they enter. go_home walks INSIDE your own house and stays there. go_to_house walks INSIDE the named gnome's house and stays. go_to_garden waits OUTSIDE that gnome's door, then enters just before 6:00pm for dinner. wait stands still. wander goes house to house through the village so you meet people."""
-  let dinner = if heldout:
+    of pvNumbered:
+      """Choose a movement behavior: gather_plants visits gardens and picks food, stopping once every garden has been checked. follow accompanies a named gnome, including into houses. go_home enters your own house and remains there; go_to_house enters the named gnome’s house and remains there. go_to_garden waits outside at that gnome’s door, then enters just before 6:00pm for dinner. wait stays put. wander visits houses around the village to encounter people."""
+    of pvQuestions:
+      """How do you collect food? gather_plants checks gardens and picks food until all gardens are checked, then stops. How do you accompany someone? follow names a gnome and follows them even indoors. How do you stay inside? go_home enters your own house; go_to_house enters the named gnome’s house; both stay there. What does go_to_garden do? It waits outside at that gnome’s door, entering just before 6:00pm for dinner. How do you stay still or meet people? wait stands still; wander goes house to house through the village."""
+    of pvReordered:
+      """For an indoor destination, go_home walks into your own house and stays; go_to_house walks into the named gnome’s house and stays. go_to_garden instead waits outside at that gnome’s door and enters just before 6:00pm for dinner. To accompany a named gnome, follow walks with them and goes indoors when they do. To collect food, gather_plants visits and picks from gardens until all have been checked, then stops. To stay still, wait. To encounter people while touring the village’s houses, wander."""
+    of pvHeldoutReference:
+      """gather_plants: visit gardens, pick food, stop after checking every garden. follow: accompany the named gnome, including entry into houses. go_home: enter own house and remain. go_to_house: enter named gnome’s house and remain. go_to_garden: wait outside at named gnome’s door; enter just before 6:00pm for dinner. wait: stand still. wander: tour village houses to encounter people."""
+    else: raise newException(Defect, "expected resolved alternate wording")
+  let dinner = case selection.selectedVariant
+    of pvHeldoutBriefing:
       """Where in the live report distinguishes being inside a named house, outside a named garden at its door, or outside in the village. Eating at 6:00pm requires being INSIDE a house; a doorway does not count. Hosts score only while inside their own house with at least one guest also inside. When travel would miss 6:00pm, the Dinner bell line tells you to leave now. """
-    else:
+
+    of pvPlain:
       """Read Where to distinguish inside a named house, outside a named garden at its door, or elsewhere outside. You must be INSIDE a house at 6:00pm to eat; waiting at its door misses dinner. To score as host, be inside your own house together with at least one guest. A Dinner bell warning tells you to leave now when the walk would miss 6:00pm. """
+    of pvNumbered:
+      """Check Where for one of three locations: inside a named house, outside a named garden at its door, or outside in the village. Eating requires being INSIDE a house at 6:00pm. A host scores only when inside their own house with at least one guest inside too. Being at the door at 6:00pm misses dinner. If travel would miss that time, Dinner bell tells you to leave now. """
+    of pvQuestions:
+      """Where are you? The Where line distinguishes inside a named house, outside a named garden at its door, and outside in the village. When can you eat? At 6:00pm, only if INSIDE a house; a doorway misses dinner. When does a host score? When inside their own house with at least one guest also inside. When should you leave? Dinner bell says leave now when walking would miss 6:00pm. """
+    of pvReordered:
+      """Dinner bell warns you to leave now if the walk would miss 6:00pm. At that time, eating requires being INSIDE a house, not waiting at its door. To score as host, you must be inside your own house with at least one guest inside. Locate yourself using Where: inside a named house, outside a named garden at its door, or outside in the village. """
+    of pvHeldoutReference:
+      """Location source: Where in the live report. Categories: inside a named house; outside a named garden, at its door; outside in the village. Meal time: 6:00pm. Eating requirement: INSIDE a house; standing at the door misses dinner. Host scoring requirement: inside own house with at least one guest inside. Travel warning: Dinner bell says leave now when the walk would miss 6:00pm. """
+    else: raise newException(Defect, "expected resolved alternate wording")
   let sections = ["Talking:\n" & talking, "Actions:\n" & actions,
     "Dinner:\n" & dinner & MechanicsBlock[partyStart ..< restStart].strip()]
   let order = case selection.selectedVariant

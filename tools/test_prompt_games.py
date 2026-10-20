@@ -51,6 +51,7 @@ def play(binary, seed, players, wording, prompt_seed):
                 "players": players,
                 "promptVariant": wording,
                 "promptSeed": prompt_seed,
+                "split": "validation",
             }
         )
         first = observation
@@ -70,7 +71,7 @@ def play(binary, seed, players, wording, prompt_seed):
                 metadata = normalized["semantic_view"].pop("prompt_template")
                 resolved = WORDINGS[prompt_seed % 5] if wording == "mixed" else wording
                 assert metadata["variant"] == resolved
-                assert metadata["bank"] == "heartleaf-rules-v2"
+                assert metadata["bank"] == "heartleaf-rules-v3"
                 assert (
                     metadata["selection"] == wording and metadata["seed"] == prompt_seed
                 )
@@ -113,6 +114,7 @@ def play(binary, seed, players, wording, prompt_seed):
                 "players": players,
                 "promptVariant": wording,
                 "promptSeed": prompt_seed,
+                "split": "validation",
             }
         )
         assert reset == first
@@ -139,3 +141,24 @@ for players in (2, 9):
             games += 1
         print(players, seed, "seven-day wording games PASS", flush=True)
 print(games, "complete seven-day games PASS", flush=True)
+
+for wording in WORDINGS[-2:]:
+    for split in (None, "train", "unknown"):
+        command = {
+            "kind": "reset",
+            "seed": "91002",
+            "players": 2,
+            "promptVariant": wording,
+        }
+        if split is not None:
+            command["split"] = split
+        result = subprocess.run(
+            [BRIDGE],
+            cwd=ROOT,
+            input=json.dumps(command) + "\n",
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        assert result.returncode != 0 and not result.stdout
+print("Held-out admission rejects omitted, training, and unknown splits", flush=True)

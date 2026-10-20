@@ -143,6 +143,7 @@ def export(runs: Path, output: Path) -> dict:
                         assert metadata["bank"] in {
                             "heartleaf-rules-v1",
                             "heartleaf-rules-v2",
+                            "heartleaf-rules-v3",
                         }
                         assert (
                             metadata["selection"] == config["promptVariant"]

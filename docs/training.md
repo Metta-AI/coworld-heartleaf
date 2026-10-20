@@ -37,10 +37,10 @@ Commit source before collection. The collector records its revision, dirty statu
 binary and soul hashes, and configuration. It uses the normal game day length.
 Pass `--prompt-variant mixed --prompt-seed 3` to select one of five training
 wordings independently of the world seed, cycling across requested runs. The two held-out variants are for
-evaluation only. The v2 bank paraphrases conversation mode, movement actions, and dinner timing;
+evaluation only. The v3 bank independently paraphrases conversation mode, movement actions, and dinner timing;
 section order varies. Souls, response fields, memory guidance, strategic advice,
 connection scoring, and canonical rules remain unchanged. Held-out wording uses
-separate paraphrases. The exporter still reads stored v1 captures.
+separate paraphrases. The exporter still reads stored v1 and v2 captures.
 
 The collector writes each seat's player-visible transcript and exact model
 request messages beside the game results when `HEARTLEAF_TRAINING_DIR` is set.

@@ -76,7 +76,8 @@ Reset accepts `promptVariant` and nonnegative `promptSeed`. Five training wordin
 are available: canonical, plain, numbered, questions, and reordered. Mixed selects
 one of those five using the independent prompt seed. Selection stays fixed for the
 episode, including history shrink and retries. Heldout-briefing and
-heldout-reference are evaluation-only; `split: "train"` rejects them.
+heldout-reference require explicit `split: "validation"` or `split: "test"`.
+Omitted, training, and unknown splits reject held-out wording.
 
 Only the game-owned response instruction varies. Souls, mechanics, scoring
 condition, house names, histories, and live reports remain unchanged. Canonical
